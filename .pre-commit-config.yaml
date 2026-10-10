@@ -1,31 +1,63 @@
-# Pre-commit hooks run on every commit. Only fast checks live here; the test
-# suite and the Rust build run in CI. A hook that modifies files exits
-# non-zero, so the change must be re-staged and the commit re-run.
+# Pre-commit runs local checks before every commit. The hooks here are the
+# fast, deterministic ones that catch problems a reviewer would otherwise
+# have to point out. The full test suite and the Rust build run in CI.
+#
+# A hook whose tool is not installed yet, or whose target files are still
+# empty placeholders, is declared with the manual stage. A manual hook
+# runs only when it is invoked directly:
+#
+#     pre-commit run <hook-id> --all-files
+#
+# Each one is promoted to the default stage at the block where its
+# prerequisite lands. The promotion is recorded in that block's summary.
 
 repos:
+  # File hygiene. These hooks modify files in place and exit non-zero so
+  # the fix is visible and the commit is retried. That is their contract;
+  # it is not an error.
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    rev: v5.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-        args: [--allow-multiple-documents]
+        # The --unsafe flag permits the !!python/name: tag that
+        # mkdocs-material uses to wire the mermaid fence renderer in
+        # mkdocs.yml. Every YAML file in this repository is reviewed
+        # before it is committed, so the unsafe loader is acceptable.
+        args: [--unsafe]
       - id: check-toml
       - id: check-json
+        # The JSON stubs under schemas/ and .devcontainer/ are zero-byte
+        # placeholders for content that arrives at B-020 and B-003. A
+        # zero-byte file is not valid JSON, so validation cannot run on
+        # them yet. The exclusion is removed when the corresponding
+        # block writes real content.
+        exclude: ^(schemas/|\.devcontainer/)
       - id: check-merge-conflict
       - id: check-added-large-files
         args: [--maxkb=1000]
       - id: mixed-line-ending
+        # Normalizing to LF keeps Windows and Linux checkouts byte
+        # identical. Without this, every file edited on Windows under
+        # VS Code's default settings would carry CRLF into the
+        # repository and show up as a full-file diff.
         args: [--fix=lf]
       - id: check-case-conflict
 
+  # Python lint and format. Scoped to source, tests, and scripts so that
+  # the documentation and bundled skill markdown are left alone.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.9
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
+        files: ^(python|tests|scripts)/
       - id: ruff-format
+        files: ^(python|tests|scripts)/
 
+  # Local hooks. These use tools installed in the project's virtual
+  # environment, so they require the developer to have activated the venv.
   - repo: local
     hooks:
       - id: mypy
@@ -35,6 +67,9 @@ repos:
         pass_filenames: false
         files: ^python/codeguardian/.*\.py$
         types: [python]
+        # Promoted to the default stage at B-013, the first block that
+        # produces typed modules outside the errors package.
+        stages: [manual]
 
       - id: cargo-fmt
         name: cargo fmt
@@ -42,6 +77,8 @@ repos:
         language: system
         pass_filenames: false
         files: \.rs$
+        # Promoted at B-063, the first Rust crate with real content.
+        stages: [manual]
 
       - id: cargo-clippy
         name: cargo clippy
@@ -49,6 +86,8 @@ repos:
         language: system
         pass_filenames: false
         files: \.rs$
+        # Promoted at B-063 alongside cargo-fmt.
+        stages: [manual]
 
       - id: validate-schemas
         name: validate JSON schemas
@@ -56,3 +95,8 @@ repos:
         language: system
         pass_filenames: false
         files: ^schemas/.*\.json$
+        # The validator script is an empty stub until B-020. Running it
+        # now succeeds without doing anything, which is worse than not
+        # running it, because it hides the fact that no schema is being
+        # validated.
+        stages: [manual]

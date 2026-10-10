@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codeguardian"
+version = "1.0.0"
+description = "Safety-first refactoring agent with structural understanding and independent verification."
+readme = "../README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "CodeGuardian Contributors" }]
+keywords = ["refactoring", "code-analysis", "ai-agent", "mcp", "sandbox"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Refactoring",
+]
+
+# Dependencies match the root workspace pyproject so that an editable install
+# of this directory alone produces an importable package. The full build uses
+# maturin at the repository root to also compile the Rust extension; this file
+# is the pure-Python packaging path used when the native extension is not
+# required, for example when running unit tests against modules that do not
+# cross the Python-Rust boundary.
+dependencies = [
+    "langgraph>=0.2",
+    "langsmith>=0.1",
+    "anthropic>=0.40",
+    "openai>=1.50",
+    "mcp>=1.0",
+    "httpx>=0.27",
+    "jsonschema>=4.20",
+    "keyring>=25.0",
+    "rich>=13.0",
+    "textual>=0.80",
+    "prompt-toolkit>=3.0",
+    "tomli-w>=1.0",
+    "sqlite-vec>=0.1",
+]
+
+[project.urls]
+Homepage = "https://codeguardian.dev/"
+Repository = "https://github.com/codeguardian/codeguardian"
+Issues = "https://github.com/codeguardian/codeguardian/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["codeguardian"]

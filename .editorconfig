@@ -1,0 +1,31 @@
+# EditorConfig applies consistent formatting across every editor that supports
+# it. Language-specific formatting is owned by ruff for Python and by rustfmt
+# for Rust; this file only covers what those tools do not.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{toml,json,yaml,yml}]
+indent_size = 2
+
+[*.{js,ts,jsx,tsx}]
+indent_size = 2
+
+[*.{html,css,scss}]
+indent_size = 2
+
+[*.{md,markdown}]
+# Two trailing spaces are significant in Markdown: they force a hard line
+# break within a paragraph. Stripping them would silently change the rendered
+# document.
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

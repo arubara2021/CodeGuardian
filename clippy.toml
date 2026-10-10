@@ -1,0 +1,3 @@
+# clippy reads MSRV from package.rust-version in Cargo.toml. Restating it here
+# keeps the value explicit for anyone running clippy outside the workspace.
+msrv = "1.83"

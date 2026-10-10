@@ -133,7 +133,7 @@ This milestone produces the **first working capability**: given a local reposito
 | **M1-1** | Implement `LocalProvider` | M0-2 | Passes `RepositoryProviderContract`. |
 | **M1-2** | Implement `Recon Agent` (Python only) | M1-1, M0-4 | Produces `recon.json` with languages and dependency graph. |
 | **M1-3** | Implement Tree-sitter parsing in `codeguardian-kernel` | M0-3 | Parses Python files. Returns ASTs. |
-| **M1-4** | Implement `BubblewrapBackend` (Linux only) | M0-3 | Passes `SandboxBackendContract`. |
+| **M1-4** | Implement `BubblewrapBackend` (Linux) and `DockerBackend` (fallback) | M0-3 | Both pass `SandboxBackendContract`. Bubblewrap is the local Linux default. Docker is the fallback for Windows, CI, and Linux systems without user namespaces. |
 | **M1-5** | Implement `Audit Writer` (JSON-RPC) | M0-3 | Writes hash-chained JSONL. |
 | **M1-6** | Implement `Tester Agent` | M1-2 | Writes characterization tests for a target. |
 | **M1-7** | Implement `JSONRPCBridge` | M0-4 | Sandbox and audit calls work. |
@@ -148,7 +148,8 @@ This milestone produces the **first working capability**: given a local reposito
 | End-to-end run on a Python file | `codeguardian run --target utils/parser.py --directive "write tests"` completes. |
 | Characterization tests pass on old code | Sandbox reports `passed`. |
 | Audit log is written | `audit.jsonl` exists. Hash chain is valid. |
-| Bubblewrap isolates the sandbox | Network is disabled. Host filesystem is inaccessible. |
+| Bubblewrap isolates the sandbox on Linux | Network is disabled. Host filesystem is inaccessible. User namespaces enforced. |
+| Docker fallback works | Docker backend passes contract tests. Used when Bubblewrap is unavailable. |
 | PyO3 batches correctly | 500 files parsed in one call. |
 | CLI renders output | User sees Rich panels. |
 
@@ -271,6 +272,7 @@ This milestone makes CodeGuardian usable on real-world repositories.
 | **M4-5** | Implement `.codeguardianignore` parsing | M1-2 | Excludes node_modules, .venv, etc. |
 | **M4-6** | Add multi-language detection to Recon | M1-2 | Detects Python + TypeScript in one repo. |
 | **M4-7** | Add best-effort language warning to CLI | M4-6 | Warns when targeting best-effort language. |
+| **M4-8** | Implement `SeatbeltBackend` (macOS) | M1-4 | Passes `SandboxBackendContract` on macOS. Becomes the default macOS backend. |
 
 ### 8.2 Exit Criteria
 
@@ -545,6 +547,7 @@ A milestone is complete when:
 | **8** | Self-correction loop demonstrated. |
 | **9** | Local, GitHub, and GitLab providers work. |
 | **10** | `.codeguardianignore` excludes node_modules. |
+| **11** | Bubblewrap is the default local Linux backend. Docker is the fallback. Both pass contract tests. |
 
 If any gate criterion fails, v1.0 does not ship. No exceptions.
 

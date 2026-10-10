@@ -1,0 +1,61 @@
+# Python bytecode and build output.
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+
+# Python virtual environments.
+.venv/
+venv/
+ENV/
+env/
+
+# Test and coverage artifacts.
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# Type checking and linting caches.
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# Rust build output.
+target/
+
+# CodeGuardian runtime state when the data directory is placed inside the repo.
+.codeguardian/
+.codeguardian-cache/
+
+# Local environment and secrets. The .env.example file is tracked on purpose.
+.env
+.env.*
+!.env.example
+
+# IDE state.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating system metadata.
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Documentation build output.
+site/
+
+# Logs.
+*.log

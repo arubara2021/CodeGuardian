@@ -31,7 +31,9 @@ The sandbox runtime depends on the platform and the chosen backend.
 | **macOS** | Seatbelt | `sandbox-exec` (built in) | No install required. |
 | **Windows** | Docker | Docker Desktop | Docker Desktop with WSL2 backend. |
 
-Bubblewrap is Linux-only and requires unprivileged user namespaces to be enabled in the kernel. Most modern distributions enable this by default. If not, the setup command detects it and warns.
+Bubblewrap is the recommended local Linux backend. It starts in ~43ms (vs. ~490ms for Docker), uses 10–20MB of memory (vs. 50–100MB for Docker), requires no daemon, and runs rootless. It is Linux-only and requires unprivileged user namespaces to be enabled in the kernel. Most modern distributions enable this by default. If not, the setup command detects it and warns.
+
+Docker remains available as a fallback for Windows, CI, and any Linux system where Bubblewrap is unavailable.
 
 Seatbelt is built into macOS. It uses the `sandbox-exec` command and a Scheme-like profile generated at runtime. No install is required.
 
@@ -378,7 +380,7 @@ Phase 2 — Context Gathering........... ✓ 4,200 tokens
 Phase 3 — Safety Net.................. ✓ 18 tests, 2 contract assertions
 Phase 4 — Refactor.................... ✓ diff produced
 Phase 5 — Sandbox Verification........ ✓ all tests pass
-Phase 6 — Independent Verification.... 
+Phase 6 — Independent Verification....
   Verify with a second model? (y/N) y
   Correctness verifier................ ✓ pass
   Security verifier................... ✓ pass
@@ -428,7 +430,13 @@ sudo sysctl -w kernel.unprivileged_userns_clone=1
 
 Some distributions (such as Ubuntu 24.04+) restrict unprivileged user namespaces via AppArmor. If Bubblewrap fails, check `kernel.apparmor_restrict_unprivileged_userns` and disable the restriction if appropriate for your environment.
 
-**Firecracker (optional):**
+**Docker (fallback):**
+
+If Bubblewrap is unavailable on your system, Docker Desktop can be used as a fallback backend. It is slower (490ms cold start vs. 43ms for Bubblewrap) and requires a running daemon, but it works on any platform.
+
+```bash
+# Verify Docker is running
+docker info
 
 Firecracker requires KVM. Verify:
 

@@ -1,0 +1,64 @@
+# The Dockerfiles under docker/ build sandbox base images. They install a
+# language runtime and a test runner and do not need any of the CodeGuardian
+# source, documentation, or test fixtures. Everything below is excluded from
+# the build context so image builds stay fast and small.
+
+# Source code and fixtures.
+python/
+rust/
+tests/
+scripts/
+prompts/
+schemas/
+skills/
+docs/
+examples/
+benchmarks/
+
+# Version control and CI configuration.
+.git/
+.github/
+.devcontainer/
+.gitignore
+.gitattributes
+
+# Build output.
+target/
+build/
+dist/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Caches and coverage.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+
+# CodeGuardian runtime state.
+.codeguardian/
+
+# Local environment and secrets. The .env.example template is intentionally kept.
+.env
+.env.*
+!.env.example
+.codeguardianignore
+
+# IDE and operating system metadata.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Documentation build output.
+site/
+
+# Logs.
+*.log

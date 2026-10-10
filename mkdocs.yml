@@ -1,0 +1,96 @@
+site_name: CodeGuardian
+site_description: Safety-first refactoring agent with structural understanding and independent verification.
+site_url: https://codeguardian.dev/
+repo_url: https://github.com/codeguardian/codeguardian
+repo_name: codeguardian/codeguardian
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; CodeGuardian Contributors
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: 00-index.md
+  - Overview: 01-project-overview.md
+  - Goals and Non-Goals: 02-goals-non-goals-metrics.md
+  - Requirements: 03-requirements.md
+  - Architecture: 04-architecture.md
+  - Data Model: 05-data-model.md
+  - API Contracts: 06-api-contracts.md
+  - VS Code Extension Contract: 06.1-vscode-extension-contract.md
+  - Tech Stack: 07-tech-stack.md
+  - Repository Structure: 08-repository-structure.md
+  - Module Relationships: 08A-module-relationships.md
+  - Environment Setup: 09-environment-setup.md
+  - Testing, CI, and Deployment: 10-testing-cicd-deployment.md
+  - Security, Performance, Observability: 11-security-performance-observability.md
+  - Roadmap: 12-roadmap.md
+  - Risks, Assumptions, Decisions: 13-risks-assumptions-decisions.md
+  - Model Strategy: 14-model-strategy.md
+  - Verification Architecture: 15-verification-architecture.md
+  - Context Engineering: 16-context-engineering.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/codeguardian/codeguardian
+
+strict: true

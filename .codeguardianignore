@@ -1,0 +1,42 @@
+# CodeGuardian's own exclusion patterns. These apply on top of the built-in
+# Tier 1 exclusions documented in 13-risks-assumptions-decisions.md, and use
+# the same syntax as .gitignore.
+
+# Vendored dependencies and build output are never scanned as source.
+node_modules/
+vendor/
+.venv/
+venv/
+env/
+dist/
+build/
+target/
+wheelhouse/
+*.egg-info/
+
+# Generated code that is not a refactor target.
+site/
+*.generated.py
+*.generated.ts
+*_pb2.py
+
+# Snapshot files under test fixtures are compared, not refactored.
+tests/e2e/fixtures/**/*.snapshot
+
+# Caches and local runtime state.
+.codeguardian/
+.codeguardian-cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+__pycache__/
+
+# Secrets. The .env.example template is intentionally kept.
+.env
+.env.*
+!.env.example
+
+# IDE state.
+.vscode/
+.idea/

@@ -493,4 +493,4 @@ CodeGuardian tracks context quality over time.
 - `07-tech-stack.md` — AST caching, SQLite caching
 - `11-security-performance-observability.md` — performance budgets, secret redaction
 - `14-model-strategy.md` — model roles and context requirements
-- `15-verification-architecture.md` — diff-only context for 
+- `15-verification-architecture.md` — diff-only context for

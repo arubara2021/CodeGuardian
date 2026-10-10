@@ -47,7 +47,7 @@ These are risks arising from the hybrid Python/Rust architecture, the parsing la
 
 | ID | Risk | Probability | Impact | Mitigation |
 |---|---|---|---|---|
-| **R-S1** | **Sandbox escape via kernel exploit.** Docker and Bubblewrap share the host kernel. A kernel vulnerability can be exploited to escape the sandbox. Bubblewrap and rootless Podman may actually open a bigger attack surface through user namespaces. | Medium | Critical | Tiered backends. Firecracker for untrusted code. Defense in depth: network isolation, CPU/memory quotas, process limits, drop all capabilities, seccomp filters. |
+| **R-S1** | **Sandbox escape via kernel exploit.** Bubblewrap and Docker share the host kernel. A kernel vulnerability can be exploited to escape the sandbox. Bubblewrap and rootless Podman may open a bigger attack surface through user namespaces. | Medium | Critical | Tiered backends. Bubblewrap is the v1 local Linux default (rootless, minimal audit surface). Docker is the fallback. Firecracker is the cloud backend (hardware isolation). Defense in depth: network isolation, CPU/memory quotas, process limits, drop all capabilities, seccomp filters. |
 | **R-S2** | **Firecracker escape CVE.** Two of three microVM engines now carry escape-class CVEs on public record within a ~4-month period. Firecracker's jailer had a symlink-based host file overwrite vulnerability (CVE-2026-1386). Cloud Hypervisor had an escape-class CVE (CVE-2026-45782). | Medium | Critical | Keep Firecracker patched. Use the jailer. Treat microVMs as one layer, not the only layer. Defense in depth. |
 | **R-S3** | **MCP tool poisoning.** Malicious instructions embedded within a tool's metadata (name, schema, description) without execution. Evaluation on 20 prominent LLM agents revealed a widespread vulnerability, with one model achieving an attack success rate of 72.8%. The harmful actions occur only after a seemingly correct tool has been invoked. | High | Critical | Validate every MCP tool description and schema. Use `mcp-scan` or equivalent. Treat tool descriptions as untrusted input. Human approval for new MCP servers. |
 | **R-S4** | **MCP plugin privilege escalation.** Insufficient privilege separation enables privilege escalation, misinformation propagation, and data tampering. Less popular plugins often contain disproportionately high-risk operations. | High | High | Manifest-declared permissions. Enforce at the Policy Engine. Reject undeclared access. Audit every plugin. |
@@ -103,6 +103,7 @@ These are risks arising from the hybrid Python/Rust architecture, the parsing la
 | **R-SC3** | **External dependency breaks.** A model provider changes its API. A framework releases a breaking change. | Medium | Medium | Abstract behind interfaces. Pin versions. Test against multiple providers. |
 | **R-SC4** | **Scope creep.** The project grows beyond what one person can build. | High | High | This document. Non-goals. Release mapping. The v1.0 gate. |
 | **R-SC5** | **Model cost exceeds budget.** Token consumption is unpredictable. | Medium | Medium | Context Pack budget. Retry cap. Cost visibility in run summary. Local model support. |
+| **R-SC6** | **Bubblewrap cgroups v2 wiring takes longer than expected.** cgroup v2 setup varies by distribution. Attaching a sandbox to a cgroup slice requires systemd integration and careful privilege handling. | Medium | Medium | Follow the systemd `systemd-run --user --scope` pattern. Test on Ubuntu, Fedora, and Arch in M1. Fall back to Docker if cgroups v2 is unavailable. |
 
 ---
 
@@ -190,6 +191,7 @@ Every significant decision, with its rationale, alternatives, and status. Nothin
 | **D-028** | 2026-10-07 | v1.0 ships with M0–M4 only. | Legacy refactoring, Python + TypeScript, local + GitHub + GitLab, blast radius, three verifiers, checkpointing, consent, audit trail. | Include M5–M7 in v1 (rejected: scope too large for a solo developer). | Active |
 | **D-029** | 2026-10-07 | Blast radius gate: proceed, review, block. | A raw count of callers is not a risk assessment. A calibrated score with an explicit recommendation turns the analysis into a decision. | No gate (rejected: high blast radius changes proceed silently). | Active |
 | **D-030** | 2026-10-07 | Contract assertions: natural language + test expression. | Natural language captures the assumption. A test expression makes it checkable. Both are required. | Natural language only (rejected: not checkable). Test expression only (rejected: misses the human-readable assumption). | Active |
+| **D-031** | 2026-10-08 | Bubblewrap is the v1 local Linux sandbox backend. Docker is the fallback. Seatbelt is M4 (macOS). Firecracker is M7 (cloud). | Bubblewrap starts in ~43ms (vs. ~490ms for Docker), uses 10–20MB of memory (vs. 50–100MB), requires no daemon, and runs rootless. Roughly equivalent isolation at the kernel level with a smaller audit surface. cgroups v2 handles resource limits. | Docker-only local (rejected: 10x slower cold start, requires daemon, higher memory). gVisor-only (rejected: 2x slower than Docker). | Active |
 
 ---
 
@@ -242,7 +244,8 @@ Mitigations are prioritized by risk severity.
 
 | Priority | Risk | Mitigation | Milestone |
 |---|---|---|---|
-| **P0** | R-S1 Sandbox escape | Tiered backends. Firecracker for untrusted code. Defense in depth. | M1, M7 |
+| **P0** | R-S1 Sandbox escape | Bubblewrap as v1 local Linux default. Docker fallback. Firecracker for cloud. Defense in depth. | M1, M7 |
+| **P0** | R-S1 Sandbox escape — local Linux | cgroups v2 for resource limits. User namespaces enforced. Seccomp filters. | M1 |
 | **P0** | R-P1 Semantic drift | Contract assertions. Independent verifiers. Blast radius analysis. | M2, M3 |
 | **P0** | R-P2 Self-review failure | Independent verifiers on a different model family. Fresh context. Diff-only. | M3 |
 | **P0** | R-M1 Orchestration failure | Centralized orchestrator. Phase gates. Checkpointing. | M3 |

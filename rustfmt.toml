@@ -1,0 +1,4 @@
+# rustfmt reads edition and other defaults from Cargo.toml. The only setting
+# that must be pinned here is the line ending, so that CI on Linux and
+# developer machines on Windows produce byte-identical output.
+newline_style = "Unix"

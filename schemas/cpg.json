@@ -1,0 +1,86 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/cpg/v1.0.json",
+    "title": "Code Property Graph Metadata",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "repo_id",
+        "commit_hash",
+        "node_count",
+        "edge_count",
+        "binary_path",
+        "built_at"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "const": "1.0"
+        },
+        "repo_id": {
+            "type": "string"
+        },
+        "commit_hash": {
+            "type": "string"
+        },
+        "node_count": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "edge_count": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "build_duration_ms": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "built_at": {
+            "type": "string",
+            "format": "date-time"
+        },
+        "incremental": {
+            "type": "boolean"
+        },
+        "binary_path": {
+            "type": "string"
+        },
+        "languages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "name",
+                    "file_count"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "file_count": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "node_count": {
+                        "type": "integer",
+                        "minimum": 0
+                    }
+                }
+            }
+        },
+        "edge_types": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "integer",
+                "minimum": 0
+            }
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

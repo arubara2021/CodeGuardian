@@ -1,0 +1,173 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/plugin-manifest/v1.1.json",
+    "title": "Plugin Manifest",
+    "type": "object",
+    "required": [
+        "name",
+        "version",
+        "type",
+        "interface_version",
+        "permissions"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$"
+        },
+        "version": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "type": {
+            "type": "string",
+            "enum": [
+                "language",
+                "provider",
+                "tool",
+                "verifier",
+                "reporter",
+                "sandbox"
+            ]
+        },
+        "interface_version": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+$"
+        },
+        "description": {
+            "type": "string"
+        },
+        "author": {
+            "type": "string"
+        },
+        "license": {
+            "type": "string"
+        },
+        "language": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "tree_sitter_grammar": {
+                    "type": "string"
+                },
+                "test_runner": {
+                    "type": "string"
+                },
+                "refactor_rules": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "reliability_tier": {
+                    "type": "string",
+                    "enum": [
+                        "high",
+                        "best-effort"
+                    ]
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the language block. Allows a language plugin to declare additional configuration specific to its grammar or test runner without a version bump."
+                }
+            }
+        },
+        "provider": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "api_version": {
+                    "type": "string"
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the provider block. Allows a provider plugin to declare provider-specific metadata without a version bump."
+                }
+            }
+        },
+        "sandbox": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "backend_type": {
+                    "type": "string",
+                    "enum": [
+                        "bubblewrap",
+                        "seatbelt",
+                        "firecracker",
+                        "docker",
+                        "custom"
+                    ]
+                },
+                "supported_platforms": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "isolation_level": {
+                    "type": "string",
+                    "enum": [
+                        "os",
+                        "hardware"
+                    ]
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the sandbox block. Allows a sandbox plugin to declare backend-specific metadata without a version bump."
+                }
+            }
+        },
+        "permissions": {
+            "type": "object",
+            "required": [
+                "filesystem",
+                "network"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "filesystem": {
+                    "type": "string",
+                    "enum": [
+                        "none",
+                        "sandbox_only",
+                        "read_only",
+                        "full"
+                    ]
+                },
+                "network": {
+                    "type": "boolean"
+                },
+                "process_spawn": {
+                    "type": "boolean"
+                },
+                "env_read": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the permissions block. Allows a plugin to declare a new class of permission without a version bump, and without changing the enforcement layer."
+                }
+            }
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

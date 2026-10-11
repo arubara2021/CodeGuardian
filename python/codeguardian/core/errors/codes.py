@@ -14,6 +14,8 @@ __all__ = [
     "APPLY_AUTH_FAILED",
     "APPLY_CONFLICT",
     "APPLY_PARTIAL",
+    "CONFIG_INVALID",
+    "CONFIG_PARSE_ERROR",
     "DIFF_COMPUTE_FAILED",
     "FILE_BINARY",
     "FILE_NOT_FOUND",
@@ -51,6 +53,7 @@ __all__ = [
     "SANDBOX_OOM",
     "SANDBOX_QUOTA_EXCEEDED",
     "SANDBOX_TIMEOUT",
+    "SECRET_KEYCHAIN_ERROR",
     "SYS_INTERNAL",
     "SYS_INVARIANT_VIOLATED",
     "SYS_NOT_IMPLEMENTED",
@@ -133,6 +136,24 @@ PLUGIN_DISABLED = "PLUGIN_DISABLED"
 NET_TIMEOUT = "NET_TIMEOUT"
 NET_UNREACHABLE = "NET_UNREACHABLE"
 NET_DNS_FAILED = "NET_DNS_FAILED"
+
+# Configuration codes. CONFIG_INVALID is raised when the parsed content
+# of a config file violates the schema: a wrong type, a missing required
+# key, an unknown key, a value outside an allowed set. CONFIG_PARSE_ERROR
+# is raised when the file cannot be parsed at all: malformed TOML syntax,
+# an unexpected byte sequence, a file that is not a regular file. The two
+# codes are separated because the correct user action differs: fix the
+# content versus fix the syntax.
+CONFIG_INVALID = "CONFIG_INVALID"
+CONFIG_PARSE_ERROR = "CONFIG_PARSE_ERROR"
+
+# Secret storage codes. SECRET_KEYCHAIN_ERROR is raised when the
+# operating system keychain cannot be reached or refuses an operation.
+# The typical causes are a missing keychain backend in a minimal
+# container, a locked keychain on macOS, or a keyring daemon that is not
+# running on Linux. The user resolves it by configuring their
+# environment, not by editing a config file.
+SECRET_KEYCHAIN_ERROR = "SECRET_KEYCHAIN_ERROR"
 
 # Internal codes indicate a defect in CodeGuardian itself, not a failure
 # of an external system. SYS_INVARIANT_VIOLATED in particular is only

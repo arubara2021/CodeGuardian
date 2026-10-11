@@ -1,0 +1,53 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/consent/v1.0.json",
+    "title": "Apply Consent Record",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "consent_id",
+        "run_id",
+        "granted_at",
+        "scope"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "const": "1.0"
+        },
+        "consent_id": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "run_id": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "granted_at": {
+            "type": "string",
+            "format": "date-time"
+        },
+        "granted_by": {
+            "type": "string"
+        },
+        "scope": {
+            "type": "string",
+            "enum": [
+                "apply",
+                "verify"
+            ]
+        },
+        "diff_hash": {
+            "type": "string"
+        },
+        "rollback_ref": {
+            "type": "string"
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

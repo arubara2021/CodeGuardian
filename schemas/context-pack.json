@@ -1,0 +1,119 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/context-pack/v1.1.json",
+    "title": "Context Pack",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "target",
+        "files",
+        "token_budget",
+        "token_count",
+        "blast_aware"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "const": "1.1"
+        },
+        "target": {
+            "type": "object",
+            "required": [
+                "path",
+                "language"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "path": {
+                    "type": "string"
+                },
+                "language": {
+                    "type": "string"
+                },
+                "symbol": {
+                    "type": "string"
+                },
+                "line_range": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    },
+                    "minItems": 2,
+                    "maxItems": 2
+                }
+            }
+        },
+        "blast_aware": {
+            "type": "boolean"
+        },
+        "files": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "path",
+                    "content_hash",
+                    "reason"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "path": {
+                        "type": "string"
+                    },
+                    "content_hash": {
+                        "type": "string"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "enum": [
+                            "target",
+                            "direct_import",
+                            "caller",
+                            "callee",
+                            "test",
+                            "config",
+                            "contract"
+                        ]
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Only present in ephemeral packs; not persisted."
+                    }
+                }
+            }
+        },
+        "contract_assertions": {
+            "type": "array",
+            "items": {
+                "type": "object"
+            }
+        },
+        "token_budget": {
+            "type": "integer",
+            "minimum": 1
+        },
+        "token_count": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "truncated": {
+            "type": "boolean",
+            "default": false
+        },
+        "truncation_strategy": {
+            "type": "string",
+            "enum": [
+                "none",
+                "summarize",
+                "drop_oldest",
+                "sliding_window"
+            ]
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

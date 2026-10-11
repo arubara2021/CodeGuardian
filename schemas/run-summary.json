@@ -1,0 +1,122 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/run-summary/v1.1.json",
+    "title": "Run Summary",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "run_id",
+        "status",
+        "headline",
+        "key_findings"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "const": "1.1"
+        },
+        "run_id": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "status": {
+            "type": "string",
+            "enum": [
+                "success",
+                "failure",
+                "stopped",
+                "dry_run"
+            ]
+        },
+        "headline": {
+            "type": "string"
+        },
+        "blast_radius_headline": {
+            "type": "string"
+        },
+        "key_findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "type",
+                    "message"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "truth_report",
+                            "drift_report",
+                            "blast_radius",
+                            "contract_violation",
+                            "coverage_gap",
+                            "test_result",
+                            "verifier_verdict",
+                            "refactor_result",
+                            "skill_proposal"
+                        ]
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": [
+                            "info",
+                            "warning",
+                            "critical"
+                        ]
+                    },
+                    "extensions": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "Extension bag for a single key finding. Allows a phase to attach structured detail to a finding without adding a new finding type to the enum."
+                    }
+                }
+            }
+        },
+        "skill_proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "description": {
+                        "type": "string"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                    },
+                    "extensions": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "Extension bag for a skill proposal. Allows the skill curator to attach retrieval evidence or effectiveness projections without a version bump."
+                    }
+                }
+            }
+        },
+        "duration_seconds": {
+            "type": "number",
+            "minimum": 0
+        },
+        "next_steps": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

@@ -1,11 +1,14 @@
-"""Invariants for the error code taxonomy.
+"""Invariants for the error code taxonomy and the retry engine.
 
-The taxonomy is the vocabulary every other component depends on. When it
-drifts, the failures are silent: a retry loop that never fires, a code
-that maps to no category, an exception that loses its identity when it
-crosses a component boundary. This test catches all of those before they
-reach a runtime path.
+The taxonomy is the vocabulary every other component depends on. The
+retry engine is the single loop that acts on the taxonomy's policies.
+When either drifts, the failures are silent: a retry loop that never
+fires, a code that maps to no category, an exception that loses its
+identity when it crosses a component boundary. This test catches all of
+those before they reach a runtime path.
 """
+
+import asyncio
 
 import pytest
 
@@ -18,9 +21,32 @@ from codeguardian.core.errors import (
     UnknownCodeError,
     category_of,
     codes,
+    compute_delay,
+    retry_async,
     retry_policy_of,
+    retry_sync,
     taxonomy,
 )
+
+
+class _RecordingSleep:
+    """A sync sleep stand-in that records the delays it was given."""
+
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+
+
+class _RecordingAsyncSleep:
+    """An async sleep stand-in that records the delays it was given."""
+
+    def __init__(self) -> None:
+        self.calls: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
 
 
 def test_error_code_values_are_unique():
@@ -190,3 +216,265 @@ def test_retry_policy_map_is_immutable():
         taxonomy.RETRY_POLICY[ErrorCategory.SYSTEM] = RetryPolicy(  # type: ignore[index]
             retryable=False, max_retries=0, backoff=Backoff.NONE
         )
+
+
+def test_compute_delay_returns_zero_for_none_backoff():
+    policy = RetryPolicy(retryable=False, max_retries=0, backoff=Backoff.NONE)
+    assert compute_delay(1, policy) == 0.0
+
+
+def test_compute_delay_fixed_returns_constant():
+    policy = RetryPolicy(retryable=True, max_retries=3, backoff=Backoff.FIXED)
+    assert compute_delay(1, policy) == compute_delay(2, policy)
+    assert compute_delay(2, policy) == compute_delay(5, policy)
+
+
+def test_compute_delay_exponential_within_expected_bounds():
+    policy = RetryPolicy(retryable=True, max_retries=10, backoff=Backoff.EXPONENTIAL)
+    # Attempt 1: base * 1 * jitter in [0.5, 1.5] -> [0.25, 0.75].
+    for _ in range(50):
+        delay = compute_delay(1, policy)
+        assert 0.25 <= delay <= 0.75
+    # Attempt 3: base * 4 * jitter in [0.5, 1.5] -> [1.0, 3.0].
+    for _ in range(50):
+        delay = compute_delay(3, policy)
+        assert 1.0 <= delay <= 3.0
+
+
+def test_compute_delay_caps_at_max():
+    policy = RetryPolicy(retryable=True, max_retries=100, backoff=Backoff.EXPONENTIAL)
+    # At a very high attempt the delay must still be bounded.
+    for _ in range(50):
+        delay = compute_delay(50, policy)
+        assert delay <= 30.0
+
+
+def test_compute_delay_rejects_attempt_below_one():
+    policy = RetryPolicy(retryable=True, max_retries=3, backoff=Backoff.EXPONENTIAL)
+    with pytest.raises(ValueError):
+        compute_delay(0, policy)
+    with pytest.raises(ValueError):
+        compute_delay(-1, policy)
+
+
+def test_compute_delay_accepts_seeded_rng_for_determinism():
+    import random
+
+    policy = RetryPolicy(retryable=True, max_retries=3, backoff=Backoff.EXPONENTIAL)
+    rng_a = random.Random(1234)
+    rng_b = random.Random(1234)
+    assert compute_delay(1, policy, rng=rng_a) == compute_delay(1, policy, rng=rng_b)
+
+
+def test_retry_sync_returns_immediately_on_success():
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+
+    def succeed() -> int:
+        calls["n"] += 1
+        return 42
+
+    assert retry_sync(succeed, sleep=sleep) == 42
+    assert calls["n"] == 1
+    assert sleep.calls == []
+
+
+def test_retry_sync_passes_arguments_through():
+    sleep = _RecordingSleep()
+
+    def add(a: int, b: int, *, factor: int = 1) -> int:
+        return (a + b) * factor
+
+    assert retry_sync(add, 2, 3, factor=10, sleep=sleep) == 50
+
+
+def test_retry_sync_retries_network_until_exhaustion():
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+
+    def fail() -> None:
+        calls["n"] += 1
+        raise CodeGuardianError(ErrorCode.NET_TIMEOUT, "boom")
+
+    with pytest.raises(CodeGuardianError) as excinfo:
+        retry_sync(fail, sleep=sleep)
+    assert excinfo.value.code is ErrorCode.NET_TIMEOUT
+    # 1 initial attempt + 5 retries from NETWORK policy.
+    assert calls["n"] == 6
+    assert len(sleep.calls) == 5
+
+
+def test_retry_sync_retries_sandbox_once():
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+
+    def fail() -> None:
+        calls["n"] += 1
+        raise CodeGuardianError(ErrorCode.SANDBOX_TIMEOUT, "slow")
+
+    with pytest.raises(CodeGuardianError):
+        retry_sync(fail, sleep=sleep)
+    # 1 initial + 1 retry from SANDBOX policy.
+    assert calls["n"] == 2
+    assert len(sleep.calls) == 1
+
+
+def test_retry_sync_does_not_retry_user_error():
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+
+    def fail() -> None:
+        calls["n"] += 1
+        raise CodeGuardianError(ErrorCode.FILE_NOT_FOUND, "missing")
+
+    with pytest.raises(CodeGuardianError):
+        retry_sync(fail, sleep=sleep)
+    assert calls["n"] == 1
+    assert sleep.calls == []
+
+
+def test_retry_sync_respects_category_filter():
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+
+    def fail() -> None:
+        calls["n"] += 1
+        raise CodeGuardianError(ErrorCode.NET_TIMEOUT, "boom")
+
+    # NET_TIMEOUT is in the NETWORK category. Restricting to MODEL
+    # prevents any retry, even though the underlying policy is retryable.
+    with pytest.raises(CodeGuardianError):
+        retry_sync(fail, retry_categories={ErrorCategory.MODEL}, sleep=sleep)
+    assert calls["n"] == 1
+    assert sleep.calls == []
+
+
+def test_retry_sync_translates_stdlib_exception():
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+
+    def fail() -> None:
+        calls["n"] += 1
+        raise ConnectionRefusedError("nope")
+
+    with pytest.raises(CodeGuardianError) as excinfo:
+        retry_sync(fail, sleep=sleep)
+    assert excinfo.value.code is ErrorCode.NET_UNREACHABLE
+    # NETWORK category, so 1 initial + 5 retries.
+    assert calls["n"] == 6
+
+
+def test_retry_sync_preserves_cause_chain():
+    sleep = _RecordingSleep()
+
+    def fail() -> None:
+        raise ValueError("original")
+
+    with pytest.raises(CodeGuardianError) as excinfo:
+        retry_sync(fail, sleep=sleep)
+    # The typed error is SYS_INTERNAL. Its __cause__ is the original.
+    assert excinfo.value.code is ErrorCode.SYS_INTERNAL
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+def test_retry_sync_calls_on_retry_hook():
+    sleep = _RecordingSleep()
+    hook_calls: list[tuple[int, float, ErrorCode]] = []
+
+    def hook(attempt: int, delay: float, exc: CodeGuardianError) -> None:
+        hook_calls.append((attempt, delay, exc.code))
+
+    def fail() -> None:
+        raise CodeGuardianError(ErrorCode.SANDBOX_TIMEOUT, "slow")
+
+    with pytest.raises(CodeGuardianError):
+        retry_sync(fail, on_retry=hook, sleep=sleep)
+    assert len(hook_calls) == 1
+    assert hook_calls[0][0] == 1
+    assert hook_calls[0][2] is ErrorCode.SANDBOX_TIMEOUT
+
+
+def test_retry_sync_propagates_keyboard_interrupt():
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+
+    def fail() -> None:
+        calls["n"] += 1
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        retry_sync(fail, sleep=sleep)
+    assert calls["n"] == 1
+    assert sleep.calls == []
+
+
+def test_retry_sync_propagates_system_exit():
+    sleep = _RecordingSleep()
+    calls = {"n": 0}
+
+    def fail() -> None:
+        calls["n"] += 1
+        raise SystemExit(2)
+
+    with pytest.raises(SystemExit):
+        retry_sync(fail, sleep=sleep)
+    assert calls["n"] == 1
+
+
+async def test_retry_async_returns_immediately_on_success():
+    sleep = _RecordingAsyncSleep()
+    calls = {"n": 0}
+
+    async def succeed() -> str:
+        calls["n"] += 1
+        return "ok"
+
+    assert await retry_async(succeed, sleep=sleep) == "ok"
+    assert calls["n"] == 1
+    assert sleep.calls == []
+
+
+async def test_retry_async_retries_network_until_exhaustion():
+    sleep = _RecordingAsyncSleep()
+    calls = {"n": 0}
+
+    async def fail() -> None:
+        calls["n"] += 1
+        raise CodeGuardianError(ErrorCode.NET_TIMEOUT, "boom")
+
+    with pytest.raises(CodeGuardianError):
+        await retry_async(fail, sleep=sleep)
+    assert calls["n"] == 6
+    assert len(sleep.calls) == 5
+
+
+async def test_retry_async_propagates_cancelled_error():
+    sleep = _RecordingAsyncSleep()
+    calls = {"n": 0}
+
+    async def fail() -> None:
+        calls["n"] += 1
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await retry_async(fail, sleep=sleep)
+    assert calls["n"] == 1
+    assert sleep.calls == []
+
+
+async def test_retry_async_respects_category_filter():
+    sleep = _RecordingAsyncSleep()
+    calls = {"n": 0}
+
+    async def fail() -> None:
+        calls["n"] += 1
+        raise CodeGuardianError(ErrorCode.NET_TIMEOUT, "boom")
+
+    with pytest.raises(CodeGuardianError):
+        await retry_async(
+            fail,
+            retry_categories={ErrorCategory.SANDBOX},
+            sleep=sleep,
+        )
+    assert calls["n"] == 1
+    assert sleep.calls == []

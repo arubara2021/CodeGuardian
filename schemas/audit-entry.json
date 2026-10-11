@@ -1,0 +1,265 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/audit-entry/v1.1.json",
+    "title": "Audit Entry",
+    "type": "object",
+    "required": [
+        "entry_id",
+        "run_id",
+        "timestamp",
+        "phase",
+        "payload_hash",
+        "prev_hash",
+        "entry_hash"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "entry_id": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "run_id": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "timestamp": {
+            "type": "string",
+            "format": "date-time"
+        },
+        "phase": {
+            "type": "string",
+            "enum": [
+                "preflight",
+                "reconnaissance",
+                "blast_radius",
+                "context",
+                "safety_net",
+                "refactor",
+                "sandbox_verify",
+                "independent_verify",
+                "output",
+                "consent",
+                "apply"
+            ]
+        },
+        "agent": {
+            "type": "string",
+            "enum": [
+                "recon",
+                "blast_radius",
+                "analyst",
+                "tester",
+                "writer",
+                "correctness_verifier",
+                "security_verifier",
+                "contract_verifier",
+                "skill_curator",
+                "orchestrator",
+                "cli"
+            ]
+        },
+        "model": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "input": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "prompt_hash": {
+                    "type": "string"
+                },
+                "context_hash": {
+                    "type": "string"
+                },
+                "directive": {
+                    "type": "string"
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the input section. Allows a later phase to record an additional kind of input reference without a version bump."
+                }
+            }
+        },
+        "output": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "diff_hash": {
+                    "type": "string"
+                },
+                "tokens_in": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "tokens_out": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the output section. Allows a later phase to record an additional kind of output reference without a version bump."
+                }
+            }
+        },
+        "blast_radius": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "direct_callers": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "transitive_callers": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "contract_violations": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "coverage_gaps": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "blast_score": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                },
+                "recommendation": {
+                    "type": "string",
+                    "enum": [
+                        "proceed",
+                        "review",
+                        "block"
+                    ]
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the blast radius summary. This section already grew once when the audit entry moved from version 1.0 to 1.1, and it is expected to grow again as new blast radius metrics are added."
+                }
+            }
+        },
+        "result": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "success",
+                        "failure",
+                        "skipped",
+                        "stopped"
+                    ]
+                },
+                "tests_passed": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "tests_failed": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "retries": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "error": {
+                    "type": "string"
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the result section. Allows a later phase to record additional result detail without a version bump."
+                }
+            }
+        },
+        "verification": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "correctness": {
+                    "type": "object"
+                },
+                "security": {
+                    "type": "object"
+                },
+                "contract": {
+                    "type": "object"
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the verification section. Allows a new verifier type to be recorded without a version bump."
+                }
+            }
+        },
+        "consent": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "requested": {
+                    "type": "boolean"
+                },
+                "granted": {
+                    "type": "boolean"
+                },
+                "granted_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": [
+                        "apply",
+                        "verify"
+                    ]
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the consent section. Allows a later phase to record additional consent detail without a version bump."
+                }
+            }
+        },
+        "plan_approval_id": {
+            "type": "string"
+        },
+        "checkpoint_id": {
+            "type": "string"
+        },
+        "rollback_ref": {
+            "type": "string"
+        },
+        "payload_hash": {
+            "type": "string"
+        },
+        "prev_hash": {
+            "type": "string"
+        },
+        "entry_hash": {
+            "type": "string"
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

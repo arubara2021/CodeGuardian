@@ -1,12 +1,15 @@
-"""Typed errors and retry classification for every CodeGuardian component.
+"""Typed errors, retry classification, translation, and redaction.
 
 Callers import the public surface from this package rather than from the
 individual modules, so the internal file layout is free to change without
-touching call sites. ``codes.py`` holds the raw string constants;
-``taxonomy.py`` holds the classification and the exception class;
-``translation.py`` converts standard library exceptions into typed errors.
+touching call sites. The package has five responsibilities, each in its
+own module: raw string codes, category classification and the typed
+exception, translation from standard library exceptions, the retry
+engine, and the redaction walker.
 """
 
+from .redaction import DEFAULT_MARKER, redact
+from .retry import compute_delay, retry_async, retry_sync
 from .taxonomy import (
     Backoff,
     CodeGuardianError,
@@ -22,12 +25,17 @@ from .translation import translate, typed
 __all__ = [
     "Backoff",
     "CodeGuardianError",
+    "DEFAULT_MARKER",
     "ErrorCategory",
     "ErrorCode",
     "RetryPolicy",
     "UnknownCodeError",
     "category_of",
+    "compute_delay",
+    "redact",
+    "retry_async",
     "retry_policy_of",
+    "retry_sync",
     "translate",
     "typed",
 ]

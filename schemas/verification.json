@@ -1,0 +1,112 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/verification/v1.1.json",
+    "title": "Verifier Verdict",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "verifier_type",
+        "model",
+        "verdict",
+        "timestamp"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "const": "1.1"
+        },
+        "verifier_type": {
+            "type": "string",
+            "enum": [
+                "correctness",
+                "security",
+                "contract"
+            ]
+        },
+        "model": {
+            "type": "object",
+            "required": [
+                "id",
+                "provider"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the model block. Allows a verifier plugin to record model parameters (temperature, prompt version, context window) without a version bump."
+                }
+            }
+        },
+        "verdict": {
+            "type": "string",
+            "enum": [
+                "pass",
+                "fail",
+                "uncertain"
+            ]
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+        },
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "severity",
+                    "message"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "severity": {
+                        "type": "string",
+                        "enum": [
+                            "info",
+                            "warning",
+                            "critical"
+                        ]
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "location": {
+                        "type": "string"
+                    },
+                    "evidence_hash": {
+                        "type": "string"
+                    },
+                    "extensions": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "Extension bag for a single finding. Allows a verifier plugin to emit plugin-specific fields (CWE identifier, code snippet, rule reference) without a version bump."
+                    }
+                }
+            }
+        },
+        "context_hash": {
+            "type": "string"
+        },
+        "timestamp": {
+            "type": "string",
+            "format": "date-time"
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

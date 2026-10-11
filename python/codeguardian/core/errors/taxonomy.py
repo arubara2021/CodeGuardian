@@ -133,6 +133,10 @@ class ErrorCode(str, Enum):
     NET_UNREACHABLE = codes.NET_UNREACHABLE
     NET_DNS_FAILED = codes.NET_DNS_FAILED
 
+    CONFIG_INVALID = codes.CONFIG_INVALID
+    CONFIG_PARSE_ERROR = codes.CONFIG_PARSE_ERROR
+    SECRET_KEYCHAIN_ERROR = codes.SECRET_KEYCHAIN_ERROR
+
     SYS_INTERNAL = codes.SYS_INTERNAL
     SYS_NOT_IMPLEMENTED = codes.SYS_NOT_IMPLEMENTED
     SYS_INVARIANT_VIOLATED = codes.SYS_INVARIANT_VIOLATED
@@ -189,11 +193,6 @@ def _resolve_code(code: ErrorCode | str) -> ErrorCode:
         raise UnknownCodeError(str(code)) from exc
 
 
-# The category of every code. This is a complete mapping: the test suite
-# asserts that the key set equals the ErrorCode member set. Prefix does
-# not determine category; the semantic cause of the failure does. For
-# example, MODEL_AUTH_FAILED is an auth error, not a model error, because
-# the correct response is the same as for REPO_AUTH_FAILED.
 CATEGORY_MAP: Mapping[ErrorCode, ErrorCategory] = MappingProxyType(
     {
         ErrorCode.REPO_CLONE_FAILED: ErrorCategory.NETWORK,
@@ -236,6 +235,9 @@ CATEGORY_MAP: Mapping[ErrorCode, ErrorCategory] = MappingProxyType(
         ErrorCode.NET_TIMEOUT: ErrorCategory.NETWORK,
         ErrorCode.NET_UNREACHABLE: ErrorCategory.NETWORK,
         ErrorCode.NET_DNS_FAILED: ErrorCategory.NETWORK,
+        ErrorCode.CONFIG_INVALID: ErrorCategory.USER,
+        ErrorCode.CONFIG_PARSE_ERROR: ErrorCategory.USER,
+        ErrorCode.SECRET_KEYCHAIN_ERROR: ErrorCategory.USER,
         ErrorCode.SYS_INTERNAL: ErrorCategory.SYSTEM,
         ErrorCode.SYS_NOT_IMPLEMENTED: ErrorCategory.SYSTEM,
         ErrorCode.SYS_INVARIANT_VIOLATED: ErrorCategory.SYSTEM,
@@ -243,11 +245,6 @@ CATEGORY_MAP: Mapping[ErrorCode, ErrorCategory] = MappingProxyType(
 )
 
 
-# The default retry policy for each category. The values are taken from
-# 06-api-contracts.md section 15.3, which describes retry behavior per
-# category rather than per code. Where a specific code needs a policy
-# different from its category's default, the code appears in
-# RETRY_POLICY_OVERRIDES below instead.
 RETRY_POLICY: Mapping[ErrorCategory, RetryPolicy] = MappingProxyType(
     {
         ErrorCategory.USER: RetryPolicy(retryable=False, max_retries=0, backoff=Backoff.NONE),
@@ -267,12 +264,6 @@ RETRY_POLICY: Mapping[ErrorCategory, RetryPolicy] = MappingProxyType(
 )
 
 
-# Per-code overrides for codes whose behavior differs from their
-# category's default. The documentation for the model category says:
-# "Retry up to 3 times if rate-limited. Never retry if context exceeded."
-# The rate-limit case is the category default; the context-exceeded case
-# is the override below, because retrying a request whose context is too
-# large will fail identically every time.
 RETRY_POLICY_OVERRIDES: Mapping[ErrorCode, RetryPolicy] = MappingProxyType(
     {
         ErrorCode.MODEL_CONTEXT_EXCEEDED: RetryPolicy(
@@ -292,8 +283,7 @@ def category_of(code: ErrorCode | str) -> ErrorCategory:
         The ``ErrorCategory`` for the code.
 
     Raises:
-        UnknownCodeError: If the code is not present in the taxonomy. The
-            caller passed a string that does not match any known code.
+        UnknownCodeError: If the code is not present in the taxonomy.
     """
     resolved = _resolve_code(code)
     category = CATEGORY_MAP.get(resolved)
@@ -331,14 +321,13 @@ class CodeGuardianError(Exception):
     Every raise site in the codebase uses this class or a subclass. The
     orchestrator, the CLI, and the MCP server inspect the ``code``,
     ``category``, and ``retry_policy`` attributes to decide whether to
-    retry, to escalate to the user, or to map to an exit code. That
-    decision is made once, here, and never duplicated at the raise site.
+    retry, to escalate to the user, or to map to an exit code.
 
     The ``details`` argument is copied at construction time so that a
     caller mutating its own dictionary after raising does not change the
     error that was recorded. The ``evidence`` argument is a short,
     human-readable string that points at the artifact that proves the
-    failure, such as a run identifier, a log line, or a file location.
+    failure.
     """
 
     def __init__(

@@ -1,0 +1,187 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/blast-radius/v1.0.json",
+    "title": "Blast Radius Report",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "run_id",
+        "target",
+        "change_kind",
+        "direct_callers",
+        "transitive_callers",
+        "contract_violations",
+        "coverage_gaps",
+        "blast_score",
+        "recommendation",
+        "generated_at"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "const": "1.0"
+        },
+        "run_id": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "target": {
+            "type": "object",
+            "required": [
+                "path",
+                "qualified_name"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "path": {
+                    "type": "string"
+                },
+                "qualified_name": {
+                    "type": "string"
+                },
+                "language": {
+                    "type": "string"
+                }
+            }
+        },
+        "change_kind": {
+            "type": "string",
+            "enum": [
+                "syntactic",
+                "semantic",
+                "contract",
+                "signature"
+            ]
+        },
+        "direct_callers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "qualified_name",
+                    "path",
+                    "line"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "qualified_name": {
+                        "type": "string"
+                    },
+                    "path": {
+                        "type": "string"
+                    },
+                    "line": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "call_kind": {
+                        "type": "string",
+                        "enum": [
+                            "direct",
+                            "inherited",
+                            "decorated",
+                            "dynamic"
+                        ]
+                    }
+                }
+            }
+        },
+        "transitive_callers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "qualified_name",
+                    "path",
+                    "depth"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "qualified_name": {
+                        "type": "string"
+                    },
+                    "path": {
+                        "type": "string"
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "minimum": 1
+                    }
+                }
+            }
+        },
+        "contract_violations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "caller",
+                    "assumption",
+                    "risk"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "caller": {
+                        "type": "string"
+                    },
+                    "assumption": {
+                        "type": "string"
+                    },
+                    "risk": {
+                        "type": "string",
+                        "enum": [
+                            "info",
+                            "warning",
+                            "critical"
+                        ]
+                    },
+                    "evidence": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "coverage_gaps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "caller",
+                    "reason"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "caller": {
+                        "type": "string"
+                    },
+                    "reason": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "blast_score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+        },
+        "recommendation": {
+            "type": "string",
+            "enum": [
+                "proceed",
+                "review",
+                "block"
+            ]
+        },
+        "generated_at": {
+            "type": "string",
+            "format": "date-time"
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

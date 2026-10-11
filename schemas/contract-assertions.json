@@ -1,0 +1,65 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/contract-assertions/v1.0.json",
+    "title": "Contract Assertions",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "run_id",
+        "assertions"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "const": "1.0"
+        },
+        "run_id": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "assertions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "caller",
+                    "assumption",
+                    "severity"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "caller": {
+                        "type": "string",
+                        "description": "The caller whose contract is at risk."
+                    },
+                    "assumption": {
+                        "type": "string",
+                        "description": "Natural language description of the assumption."
+                    },
+                    "test_expression": {
+                        "type": "string",
+                        "description": "Optional runnable expression that validates the assumption."
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": [
+                            "info",
+                            "warning",
+                            "critical"
+                        ]
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "file:line where the assumption is visible."
+                    }
+                }
+            }
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

@@ -1,0 +1,430 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/recon/v1.1.json",
+    "title": "Reconnaissance Output",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "repo",
+        "languages",
+        "structural",
+        "dependency_graph",
+        "hierarchical_index",
+        "entrypoints",
+        "versions",
+        "smoke_test",
+        "truth_report",
+        "drift_report"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "const": "1.1"
+        },
+        "repo": {
+            "type": "object",
+            "required": [
+                "url",
+                "commit",
+                "detected_at"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "format": "uri"
+                },
+                "provider": {
+                    "type": "string",
+                    "enum": [
+                        "local",
+                        "github",
+                        "gitlab"
+                    ]
+                },
+                "commit": {
+                    "type": "string"
+                },
+                "detected_at": {
+                    "type": "string",
+                    "format": "date-time"
+                }
+            }
+        },
+        "structural": {
+            "type": "object",
+            "required": [
+                "cpg"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "cpg": {
+                    "type": "object",
+                    "required": [
+                        "binary_path",
+                        "node_count",
+                        "edge_count",
+                        "built_at"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                        "binary_path": {
+                            "type": "string"
+                        },
+                        "node_count": {
+                            "type": "integer",
+                            "minimum": 0
+                        },
+                        "edge_count": {
+                            "type": "integer",
+                            "minimum": 0
+                        },
+                        "built_at": {
+                            "type": "string",
+                            "format": "date-time"
+                        },
+                        "incremental": {
+                            "type": "boolean"
+                        }
+                    }
+                },
+                "runtime_contract_map": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "path": {
+                            "type": "string"
+                        },
+                        "functions_captured": {
+                            "type": "integer",
+                            "minimum": 0
+                        },
+                        "critical_path_functions": {
+                            "type": "integer",
+                            "minimum": 0
+                        }
+                    }
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Extension bag for the structural section. Placed here because this section has already grown once (the 1.0 to 1.1 bump added runtime_contract_map) and will grow again as new structural analyses are added."
+                }
+            }
+        },
+        "languages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "name",
+                    "files",
+                    "percentage",
+                    "tier"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "files": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "lines": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "percentage": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100
+                    },
+                    "tier": {
+                        "type": "string",
+                        "enum": [
+                            "high",
+                            "best-effort"
+                        ]
+                    }
+                }
+            }
+        },
+        "frameworks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "name",
+                    "evidence"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "version": {
+                        "type": "string"
+                    },
+                    "evidence": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "dependency_graph": {
+            "type": "object",
+            "required": [
+                "nodes",
+                "edges"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "nodes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "id",
+                            "type"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                            "id": {
+                                "type": "string"
+                            },
+                            "type": {
+                                "type": "string",
+                                "enum": [
+                                    "file",
+                                    "module",
+                                    "package"
+                                ]
+                            },
+                            "language": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                "edges": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "from",
+                            "to",
+                            "kind"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                            "from": {
+                                "type": "string"
+                            },
+                            "to": {
+                                "type": "string"
+                            },
+                            "kind": {
+                                "type": "string",
+                                "enum": [
+                                    "import",
+                                    "call",
+                                    "inherit"
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "hierarchical_index": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "array",
+                "items": {
+                    "type": "string"
+                }
+            }
+        },
+        "entrypoints": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "file",
+                    "line",
+                    "type"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "file": {
+                        "type": "string"
+                    },
+                    "line": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "script",
+                            "function",
+                            "class",
+                            "route",
+                            "cli"
+                        ]
+                    }
+                }
+            }
+        },
+        "versions": {
+            "type": "object",
+            "required": [
+                "declared",
+                "actual",
+                "available"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "declared": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "actual": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "available": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "smoke_test": {
+            "type": "object",
+            "required": [
+                "status",
+                "passed",
+                "failed",
+                "errored"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "passed",
+                        "partial",
+                        "failed",
+                        "skipped"
+                    ]
+                },
+                "passed": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "failed": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "errored": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "duration_seconds": {
+                    "type": "number",
+                    "minimum": 0
+                },
+                "reason": {
+                    "type": "string"
+                }
+            }
+        },
+        "truth_report": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "claim",
+                    "source",
+                    "reality",
+                    "severity",
+                    "suggestion"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "claim": {
+                        "type": "string"
+                    },
+                    "source": {
+                        "type": "string"
+                    },
+                    "reality": {
+                        "type": "string"
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": [
+                            "info",
+                            "warning",
+                            "critical"
+                        ]
+                    },
+                    "suggestion": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "drift_report": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "package",
+                    "declared",
+                    "actual",
+                    "severity"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "package": {
+                        "type": "string"
+                    },
+                    "declared": {
+                        "type": "string"
+                    },
+                    "actual": {
+                        "type": "string"
+                    },
+                    "available": {
+                        "type": "string"
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": [
+                            "info",
+                            "warning",
+                            "critical"
+                        ]
+                    },
+                    "suggestion": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

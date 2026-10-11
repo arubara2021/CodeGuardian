@@ -1,0 +1,91 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/runtime-contract-map/v1.0.json",
+    "title": "Runtime Contract Map",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "repo_id",
+        "commit_hash",
+        "functions"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "const": "1.0"
+        },
+        "repo_id": {
+            "type": "string"
+        },
+        "commit_hash": {
+            "type": "string"
+        },
+        "functions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "qualified_name",
+                    "call_count"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "qualified_name": {
+                        "type": "string"
+                    },
+                    "file": {
+                        "type": "string"
+                    },
+                    "line": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "call_count": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "critical_path": {
+                        "type": "boolean"
+                    },
+                    "calls_before": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "calls_after": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "data_shapes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "input": {
+                                    "type": "string"
+                                },
+                                "output": {
+                                    "type": "string"
+                                },
+                                "count": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+        }
+    }
+}

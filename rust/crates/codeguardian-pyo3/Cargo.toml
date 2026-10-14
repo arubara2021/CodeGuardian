@@ -9,6 +9,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+name = "codeguardian_native"
+crate-type = ["cdylib"]
 
 [dependencies]
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py312"] }

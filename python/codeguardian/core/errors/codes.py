@@ -54,6 +54,9 @@ __all__ = [
     "SANDBOX_QUOTA_EXCEEDED",
     "SANDBOX_TIMEOUT",
     "SECRET_KEYCHAIN_ERROR",
+    "STORAGE_GRAPH_CORRUPTED",
+    "STORAGE_MIGRATION_FAILED",
+    "STORAGE_SCHEMA_INVALID",
     "SYS_INTERNAL",
     "SYS_INVARIANT_VIOLATED",
     "SYS_NOT_IMPLEMENTED",
@@ -154,6 +157,27 @@ CONFIG_PARSE_ERROR = "CONFIG_PARSE_ERROR"
 # running on Linux. The user resolves it by configuring their
 # environment, not by editing a config file.
 SECRET_KEYCHAIN_ERROR = "SECRET_KEYCHAIN_ERROR"
+
+# Storage codes. STORAGE_MIGRATION_FAILED is raised by the migration
+# runner when a migration file cannot be applied: a syntax error in the
+# SQL, a foreign key that references a missing table, a database that is
+# locked past the busy timeout. STORAGE_SCHEMA_INVALID is raised when an
+# artifact written to disk fails validation against its JSON Schema, or
+# when the schema file itself is missing or malformed. STORAGE_GRAPH_CORRUPTED
+# is raised by the graph store when a Code Property Graph file is
+# shorter than its declared header, carries the wrong magic number, an
+# unsupported format version, or a payload offset that puts the payload
+# past the end of the file.
+#
+# All three are classified as SYSTEM because the cause is internal to
+# CodeGuardian. STORAGE_SCHEMA_INVALID and STORAGE_GRAPH_CORRUPTED carry
+# retry overrides that make them non-retryable: retrying writes the same
+# bytes or reads the same file and produces the same failure. Retrying
+# STORAGE_MIGRATION_FAILED is worthwhile because the dominant transient
+# cause is a lock held by another connection, which clears on its own.
+STORAGE_MIGRATION_FAILED = "STORAGE_MIGRATION_FAILED"
+STORAGE_SCHEMA_INVALID = "STORAGE_SCHEMA_INVALID"
+STORAGE_GRAPH_CORRUPTED = "STORAGE_GRAPH_CORRUPTED"
 
 # Internal codes indicate a defect in CodeGuardian itself, not a failure
 # of an external system. SYS_INVARIANT_VIOLATED in particular is only

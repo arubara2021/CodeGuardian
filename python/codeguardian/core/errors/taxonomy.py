@@ -137,6 +137,10 @@ class ErrorCode(str, Enum):
     CONFIG_PARSE_ERROR = codes.CONFIG_PARSE_ERROR
     SECRET_KEYCHAIN_ERROR = codes.SECRET_KEYCHAIN_ERROR
 
+    STORAGE_MIGRATION_FAILED = codes.STORAGE_MIGRATION_FAILED
+    STORAGE_SCHEMA_INVALID = codes.STORAGE_SCHEMA_INVALID
+    STORAGE_GRAPH_CORRUPTED = codes.STORAGE_GRAPH_CORRUPTED
+
     SYS_INTERNAL = codes.SYS_INTERNAL
     SYS_NOT_IMPLEMENTED = codes.SYS_NOT_IMPLEMENTED
     SYS_INVARIANT_VIOLATED = codes.SYS_INVARIANT_VIOLATED
@@ -238,6 +242,9 @@ CATEGORY_MAP: Mapping[ErrorCode, ErrorCategory] = MappingProxyType(
         ErrorCode.CONFIG_INVALID: ErrorCategory.USER,
         ErrorCode.CONFIG_PARSE_ERROR: ErrorCategory.USER,
         ErrorCode.SECRET_KEYCHAIN_ERROR: ErrorCategory.USER,
+        ErrorCode.STORAGE_MIGRATION_FAILED: ErrorCategory.SYSTEM,
+        ErrorCode.STORAGE_SCHEMA_INVALID: ErrorCategory.SYSTEM,
+        ErrorCode.STORAGE_GRAPH_CORRUPTED: ErrorCategory.SYSTEM,
         ErrorCode.SYS_INTERNAL: ErrorCategory.SYSTEM,
         ErrorCode.SYS_NOT_IMPLEMENTED: ErrorCategory.SYSTEM,
         ErrorCode.SYS_INVARIANT_VIOLATED: ErrorCategory.SYSTEM,
@@ -267,6 +274,15 @@ RETRY_POLICY: Mapping[ErrorCategory, RetryPolicy] = MappingProxyType(
 RETRY_POLICY_OVERRIDES: Mapping[ErrorCode, RetryPolicy] = MappingProxyType(
     {
         ErrorCode.MODEL_CONTEXT_EXCEEDED: RetryPolicy(
+            retryable=False, max_retries=0, backoff=Backoff.NONE
+        ),
+        # Schema validation and graph corruption are deterministic: the
+        # same bytes produce the same failure on every attempt. Retrying
+        # a SYSTEM error is normally worthwhile, but not for these.
+        ErrorCode.STORAGE_SCHEMA_INVALID: RetryPolicy(
+            retryable=False, max_retries=0, backoff=Backoff.NONE
+        ),
+        ErrorCode.STORAGE_GRAPH_CORRUPTED: RetryPolicy(
             retryable=False, max_retries=0, backoff=Backoff.NONE
         ),
     }

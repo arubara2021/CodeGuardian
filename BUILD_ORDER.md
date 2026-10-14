@@ -320,7 +320,7 @@ SQLite metadata, filesystem artifacts, graph file access, cache, skill store, mi
 |---|---|
 | `python/codeguardian/core/storage/graph_store.py` | Code Property Graph binary file access |
 | `python/codeguardian/core/storage/cache.py` | LRU and disk cache |
-| `python/codeguardian/core/storage/migrations.py` | Migration runner |
+| `python/codeguardian/core/storage/migration_runner.py` | Migration runner |
 | `python/codeguardian/core/storage/cleanup.py` | Background retention and cleanup |
 
 ### Block B-019 — Skill Store and Storage Tests

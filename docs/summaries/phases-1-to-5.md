@@ -1513,4 +1513,4 @@ writes the Rust engines, Phase 11 writes the real agents, Phase 13
 writes the orchestrator, and Phase 14 writes the CLI. Those five
 phases contain roughly eighty percent of the project's code. What has
 been built so far is the foundation those phases stand on.
-```
+

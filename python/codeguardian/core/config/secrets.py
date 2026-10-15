@@ -134,7 +134,7 @@ def set_api_key(provider: str, value: str) -> None:
     except KeyringError as exc:
         raise CodeGuardianError(
             code=ErrorCode.SECRET_KEYCHAIN_ERROR,
-            message=(f"keychain backend unavailable for provider {provider!r}: " f"{exc}"),
+            message=(f"keychain backend unavailable for provider {provider!r}: {exc}"),
             details={"service": SERVICE_NAME, "provider": provider},
         ) from exc
 
@@ -169,6 +169,6 @@ def delete_api_key(provider: str) -> None:
     except KeyringError as exc:
         raise CodeGuardianError(
             code=ErrorCode.SECRET_KEYCHAIN_ERROR,
-            message=(f"keychain backend unavailable for provider {provider!r}: " f"{exc}"),
+            message=(f"keychain backend unavailable for provider {provider!r}: {exc}"),
             details={"service": SERVICE_NAME, "provider": provider},
         ) from exc

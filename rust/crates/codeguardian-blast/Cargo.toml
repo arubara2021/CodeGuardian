@@ -9,3 +9,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+codeguardian-kernel = { path = "../codeguardian-kernel" }
+thiserror = { workspace = true }

@@ -23,7 +23,9 @@ tracebacks still show the full chain. Only the outer type changes.
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
+import tomllib
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -56,6 +58,11 @@ _EXCEPTION_CODES: dict[type[BaseException], ErrorCode] = {
     socket.gaierror: ErrorCode.NET_DNS_FAILED,
     TimeoutError: ErrorCode.NET_TIMEOUT,
     UnicodeDecodeError: ErrorCode.FILE_BINARY,
+    # Malformed JSON and TOML indicate invalid user input, not a system
+    # fault. Retrying will not succeed because the same bytes produce
+    # the same failure on every attempt.
+    json.JSONDecodeError: ErrorCode.CONFIG_PARSE_ERROR,
+    tomllib.TOMLDecodeError: ErrorCode.CONFIG_PARSE_ERROR,
 }
 
 

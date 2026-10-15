@@ -12,18 +12,36 @@ Read this file at the start of every session. Follow it exactly.
 
 ---
 
+## Think before you write
+
+You do not start typing the moment you understand the task. You spend time understanding the problem first. The difference between code that passes and code that lasts is the thinking that happens before the first line.
+
+Before writing a file:
+
+- Read the problem twice. If the second reading gives a different understanding than the first, stop and ask.
+- Consider two or three implementations. Pick one. Be ready to state why in one sentence.
+- Name the invariant that must hold across the whole function. If you cannot name it, the design is not yet clear.
+- Name the failure mode this code must prevent. If you cannot name it, you do not yet understand the phase.
+- Write the interface — signature, docstring, error behavior — before the body. If the interface is hard to write, the design is wrong.
+- When a decision has trade-offs, name them in the code or in your delivery note. Do not pick silently.
+
+The goal is not to write more code. The goal is to write the right code once.
+
+---
+
 ## Write production code, always
 
 Every file is production quality. Not "good enough to pass." Not "we will clean it up later." The code you output must survive review from a senior engineer you respect.
 
-Production quality means:
+The bar is concrete:
 
 - Every error path is handled with a typed error from `codeguardian.core.errors`. Never a bare `except`. Never `except Exception: pass`. Never a swallowed error.
 - Every fallible operation is wrapped so standard library exceptions become typed errors.
-- Every resource is cleaned up. Files closed, locks released, subprocesses reaped.
+- Every resource is cleaned up, including on the failure path. Files closed, locks released, subprocesses reaped.
 - Every public function and class has a docstring that describes its contract.
-- Every non-obvious decision has a comment that explains **why**, not what.
+- Every non-obvious decision has a comment that explains why.
 - Every edge case the file's purpose implies is addressed.
+- Every line can be explained to a reviewer without saying "this is how I did it elsewhere."
 
 If the code you wrote would not pass review, rewrite it before you output it.
 
@@ -36,6 +54,68 @@ Inside a single file, write the optimal solution. Use the right data structure. 
 Across files, write only what the current phase needs. Do not build helpers, abstractions, config flags, or infrastructure for future phases. Do not add a parameter no caller passes. Do not handle an error that cannot occur.
 
 Advanced within, minimal across. These are not contradictory.
+
+---
+
+## Modularity
+
+Structure is the difference between code that ages well and code that rots. The rules are simple and they are not negotiable.
+
+- A function does one thing. If its docstring needs the word "and," split it.
+- A function fits on one screen. If reading it requires scrolling, split it.
+- A module exports a small surface. If `__all__` has more than a dozen names, question whether the module is doing too much.
+- Data flows in one direction. A function that reads and writes the same structure is doing two jobs.
+- A module's public surface is the smallest set of names that satisfies every caller. A helper that is not called from outside the module is private.
+- Two modules that need the same helper do not import from each other. The helper goes into a shared module with a clear owner.
+
+A change to one module does not require a change to an unrelated module. If it does, the boundary is in the wrong place.
+
+---
+
+## Comments explain why
+
+Every comment earns its place. A comment explains a decision, a constraint, or a surprise. If the code already shows it, the comment is redundant.
+
+- A docstring describes the contract: what the function takes, what it returns, what it raises, what invariant the caller must respect. Docstrings are full sentences and end with a period.
+- A comment does not narrate the code. `# increment i` over `i += 1` is noise.
+- A comment does not restate the type. `# x is an int` over `x: int = 0` is noise.
+- A comment earns its line. If it can be deleted without losing information, delete it.
+- You never write `# TODO`, `# HACK`, `# NOTE`, `# region`, `# endregion`, or decorative separators made of dashes, equals signs, asterisks, or box-drawing characters.
+- You never use emojis in code, comments, docstrings, or configuration files.
+- You never write casual or jokey language anywhere in a file.
+
+A good comment answers a question a reader would have. If a reader would not have the question, the comment is not needed.
+
+---
+
+## Naming and structure
+
+Follow the conventions in `docs/08-repository-structure.md` section 8 exactly.
+
+- Python: `snake_case` for modules and functions. `PascalCase` for classes. Protocols end in `Provider`, `Backend`, `Plugin`, or `Verifier`.
+- Rust: `kebab-case` for crates. `snake_case` for modules and functions. `PascalCase` for types and traits.
+
+Names describe purpose, not implementation. `load_config` is better than `read_toml_and_merge_defaults`. A name that requires a comment to explain it is the wrong name. Abbreviations are acceptable only when they are domain-standard: `http`, `json`, `cpg`. Booleans read as a question: `is_valid`, `has_permission`, `can_retry`.
+
+One file, one responsibility. If a file has two reasons to change, split it.
+
+Every file declares its public surface. Python uses `__all__`. Rust uses `pub`. Everything else is private.
+
+---
+
+## Tests
+
+A test exists to catch a failure. If a test passes when the code is broken, it is worse than no test at all.
+
+- A test asserts one behavior. When it fails, the failure message names what broke.
+- A test is deterministic. No wall-clock dependencies, no network, no filesystem outside a temporary directory.
+- A test has no `try`/`except`. When a test needs to catch something, it uses `pytest.raises`.
+- Every public function has at least one test for its success path and one for its primary failure path.
+- Every boundary is tested: empty input, single element, maximum size. If the function can break on any of those, there is a test for it.
+- A test does not mock what it is testing. It mocks the boundary the code depends on.
+- A test name describes the behavior it verifies, not the function it calls.
+
+You never run tests. You never have the ability to run tests. The user runs them and pastes the output.
 
 ---
 
@@ -146,35 +226,6 @@ If you cannot name the caller of a piece of code, that code does not belong in t
 
 ---
 
-## Comments explain why
-
-Every comment earns its place. A comment explains a decision that is not obvious from the code. It cites a reason, a measurement, or a constraint.
-
-You never write a comment that says what the code does. The code says that.
-
-You never write `# TODO`, `# HACK`, `# NOTE`, `# region`, `# endregion`, or decorative separators made of dashes, equals signs, asterisks, or box-drawing characters.
-
-You never use emojis in code, comments, docstrings, or configuration files.
-
-You never write casual or jokey language anywhere in a file.
-
-Docstrings are full sentences. They end with a period. They describe the contract: what the function takes, what it returns, what it raises, and any invariant the caller must respect.
-
----
-
-## Naming and structure
-
-Follow the conventions in `docs/08-repository-structure.md` section 8 exactly.
-
-- Python: `snake_case` for modules and functions. `PascalCase` for classes. Protocols end in `Provider`, `Backend`, `Plugin`, or `Verifier`.
-- Rust: `kebab-case` for crates. `snake_case` for modules and functions. `PascalCase` for types and traits.
-
-One file, one responsibility. If a file has two reasons to change, split it.
-
-Every file declares its public surface. Python uses `__all__`. Rust uses `pub`. Everything else is private.
-
----
-
 ## Safety rules that never bend
 
 You never write to the original repository. The agent works on a clone. Only a user-approved apply step touches the original.
@@ -190,6 +241,10 @@ These are the trust contract of CodeGuardian. Breaking any of them means the pro
 ## When you deliver code
 
 Before the code, one line per file: the file path, what it does, and what it depends on. Nothing more.
+
+State explicitly which files are new and which are modifications to files that already exist.
+
+If any file is a Rule 1 escalation — a rewrite of a file that has already passed — say so before the code, not after.
 
 Then the files, each labeled with its full path.
 
@@ -211,4 +266,4 @@ Do not proceed to the next phase until the user says the current phase is green.
 
 If you remember nothing else, remember this:
 
-> **Write the full file. Write it once. Never claim a test passed. Ask before you guess.**
+> **Think before you write. Write the full file. Write it once. Never claim a test passed. Ask before you guess.**

@@ -14,3 +14,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { workspace = true, features = ["extension-module", "abi3-py312"] }
+codeguardian-kernel = { path = "../codeguardian-kernel" }
+codeguardian-blast = { path = "../codeguardian-blast" }
+codeguardian-policy = { path = "../codeguardian-policy" }
+codeguardian-sandbox = { path = "../codeguardian-sandbox" }

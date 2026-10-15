@@ -263,7 +263,7 @@ class SkillStore:
         if embedding is not None and len(embedding) != _EMBEDDING_DIM:
             raise CodeGuardianError(
                 ErrorCode.STORAGE_SCHEMA_INVALID,
-                f"Embedding must have {_EMBEDDING_DIM} dimensions, " f"got {len(embedding)}.",
+                f"Embedding must have {_EMBEDDING_DIM} dimensions, got {len(embedding)}.",
                 details={"name": name, "actual_dim": len(embedding)},
             )
 
@@ -506,7 +506,7 @@ class SkillStore:
         if len(embedding) != _EMBEDDING_DIM:
             raise CodeGuardianError(
                 ErrorCode.STORAGE_SCHEMA_INVALID,
-                f"Query embedding must have {_EMBEDDING_DIM} dimensions, " f"got {len(embedding)}.",
+                f"Query embedding must have {_EMBEDDING_DIM} dimensions, got {len(embedding)}.",
                 details={"actual_dim": len(embedding)},
             )
 
@@ -560,7 +560,7 @@ class SkillStore:
         if outcome not in ("success", "partial", "failure"):
             raise CodeGuardianError(
                 ErrorCode.STORAGE_SCHEMA_INVALID,
-                f"outcome must be one of success, partial, failure; " f"got {outcome!r}.",
+                f"outcome must be one of success, partial, failure; got {outcome!r}.",
                 details={"outcome": outcome},
             )
 

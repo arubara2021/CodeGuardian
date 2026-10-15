@@ -23,9 +23,9 @@ from .taxonomy import (
 from .translation import translate, typed
 
 __all__ = [
+    "DEFAULT_MARKER",
     "Backoff",
     "CodeGuardianError",
-    "DEFAULT_MARKER",
     "ErrorCategory",
     "ErrorCode",
     "RetryPolicy",

@@ -10,7 +10,9 @@ translation is idempotent.
 """
 
 import asyncio
+import json
 import socket
+import tomllib
 
 import pytest
 
@@ -60,6 +62,38 @@ def test_translate_unicode_decode_error():
         error = translate(exc)
     assert error.code is ErrorCode.FILE_BINARY
     assert error.category is ErrorCategory.USER
+
+
+def test_translate_json_decode_error():
+    exc = json.JSONDecodeError("Expecting value", "{invalid", 0)
+    error = translate(exc)
+    assert error.code is ErrorCode.CONFIG_PARSE_ERROR
+    assert error.category is ErrorCategory.USER
+
+
+def test_translate_json_decode_error_is_not_retryable():
+    exc = json.JSONDecodeError("Expecting value", "{invalid", 0)
+    error = translate(exc)
+    assert error.retry_policy.retryable is False
+    assert error.retry_policy.max_retries == 0
+
+
+def test_translate_toml_decode_error():
+    try:
+        tomllib.loads("invalid = = =")
+    except tomllib.TOMLDecodeError as exc:
+        error = translate(exc)
+    assert error.code is ErrorCode.CONFIG_PARSE_ERROR
+    assert error.category is ErrorCategory.USER
+
+
+def test_translate_toml_decode_error_is_not_retryable():
+    try:
+        tomllib.loads("invalid = = =")
+    except tomllib.TOMLDecodeError as exc:
+        error = translate(exc)
+    assert error.retry_policy.retryable is False
+    assert error.retry_policy.max_retries == 0
 
 
 def test_translate_unmapped_exception_becomes_system_error():

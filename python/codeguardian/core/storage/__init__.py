@@ -27,7 +27,7 @@ __all__ = [
     "GraphStore",
     "MigrationResult",
     "MigrationRunner",
-    "SkillStore",
     "SQLiteStore",
+    "SkillStore",
     "run_cleanup",
 ]

@@ -9,3 +9,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+codeguardian-sandbox = { path = "../codeguardian-sandbox" }
+thiserror = { workspace = true }

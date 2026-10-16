@@ -3,17 +3,25 @@
 //! Docker is the v1 fallback. It is used where Bubblewrap is not
 //! available — macOS, Windows, and CI environments — and its isolation
 //! is weaker than Bubblewrap's because the daemon runs outside the
-//! sandbox's trust boundary. The trade-off is portability.
+//! sandbox's trust boundary.
 //!
-//! `create` does no work beyond validation. The image is named per
-//! language. Every `execute` runs `docker run --rm`, which creates a
-//! fresh container, runs the command, and removes the container when
-//! it exits. `destroy` is a no-op.
+//! # Enforcement
 //!
-//! The invariant this module protects is that no container outlives
-//! the `execute` call that created it. The `--rm` flag is mandatory;
-//! a change that removes it leaks containers and violates the design's
-//! "no unbounded growth" rule.
+//! The backend passes the handle's quota directly to `docker run`:
+//! `--memory`, `--cpus`, and `--pids-limit` all come from the handle
+//! captured at create time. Capabilities are dropped to the empty set
+//! with `--cap-drop ALL`. Network is disabled with `--network none`
+//! unless the policy allows it. The working directory is validated at
+//! create time against the same forbidden-path list the Bubblewrap
+//! backend uses.
+//!
+//! # Timeout
+//!
+//! The Rust-side `tokio::time::timeout` covers the timeout. When it
+//! fires, the backend runs `docker kill <name>` to stop the container
+//! and then kills the `docker run` CLI process. The container name is
+//! a per-call unique string so two concurrent executions cannot
+//! collide.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -24,8 +32,8 @@ use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::backend::{
-    read_child_stream, ExecutionRequest, ExecutionResult, SandboxBackend, SandboxHandle,
-    SandboxSpec,
+    read_child_stream, sanitize_env, validate_working_dir, ExecutionRequest, ExecutionResult,
+    SandboxBackend, SandboxHandle, SandboxSpec,
 };
 use crate::quotas::ResourceQuota;
 use crate::{SandboxError, SandboxId};
@@ -33,8 +41,7 @@ use crate::{SandboxError, SandboxId};
 /// The backend name recorded in every handle.
 pub const BACKEND_NAME: &str = "docker";
 
-/// The default execution timeout in milliseconds when a request does
-/// not supply one.
+/// The default execution timeout in milliseconds.
 pub const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 
 /// The languages this backend can execute.
@@ -84,10 +91,16 @@ impl DockerBackend {
         }
     }
 
+    /// Return a container name unique to this execution.
+    fn container_name(handle: &SandboxHandle, salt: u64) -> String {
+        format!("codeguardian-{}-{}", handle.id.as_str(), salt)
+    }
+
     /// Build the `docker run` invocation for a request.
     fn build_command(
         &self,
         image: &str,
+        container_name: &str,
         handle: &SandboxHandle,
         request: &ExecutionRequest,
     ) -> Command {
@@ -95,6 +108,7 @@ impl DockerBackend {
         command.arg("run");
         command.arg("--rm");
         command.arg("--interactive");
+        command.arg("--name").arg(container_name);
 
         if !handle.network_enabled {
             command.arg("--network").arg("none");
@@ -102,9 +116,14 @@ impl DockerBackend {
 
         command
             .arg("--memory")
-            .arg(format!("{}m", handle.working_dir_capacity_mb_hint()));
-        command.arg("--cpus").arg("2");
-        command.arg("--pids-limit").arg("256");
+            .arg(format!("{}m", handle.memory_mb));
+        command
+            .arg("--cpus")
+            .arg(handle.cpu_cores.to_string());
+        command
+            .arg("--pids-limit")
+            .arg(handle.process_limit.to_string());
+        command.arg("--cap-drop").arg("ALL");
 
         command
             .arg("-v")
@@ -137,17 +156,22 @@ impl DockerBackend {
 impl SandboxBackend for DockerBackend {
     async fn create(&self, spec: &SandboxSpec) -> Result<SandboxHandle, SandboxError> {
         spec.quota.validate()?;
+        sanitize_env(&spec.env)?;
         if Self::image_for(&spec.language).is_none() {
             return Err(SandboxError::ImageUnavailable {
                 image: spec.language.clone(),
             });
         }
+        let working_dir = validate_working_dir(&spec.working_dir)?;
         Ok(SandboxHandle {
             id: self.next_id(),
             backend: BACKEND_NAME.to_owned(),
             language: spec.language.clone(),
-            working_dir: spec.working_dir.clone(),
+            working_dir,
             network_enabled: spec.network.is_enabled(),
+            memory_mb: spec.quota.memory_mb,
+            cpu_cores: spec.quota.cpu_cores,
+            process_limit: spec.quota.process_limit,
         })
     }
 
@@ -166,6 +190,7 @@ impl SandboxBackend for DockerBackend {
                 reason: "empty command".to_owned(),
             });
         }
+        sanitize_env(&request.env)?;
         let image = Self::image_for(&handle.language).ok_or_else(|| {
             SandboxError::ImageUnavailable {
                 image: handle.language.clone(),
@@ -175,11 +200,23 @@ impl SandboxBackend for DockerBackend {
         let timeout_ms = request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
         let start = Instant::now();
+        let salt = self.counter.fetch_add(1, Ordering::Relaxed);
+        let container_name = Self::container_name(handle, salt);
 
-        let mut command = self.build_command(&image, handle, request);
+        let mut command = self.build_command(&image, &container_name, handle, request);
         let mut child = command.spawn().map_err(|err| SandboxError::ExecutionFailed {
             reason: format!("spawn failed: {err}"),
         })?;
+
+        if let Some(stdin_bytes) = &request.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(stdin_bytes).await;
+                let _ = stdin.shutdown().await;
+            }
+        } else {
+            drop(child.stdin.take());
+        }
 
         let stdout_task = child
             .stdout
@@ -194,8 +231,8 @@ impl SandboxBackend for DockerBackend {
 
         match wait_result {
             Ok(Ok(status)) => {
-                let stdout = collect(stdout_task).await;
-                let stderr = collect(stderr_task).await;
+                let (stdout, stdout_truncated) = collect(stdout_task).await;
+                let (stderr, stderr_truncated) = collect(stderr_task).await;
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let exit_code = status.code().unwrap_or(-1);
                 let oom_killed = exit_code == 137;
@@ -206,6 +243,7 @@ impl SandboxBackend for DockerBackend {
                     duration_ms,
                     timed_out: false,
                     oom_killed,
+                    output_truncated: stdout_truncated || stderr_truncated,
                 })
             }
             Ok(Err(err)) => {
@@ -216,6 +254,14 @@ impl SandboxBackend for DockerBackend {
                 })
             }
             Err(_) => {
+                // Stop the container before killing the CLI. The daemon
+                // stops the container asynchronously; the CLI exit
+                // releases the caller either way.
+                let _ = Command::new(&self.binary)
+                    .args(["kill", &container_name])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 Err(SandboxError::Timeout { timeout_ms })
@@ -242,26 +288,10 @@ impl SandboxBackend for DockerBackend {
 }
 
 /// Await a spawned stream reader, collapsing a join error to an empty
-/// vector.
-async fn collect(task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+/// tuple with no truncation flag.
+async fn collect(task: Option<tokio::task::JoinHandle<(Vec<u8>, bool)>>) -> (Vec<u8>, bool) {
     match task {
         Some(handle) => handle.await.unwrap_or_default(),
-        None => Vec::new(),
-    }
-}
-
-/// Helper trait method placeholder — provides the memory hint the
-/// Docker backend uses for `--memory`. The value comes from the
-/// handle's language; the memory limit comes from the spec's quota at
-/// creation and is not carried on the handle, so the backend uses the
-/// default. A future block that persists the spec with the handle will
-/// replace this.
-trait WorkingDirCapacityHint {
-    fn working_dir_capacity_mb_hint(&self) -> u32;
-}
-
-impl WorkingDirCapacityHint for SandboxHandle {
-    fn working_dir_capacity_mb_hint(&self) -> u32 {
-        crate::quotas::DEFAULT_MEMORY_MB
+        None => (Vec::new(), false),
     }
 }

@@ -4,13 +4,8 @@
 //! returns a JSON value or an `RpcError`. Parameter validation is
 //! performed here; the sandbox and audit crates receive typed inputs
 //! and never see unvalidated JSON.
-//!
-//! Every error that comes from a lower crate is wrapped as
-//! `INTERNAL_ERROR` with the crate's message. The Python bridge
-//! translates any response with an `error` field into a
-//! `CodeGuardianError` with `SYS_INTERNAL`; the details carry the
-//! original message for diagnostics.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
@@ -18,17 +13,14 @@ use serde_json::{json, Value};
 use codeguardian_audit::{export_json_array, export_jsonl, verify_chain, AuditWriter};
 use codeguardian_rpc::RpcError;
 use codeguardian_sandbox::{
-    BubblewrapBackend, DockerBackend, SandboxBackend, SandboxHandle, SandboxId, SandboxSpec,
+    BubblewrapBackend, DockerBackend, ExecutionRequest, SandboxBackend, SandboxHandle, SandboxId,
+    SandboxSpec,
 };
 
 /// The JSON-RPC error code for invalid method parameters.
 const INVALID_PARAMS: i64 = -32602;
 
 /// Return a report of the sandbox backends available on this host.
-///
-/// The report is a static description of what the binary knows. It
-/// does not probe the host for `bwrap` or `docker` binaries; that
-/// probing happens when a sandbox is actually created.
 pub async fn sandbox_health(_params: Value) -> Result<Value, RpcError> {
     let bubblewrap = BubblewrapBackend::new();
     let docker = DockerBackend::new();
@@ -50,7 +42,8 @@ pub async fn sandbox_health(_params: Value) -> Result<Value, RpcError> {
 /// Create a sandbox handle.
 ///
 /// Required parameters: `language` and `working_dir`. Optional:
-/// `backend`, defaulting to `"bubblewrap"`.
+/// `backend` (default `"bubblewrap"`), `memory_mb`, `cpu_cores`,
+/// `process_limit`, `network_enabled`.
 pub async fn sandbox_create(params: Value) -> Result<Value, RpcError> {
     let language = get_string(&params, "language")?;
     let working_dir = get_string(&params, "working_dir")?;
@@ -59,7 +52,23 @@ pub async fn sandbox_create(params: Value) -> Result<Value, RpcError> {
         .and_then(Value::as_str)
         .unwrap_or("bubblewrap");
 
-    let spec = SandboxSpec::new(language, PathBuf::from(working_dir));
+    let mut spec = SandboxSpec::new(language, PathBuf::from(working_dir));
+    if let Some(memory) = params.get("memory_mb").and_then(Value::as_u64) {
+        spec.quota.memory_mb = memory as u32;
+    }
+    if let Some(cores) = params.get("cpu_cores").and_then(Value::as_u64) {
+        spec.quota.cpu_cores = cores as u32;
+    }
+    if let Some(pids) = params.get("process_limit").and_then(Value::as_u64) {
+        spec.quota.process_limit = pids as u32;
+    }
+    if params
+        .get("network_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        spec.network = codeguardian_sandbox::NetworkPolicy::allow_for_dependencies();
+    }
 
     let handle_result = match backend_name {
         "bubblewrap" => BubblewrapBackend::new().create(&spec).await,
@@ -78,29 +87,10 @@ pub async fn sandbox_create(params: Value) -> Result<Value, RpcError> {
 }
 
 /// Destroy a sandbox handle.
-///
-/// The parameters are the fields of the handle returned by
-/// `sandbox.create`: `id`, `backend`, `language`, `working_dir`, and
-/// `network_enabled`.
 pub async fn sandbox_destroy(params: Value) -> Result<Value, RpcError> {
-    let id = get_string(&params, "id")?;
-    let backend_name = get_string(&params, "backend")?;
-    let language = get_string(&params, "language")?;
-    let working_dir = get_string(&params, "working_dir")?;
-    let network_enabled = params
-        .get("network_enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let handle = handle_from_json(&params)?;
 
-    let handle = SandboxHandle {
-        id: SandboxId::new(id),
-        backend: backend_name.clone(),
-        language,
-        working_dir: PathBuf::from(working_dir),
-        network_enabled,
-    };
-
-    let result = match backend_name.as_str() {
+    let result = match handle.backend.as_str() {
         "bubblewrap" => BubblewrapBackend::new().destroy(handle).await,
         "docker" => DockerBackend::new().destroy(handle).await,
         other => {
@@ -116,10 +106,78 @@ pub async fn sandbox_destroy(params: Value) -> Result<Value, RpcError> {
     Ok(json!({"destroyed": true}))
 }
 
-/// Append one entry to the audit log at `path`.
+/// Run a command inside a live sandbox.
 ///
-/// Required parameters: `path` and `payload`. Returns the entry that
-/// was written, including both hashes.
+/// Required parameters: `handle` and `command`. Optional: `cwd`,
+/// `env`, `timeout_ms`, `stdin`.
+pub async fn sandbox_execute(params: Value) -> Result<Value, RpcError> {
+    let handle_value = params.get("handle").ok_or_else(|| RpcError {
+        code: INVALID_PARAMS,
+        message: "missing 'handle' parameter".to_owned(),
+        data: None,
+    })?;
+    let handle = handle_from_json(handle_value)?;
+
+    let command: Vec<String> = params
+        .get("command")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .ok_or_else(|| RpcError {
+            code: INVALID_PARAMS,
+            message: "missing or invalid 'command' parameter".to_owned(),
+            data: None,
+        })?;
+
+    let mut request = ExecutionRequest::new(command);
+    if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
+        request.cwd = Some(PathBuf::from(cwd));
+    }
+    if let Some(env_value) = params.get("env").and_then(Value::as_object) {
+        let mut env: HashMap<String, String> = HashMap::new();
+        for (key, value) in env_value {
+            if let Some(text) = value.as_str() {
+                env.insert(key.clone(), text.to_owned());
+            }
+        }
+        request.env = env;
+    }
+    if let Some(timeout_ms) = params.get("timeout_ms").and_then(Value::as_u64) {
+        request.timeout_ms = Some(timeout_ms);
+    }
+    if let Some(stdin_text) = params.get("stdin").and_then(Value::as_str) {
+        request.stdin = Some(stdin_text.as_bytes().to_vec());
+    }
+
+    let result = match handle.backend.as_str() {
+        "bubblewrap" => BubblewrapBackend::new().execute(&handle, &request).await,
+        "docker" => DockerBackend::new().execute(&handle, &request).await,
+        other => {
+            return Err(RpcError {
+                code: INVALID_PARAMS,
+                message: format!("unknown backend: {other}"),
+                data: None,
+            });
+        }
+    };
+
+    let outcome = result.map_err(|err| internal_error(err.to_string()))?;
+    Ok(json!({
+        "exit_code": outcome.exit_code,
+        "stdout": String::from_utf8_lossy(&outcome.stdout),
+        "stderr": String::from_utf8_lossy(&outcome.stderr),
+        "duration_ms": outcome.duration_ms,
+        "timed_out": outcome.timed_out,
+        "oom_killed": outcome.oom_killed,
+        "output_truncated": outcome.output_truncated,
+    }))
+}
+
+/// Append one entry to the audit log at `path`.
 pub async fn audit_write(params: Value) -> Result<Value, RpcError> {
     let path = get_string(&params, "path")?;
     let payload = params.get("payload").cloned().unwrap_or(Value::Null);
@@ -134,9 +192,6 @@ pub async fn audit_write(params: Value) -> Result<Value, RpcError> {
 }
 
 /// Verify the audit chain at `path`.
-///
-/// Required parameter: `path`. Returns the number of entries that
-/// passed and the head hash.
 pub async fn audit_verify(params: Value) -> Result<Value, RpcError> {
     let path = get_string(&params, "path")?;
     let summary = verify_chain(path)
@@ -149,10 +204,6 @@ pub async fn audit_verify(params: Value) -> Result<Value, RpcError> {
 }
 
 /// Export the audit log at `path`.
-///
-/// Required parameters: `path` and `format`. Format is `"jsonl"` or
-/// `"json"`. Returns the entry count, the byte count, and the exported
-/// content as a UTF-8 string.
 pub async fn audit_export(params: Value) -> Result<Value, RpcError> {
     let path = get_string(&params, "path")?;
     let format = get_string(&params, "format")?;
@@ -186,6 +237,44 @@ fn handle_to_json(handle: &SandboxHandle) -> Value {
         "language": handle.language,
         "working_dir": handle.working_dir.display().to_string(),
         "network_enabled": handle.network_enabled,
+        "memory_mb": handle.memory_mb,
+        "cpu_cores": handle.cpu_cores,
+        "process_limit": handle.process_limit,
+    })
+}
+
+/// Parse a sandbox handle from a JSON object.
+fn handle_from_json(value: &Value) -> Result<SandboxHandle, RpcError> {
+    let id = get_string(value, "id")?;
+    let backend = get_string(value, "backend")?;
+    let language = get_string(value, "language")?;
+    let working_dir = get_string(value, "working_dir")?;
+    let network_enabled = value
+        .get("network_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let memory_mb = value
+        .get("memory_mb")
+        .and_then(Value::as_u64)
+        .unwrap_or(1024) as u32;
+    let cpu_cores = value
+        .get("cpu_cores")
+        .and_then(Value::as_u64)
+        .unwrap_or(2) as u32;
+    let process_limit = value
+        .get("process_limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(256) as u32;
+
+    Ok(SandboxHandle {
+        id: SandboxId::new(id),
+        backend,
+        language,
+        working_dir: PathBuf::from(working_dir),
+        network_enabled,
+        memory_mb,
+        cpu_cores,
+        process_limit,
     })
 }
 

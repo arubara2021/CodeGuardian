@@ -3,19 +3,28 @@
 //! Bubblewrap is the v1 Linux default. It is a user-namespace
 //! sandbox built on `bwrap`, a small setuid-free launcher that
 //! constructs a mount namespace, a PID namespace, and a network
-//! namespace for the child. No daemon is required; the sandbox is a
-//! plain subprocess.
+//! namespace for the child.
 //!
-//! `create` does no work. Bubblewrap has no persistent sandbox state
-//! to allocate; every `execute` spawns a fresh `bwrap` with the
-//! parameters captured in the handle. `destroy` is a no-op that
-//! verifies the handle was produced by this backend.
+//! # Mount order
 //!
-//! The invariant this module protects is that a command cannot see the
-//! host filesystem outside the workspace and a small read-only root.
-//! Every flag list in `build_command` is written to enforce this; if a
-//! future change adds a bind mount, it must add a matching test in
-//! B-037 that asserts the mount is not writable from the sandbox.
+//! The order in which bwrap applies mount options matters. `--tmpfs
+//! /tmp` replaces the entire `/tmp` subtree; if it is applied after a
+//! `--bind` whose destination is under `/tmp`, the earlier bind is
+//! shadowed and the destination path stops existing. The command
+//! builder therefore mounts the tmpfs first and the working directory
+//! second, so bwrap creates the working directory's parents inside the
+//! fresh tmpfs and the bind lands on top.
+//!
+//! # Enforcement
+//!
+//! The backend enforces six properties. The workspace is the only
+//! writable mount; everything else is bound read-only. Capabilities
+//! are dropped to the empty set. Network is unshared unless the
+//! policy allows it. The command runs under `timeout` so a runaway
+//! process is terminated by the sandbox itself rather than by the
+//! host. Environment variables are filtered against the forbidden-key
+//! list before the command is built. A working directory that resolves
+//! to a top-level system path is rejected at create time.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -26,8 +35,8 @@ use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::backend::{
-    read_child_stream, ExecutionRequest, ExecutionResult, SandboxBackend, SandboxHandle,
-    SandboxSpec,
+    read_child_stream, sanitize_env, validate_working_dir, ExecutionRequest, ExecutionResult,
+    SandboxBackend, SandboxHandle, SandboxSpec,
 };
 use crate::quotas::ResourceQuota;
 use crate::{SandboxError, SandboxId};
@@ -35,9 +44,12 @@ use crate::{SandboxError, SandboxId};
 /// The backend name recorded in every handle.
 pub const BACKEND_NAME: &str = "bubblewrap";
 
-/// The default execution timeout in milliseconds when a request does
-/// not supply one.
+/// The default execution timeout in milliseconds.
 pub const DEFAULT_TIMEOUT_MS: u64 = 300_000;
+
+/// The grace period `timeout` gives the sandboxed process between
+/// SIGTERM and SIGKILL, in seconds.
+const KILL_AFTER_SECONDS: u64 = 5;
 
 /// The languages this backend can execute.
 const SUPPORTED_LANGUAGES: &[&str] = &["python", "typescript"];
@@ -79,15 +91,13 @@ impl BubblewrapBackend {
 
     /// Build the `bwrap` invocation for a request.
     ///
-    /// The mount layout is: the host root is bound read-only, the
-    /// workspace is bound read-write, `/tmp` is a fresh tmpfs, and
-    /// `/proc` and `/dev` are the sandbox's own. Every mount is
-    /// explicit; nothing is inherited from the host process.
-    fn build_command(
-        &self,
-        handle: &SandboxHandle,
-        request: &ExecutionRequest,
-    ) -> Command {
+    /// Mounts are applied in the order they appear. The root is bound
+    /// read-only first, then a fresh tmpfs replaces `/tmp`, then the
+    /// working directory is bound on top of the tmpfs, then `/proc` and
+    /// `/dev` are mounted. Reversing the tmpfs and working-directory
+    /// steps causes the working directory to be shadowed when its path
+    /// is under `/tmp`.
+    fn build_command(&self, handle: &SandboxHandle, request: &ExecutionRequest) -> Command {
         let mut command = Command::new(&self.binary);
 
         command.arg("--die-with-parent");
@@ -95,13 +105,14 @@ impl BubblewrapBackend {
         command.arg("--unshare-pid");
         command.arg("--unshare-ipc");
         command.arg("--unshare-uts");
+        command.arg("--cap-drop").arg("ALL");
         if !handle.network_enabled {
             command.arg("--unshare-net");
         }
 
         command.arg("--ro-bind").arg("/").arg("/");
-        command.arg("--bind").arg(&handle.working_dir).arg(&handle.working_dir);
         command.arg("--tmpfs").arg("/tmp");
+        command.arg("--bind").arg(&handle.working_dir).arg(&handle.working_dir);
         command.arg("--proc").arg("/proc");
         command.arg("--dev").arg("/dev");
 
@@ -116,6 +127,14 @@ impl BubblewrapBackend {
         command.arg("--chdir").arg(cwd);
 
         command.arg("--");
+
+        let timeout_seconds = request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS) / 1000;
+        command.arg("timeout");
+        command
+            .arg("--signal=TERM")
+            .arg(format!("--kill-after={KILL_AFTER_SECONDS}s"))
+            .arg(timeout_seconds.max(1).to_string());
+
         for part in &request.command {
             command.arg(part);
         }
@@ -131,12 +150,17 @@ impl BubblewrapBackend {
 impl SandboxBackend for BubblewrapBackend {
     async fn create(&self, spec: &SandboxSpec) -> Result<SandboxHandle, SandboxError> {
         spec.quota.validate()?;
+        sanitize_env(&spec.env)?;
+        let working_dir = validate_working_dir(&spec.working_dir)?;
         Ok(SandboxHandle {
             id: self.next_id(),
             backend: BACKEND_NAME.to_owned(),
             language: spec.language.clone(),
-            working_dir: spec.working_dir.clone(),
+            working_dir,
             network_enabled: spec.network.is_enabled(),
+            memory_mb: spec.quota.memory_mb,
+            cpu_cores: spec.quota.cpu_cores,
+            process_limit: spec.quota.process_limit,
         })
     }
 
@@ -155,15 +179,26 @@ impl SandboxBackend for BubblewrapBackend {
                 reason: "empty command".to_owned(),
             });
         }
+        sanitize_env(&request.env)?;
 
         let timeout_ms = request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
-        let timeout = Duration::from_millis(timeout_ms);
+        let timeout = Duration::from_millis(timeout_ms + KILL_AFTER_SECONDS * 1000 + 1000);
         let start = Instant::now();
 
         let mut command = self.build_command(handle, request);
         let mut child = command.spawn().map_err(|err| SandboxError::ExecutionFailed {
             reason: format!("spawn failed: {err}"),
         })?;
+
+        if let Some(stdin_bytes) = &request.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(stdin_bytes).await;
+                let _ = stdin.shutdown().await;
+            }
+        } else {
+            drop(child.stdin.take());
+        }
 
         let stdout_task = child
             .stdout
@@ -178,18 +213,20 @@ impl SandboxBackend for BubblewrapBackend {
 
         match wait_result {
             Ok(Ok(status)) => {
-                let stdout = collect(stdout_task).await;
-                let stderr = collect(stderr_task).await;
+                let (stdout, stdout_truncated) = collect(stdout_task).await;
+                let (stderr, stderr_truncated) = collect(stderr_task).await;
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let exit_code = status.code().unwrap_or(-1);
-                let oom_killed = stderr_contains_oom(&stderr);
+                let timed_out = exit_code == 124 || exit_code == 137;
+                let oom_killed = exit_code == 137 && !timed_out;
                 Ok(ExecutionResult {
                     exit_code,
                     stdout,
                     stderr,
                     duration_ms,
-                    timed_out: false,
+                    timed_out,
                     oom_killed,
+                    output_truncated: stdout_truncated || stderr_truncated,
                 })
             }
             Ok(Err(err)) => {
@@ -226,24 +263,10 @@ impl SandboxBackend for BubblewrapBackend {
 }
 
 /// Await a spawned stream reader, collapsing a join error to an empty
-/// vector. A reader that failed to complete means the stream was
-/// closed before the child exited; the child's exit code remains the
-/// authoritative signal.
-async fn collect(task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+/// tuple with no truncation flag.
+async fn collect(task: Option<tokio::task::JoinHandle<(Vec<u8>, bool)>>) -> (Vec<u8>, bool) {
     match task {
         Some(handle) => handle.await.unwrap_or_default(),
-        None => Vec::new(),
+        None => (Vec::new(), false),
     }
-}
-
-/// Return whether stderr contains a message that indicates the kernel
-/// killed the process for memory.
-///
-/// Bubblewrap does not distinguish a memory kill from a signal kill in
-/// the exit status, so the backend inspects the child's stderr for the
-/// Linux OOM killer's standard phrase. This is a heuristic; a process
-/// that prints the same phrase for other reasons will be misclassified.
-fn stderr_contains_oom(stderr: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(stderr);
-    text.contains("Killed") && text.contains("memory")
 }

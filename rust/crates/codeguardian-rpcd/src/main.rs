@@ -2,20 +2,11 @@
 //!
 //! A single-purpose binary that speaks JSON-RPC 2.0 over stdio. It is
 //! spawned by `codeguardian.core.bridges.jsonrpc_bridge.JSONRPCBridge`
-//! and hosts the handlers for the sandbox and audit crates. Those
-//! crates are deliberately not exposed via PyO3 because they sit on
-//! the wrong side of the trust boundary: the audit writer owns the log
-//! file, and the sandbox engine runs untrusted code.
+//! and hosts the handlers for the sandbox and audit crates.
 //!
 //! The protocol is line-delimited JSON. Each message is one JSON
 //! object followed by a newline. stdout carries only the protocol;
 //! every diagnostic goes to stderr.
-//!
-//! The daemon registers six handlers. `sandbox.health`,
-//! `sandbox.create`, and `sandbox.destroy` cover the sandbox lifecycle
-//! except for execution, which requires an installed backend and is
-//! exercised elsewhere. `audit.write`, `audit.verify`, and
-//! `audit.export` cover the audit log.
 
 use std::io;
 use std::process::ExitCode;
@@ -32,6 +23,8 @@ const SANDBOX_HEALTH: &str = "sandbox.health";
 const SANDBOX_CREATE: &str = "sandbox.create";
 /// The JSON-RPC method name for destroying a sandbox handle.
 const SANDBOX_DESTROY: &str = "sandbox.destroy";
+/// The JSON-RPC method name for executing a command in a sandbox.
+const SANDBOX_EXECUTE: &str = "sandbox.execute";
 /// The JSON-RPC method name for appending an audit entry.
 const AUDIT_WRITE: &str = "audit.write";
 /// The JSON-RPC method name for verifying an audit chain.
@@ -66,10 +59,6 @@ fn main() -> ExitCode {
 }
 
 /// Build the tokio runtime the handlers run on.
-///
-/// Two worker threads is enough: the JSON-RPC loop is serial and each
-/// handler awaits at most one operation. The runtime is not the
-/// bottleneck; disk and subprocess latency are.
 fn build_runtime() -> io::Result<Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -78,11 +67,6 @@ fn build_runtime() -> io::Result<Runtime> {
 }
 
 /// Register every handler with the server.
-///
-/// Each handler closure captures a clone of the runtime and blocks the
-/// calling thread while the async work runs on the runtime's workers.
-/// The RPC server's dispatch loop is synchronous, so a handler that
-/// returned a `Future` to it would not be awaited.
 fn register_handlers(server: &mut RpcServer, runtime: Arc<Runtime>) {
     {
         let rt = Arc::clone(&runtime);
@@ -100,6 +84,12 @@ fn register_handlers(server: &mut RpcServer, runtime: Arc<Runtime>) {
         let rt = Arc::clone(&runtime);
         server.register(SANDBOX_DESTROY, move |params| {
             rt.block_on(handlers::sandbox_destroy(params))
+        });
+    }
+    {
+        let rt = Arc::clone(&runtime);
+        server.register(SANDBOX_EXECUTE, move |params| {
+            rt.block_on(handlers::sandbox_execute(params))
         });
     }
     {

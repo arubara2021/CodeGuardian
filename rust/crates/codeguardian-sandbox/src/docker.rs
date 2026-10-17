@@ -5,21 +5,28 @@
 //! is weaker than Bubblewrap's because the daemon runs outside the
 //! sandbox's trust boundary.
 //!
+//! # Image selection
+//!
+//! The caller supplies the container image via `SandboxSpec::image`.
+//! The backend does not maintain a language-to-image map; any image
+//! the caller names runs, whether it is a CodeGuardian-provided image
+//! for Python or TypeScript, an upstream base image such as
+//! `python:3.12-slim` or `node:22-alpine`, or a project-specific image
+//! built from a `Dockerfile`. `create` fails with `ImageUnavailable` if
+//! no image is given or if the image is not present locally.
+//!
+//! No pull is attempted. A host that has Docker but not the requested
+//! image returns the error, and the caller decides whether to build,
+//! pull, or supply a different image. Implicit pulls would make
+//! `create` unbounded in time and dependent on the network.
+//!
 //! # Availability check
 //!
 //! `create` performs two probes before returning a handle. The first,
-//! `docker info`, proves the CLI can reach a running daemon. The second,
-//! `docker image inspect`, proves the language-specific image exists
+//! `docker info`, proves the CLI can reach a running daemon. The
+//! second, `docker image inspect`, proves the requested image exists
 //! locally. Either probe failing produces a distinct error that names
-//! what is actually wrong: a missing binary, a WSL shim whose host
-//! integration is disabled, a daemon that is down, or an image that has
-//! not been pulled. The contract of `create` is that `execute` can
-//! follow; both probes are required to keep that contract honest.
-//!
-//! Images are never pulled implicitly. A host that has Docker but not
-//! the CodeGuardian images returns `ImageUnavailable` from `create`,
-//! and the caller decides whether to build or pull. Implicit pulls would
-//! make `create` unbounded in time and dependent on the network.
+//! what is actually wrong.
 //!
 //! # Enforcement
 //!
@@ -27,17 +34,7 @@
 //! `--memory`, `--cpus`, and `--pids-limit` all come from the handle
 //! captured at create time. Capabilities are dropped to the empty set
 //! with `--cap-drop ALL`. Network is disabled with `--network none`
-//! unless the policy allows it. The working directory is validated at
-//! create time against the same forbidden-path list the Bubblewrap
-//! backend uses.
-//!
-//! # Timeout
-//!
-//! The Rust-side `tokio::time::timeout` covers the timeout. When it
-//! fires, the backend runs `docker kill <name>` to stop the container
-//! and then kills the `docker run` CLI process. The container name is
-//! a per-call unique string so two concurrent executions cannot
-//! collide.
+//! unless the policy allows it.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -59,9 +56,6 @@ pub const BACKEND_NAME: &str = "docker";
 
 /// The default execution timeout in milliseconds.
 pub const DEFAULT_TIMEOUT_MS: u64 = 300_000;
-
-/// The languages this backend can execute.
-const SUPPORTED_LANGUAGES: &[&str] = &["python", "typescript"];
 
 /// A Docker sandbox backend.
 pub struct DockerBackend {
@@ -98,23 +92,7 @@ impl DockerBackend {
         SandboxId::new(format!("docker-{n}"))
     }
 
-    /// Return the image name for a language, or `None` if unknown.
-    pub fn image_for(language: &str) -> Option<String> {
-        match language {
-            "python" => Some("codeguardian/python-sandbox:latest".to_owned()),
-            "typescript" => Some("codeguardian/typescript-sandbox:latest".to_owned()),
-            _ => None,
-        }
-    }
-
     /// Verify that the docker CLI can reach a running daemon.
-    ///
-    /// Three failure modes are distinguished by the content of the
-    /// command's output. A spawn failure means the binary is absent.
-    /// An output that mentions the daemon is the daemon being down. Any
-    /// other non-zero exit is reported as the docker CLI being
-    /// unavailable, which covers the WSL shim whose integration is
-    /// disabled and any other exotic wrapper.
     async fn verify_available(&self) -> Result<(), SandboxError> {
         let output = Command::new(&self.binary)
             .args(["info", "--format", "{{.ServerVersion}}"])
@@ -152,11 +130,7 @@ impl DockerBackend {
         Err(SandboxError::CreateFailed { reason: message })
     }
 
-    /// Verify that the image for the given language is present locally.
-    ///
-    /// The check runs `docker image inspect`. A missing image returns
-    /// `ImageUnavailable`. No pull is attempted; the caller decides how
-    /// to obtain the image.
+    /// Verify that the given image is present locally.
     async fn verify_image(&self, image: &str) -> Result<(), SandboxError> {
         let output = Command::new(&self.binary)
             .args(["image", "inspect", image])
@@ -244,11 +218,18 @@ impl SandboxBackend for DockerBackend {
         spec.quota.validate()?;
         sanitize_env(&spec.env)?;
 
-        let image = Self::image_for(&spec.language).ok_or_else(|| {
-            SandboxError::ImageUnavailable {
-                image: spec.language.clone(),
+        let image = match &spec.image {
+            Some(img) => img.clone(),
+            None => {
+                return Err(SandboxError::ImageUnavailable {
+                    image: format!(
+                        "(no image specified for language '{}'); the docker backend \
+                         requires an explicit image",
+                        spec.language
+                    ),
+                });
             }
-        })?;
+        };
 
         self.verify_available().await?;
         self.verify_image(&image).await?;
@@ -263,6 +244,7 @@ impl SandboxBackend for DockerBackend {
             memory_mb: spec.quota.memory_mb,
             cpu_cores: spec.quota.cpu_cores,
             process_limit: spec.quota.process_limit,
+            image: Some(image),
         })
     }
 
@@ -282,11 +264,18 @@ impl SandboxBackend for DockerBackend {
             });
         }
         sanitize_env(&request.env)?;
-        let image = Self::image_for(&handle.language).ok_or_else(|| {
-            SandboxError::ImageUnavailable {
-                image: handle.language.clone(),
+
+        let image = match &handle.image {
+            Some(img) => img.clone(),
+            None => {
+                return Err(SandboxError::ImageUnavailable {
+                    image: format!(
+                        "(no image recorded on handle for language '{}')",
+                        handle.language
+                    ),
+                });
             }
-        })?;
+        };
 
         let timeout_ms = request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
@@ -366,8 +355,8 @@ impl SandboxBackend for DockerBackend {
         Ok(())
     }
 
-    fn supports_language(&self, language: &str) -> bool {
-        SUPPORTED_LANGUAGES.contains(&language)
+    fn supports_language(&self, _language: &str) -> bool {
+        true
     }
 
     fn resource_limits(&self) -> ResourceQuota {
@@ -385,10 +374,6 @@ async fn collect(task: Option<tokio::task::JoinHandle<(Vec<u8>, bool)>>) -> (Vec
 }
 
 /// Return the first non-empty line of `text`, trimmed.
-///
-/// Used to summarize a multi-line error message into a single line so
-/// the final `SandboxError` display stays readable. The full message is
-/// still available if the caller reaches into the error's source.
 fn first_non_empty_line(text: &str) -> String {
     text.lines()
         .map(str::trim)

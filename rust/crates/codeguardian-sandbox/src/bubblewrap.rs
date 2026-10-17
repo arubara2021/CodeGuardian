@@ -5,26 +5,30 @@
 //! constructs a mount namespace, a PID namespace, and a network
 //! namespace for the child.
 //!
+//! # Language support
+//!
+//! Bubblewrap runs arbitrary Linux binaries. Any language whose
+//! toolchain is installed on the host can be executed inside the
+//! sandbox. `supports_language` therefore returns `true` for every
+//! language — the honest answer is that the backend does not care
+//! about the language; the sandbox executes whatever the caller
+//! asks it to.
+//!
 //! # Mount order
 //!
 //! The order in which bwrap applies mount options matters. `--tmpfs
 //! /tmp` replaces the entire `/tmp` subtree; if it is applied after a
 //! `--bind` whose destination is under `/tmp`, the earlier bind is
-//! shadowed and the destination path stops existing. The command
-//! builder therefore mounts the tmpfs first and the working directory
-//! second, so bwrap creates the working directory's parents inside the
-//! fresh tmpfs and the bind lands on top.
+//! shadowed. The command builder mounts the tmpfs first and the
+//! working directory second.
 //!
 //! # Environment
 //!
 //! `--clearenv` drops the inherited environment. Without it, a host
-//! that has an activated virtual environment prepends that venv's
-//! `bin/` directory to `PATH`, and a WSL host exposes Windows
-//! executables through interop. The first case made `pip3` resolve to
-//! a read-only venv on `/mnt/c/`; the second let `npm` run as a
-//! Windows process outside the sandbox. Both are incorrect. The
-//! builder sets a minimal environment explicitly and then applies the
-//! caller's `request.env` on top.
+//! with an activated virtual environment prepends that venv's `bin/`
+//! directory to `PATH`, and a WSL host exposes Windows executables
+//! through interop. The builder sets a minimal environment explicitly
+//! and then applies the caller's `request.env` on top.
 //!
 //! # Enforcement
 //!
@@ -62,18 +66,10 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 /// SIGTERM and SIGKILL, in seconds.
 const KILL_AFTER_SECONDS: u64 = 5;
 
-/// The languages this backend can execute.
-const SUPPORTED_LANGUAGES: &[&str] = &["python", "typescript"];
-
 /// The base `PATH` inside the sandbox.
-///
-/// `/usr/local/bin` covers locally-installed tools; `/usr/bin` and
-/// `/bin` cover the system. No other directory is on the path by
-/// design — the sandbox does not inherit the host's `PATH`.
 const BASE_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
-/// The base `HOME` inside the sandbox. `HOME` points at the tmpfs so
-/// anything a tool writes there is discarded when the sandbox exits.
+/// The base `HOME` inside the sandbox.
 const BASE_HOME: &str = "/tmp";
 
 /// A Bubblewrap sandbox backend.
@@ -112,17 +108,6 @@ impl BubblewrapBackend {
     }
 
     /// Build the `bwrap` invocation for a request.
-    ///
-    /// Mounts are applied in the order they appear. The root is bound
-    /// read-only first, then a fresh tmpfs replaces `/tmp`, then the
-    /// working directory is bound on top of the tmpfs, then `/proc` and
-    /// `/dev` are mounted. Reversing the tmpfs and working-directory
-    /// steps causes the working directory to be shadowed when its path
-    /// is under `/tmp`.
-    ///
-    /// The environment is cleared before any variable is set.
-    /// `--clearenv` runs first, then the base variables, then the
-    /// caller's overrides.
     fn build_command(&self, handle: &SandboxHandle, request: &ExecutionRequest) -> Command {
         let mut command = Command::new(&self.binary);
 
@@ -195,6 +180,7 @@ impl SandboxBackend for BubblewrapBackend {
             memory_mb: spec.quota.memory_mb,
             cpu_cores: spec.quota.cpu_cores,
             process_limit: spec.quota.process_limit,
+            image: spec.image.clone(),
         })
     }
 
@@ -287,8 +273,8 @@ impl SandboxBackend for BubblewrapBackend {
         Ok(())
     }
 
-    fn supports_language(&self, language: &str) -> bool {
-        SUPPORTED_LANGUAGES.contains(&language)
+    fn supports_language(&self, _language: &str) -> bool {
+        true
     }
 
     fn resource_limits(&self) -> ResourceQuota {

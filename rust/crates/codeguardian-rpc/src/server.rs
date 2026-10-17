@@ -90,10 +90,7 @@ impl RpcServer {
                 ));
             }
         };
-        let response_id = match id {
-            Some(value) => value,
-            None => return None,
-        };
+        let response_id = id?;
         let params = parsed.get("params").cloned().unwrap_or(Value::Null);
         let handler = match self.handlers.get(method) {
             Some(found) => Arc::clone(found),

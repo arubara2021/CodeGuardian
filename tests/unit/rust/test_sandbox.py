@@ -6,8 +6,8 @@ the binary is not built.
 
 The tests exercise the sandbox control plane only: health, handle
 creation, and handle destruction. Executing a command inside a sandbox
-requires an installed backend and is exercised by end-to-end tests in
-a later phase.
+requires an installed backend and is exercised by the enforcement
+tests in `test_sandbox_enforcement.py`.
 """
 
 from __future__ import annotations
@@ -57,6 +57,8 @@ def test_sandbox_health_reports_backends(bridge):
     backends = result["backends"]
     assert "bubblewrap" in backends
     assert "docker" in backends
+    assert "seatbelt" in backends
+    assert "firecracker" in backends
 
 
 def test_sandbox_health_bubblewrap_supports_python(bridge):
@@ -74,7 +76,13 @@ def test_sandbox_health_docker_supports_python(bridge):
     assert result["backends"]["docker"]["supports_python"] is True
 
 
-def test_sandbox_create_returns_handle(bridge, tmp_path):
+def test_sandbox_health_stubs_support_nothing(bridge):
+    result = bridge.call("sandbox.health", {})
+    assert result["backends"]["seatbelt"]["supports_python"] is False
+    assert result["backends"]["firecracker"]["supports_python"] is False
+
+
+def test_sandbox_create_bubblewrap_returns_handle(bridge, tmp_path):
     result = bridge.call(
         "sandbox.create",
         {
@@ -87,9 +95,10 @@ def test_sandbox_create_returns_handle(bridge, tmp_path):
     assert result["language"] == "python"
     assert result["id"].startswith("bwrap-")
     assert result["network_enabled"] is False
+    assert result["image"] is None
 
 
-def test_sandbox_create_uses_bubblewrap_by_default(bridge, tmp_path):
+def test_sandbox_create_bubblewrap_uses_default_backend(bridge, tmp_path):
     result = bridge.call(
         "sandbox.create",
         {"language": "python", "working_dir": str(tmp_path)},
@@ -97,32 +106,39 @@ def test_sandbox_create_uses_bubblewrap_by_default(bridge, tmp_path):
     assert result["backend"] == "bubblewrap"
 
 
-def test_sandbox_create_docker_backend(bridge, tmp_path):
+def test_sandbox_create_bubblewrap_accepts_any_language(bridge, tmp_path):
+    # Bubblewrap runs any Linux binary. Language is a caller hint, not
+    # an allow list, so a language with no special support works.
     result = bridge.call(
         "sandbox.create",
         {
-            "language": "typescript",
+            "language": "rust",
             "working_dir": str(tmp_path),
-            "backend": "docker",
+            "backend": "bubblewrap",
         },
     )
-    assert result["backend"] == "docker"
-    assert result["id"].startswith("docker-")
+    assert result["backend"] == "bubblewrap"
+    assert result["language"] == "rust"
 
 
-def test_sandbox_create_unknown_backend_raises(bridge, tmp_path):
-    with pytest.raises(CodeGuardianError):
+def test_sandbox_create_docker_requires_image(bridge, tmp_path):
+    # Docker needs an image to know what to run. Without one, create
+    # fails with an ImageUnavailable error that names the missing field.
+    with pytest.raises(CodeGuardianError) as exc_info:
         bridge.call(
             "sandbox.create",
             {
-                "language": "python",
+                "language": "typescript",
                 "working_dir": str(tmp_path),
-                "backend": "qemu",
+                "backend": "docker",
             },
         )
+    assert "image" in exc_info.value.message.lower()
 
 
-def test_sandbox_create_unknown_language_with_docker_raises(bridge, tmp_path):
+def test_sandbox_create_docker_requires_image_regardless_of_language(bridge, tmp_path):
+    # No language is rejected by docker upfront; the missing image is
+    # what fails, and it fails the same way for any language.
     with pytest.raises(CodeGuardianError):
         bridge.call(
             "sandbox.create",
@@ -132,6 +148,45 @@ def test_sandbox_create_unknown_language_with_docker_raises(bridge, tmp_path):
                 "backend": "docker",
             },
         )
+
+
+def test_sandbox_create_seatbelt_stub_raises(bridge, tmp_path):
+    with pytest.raises(CodeGuardianError) as exc_info:
+        bridge.call(
+            "sandbox.create",
+            {
+                "language": "python",
+                "working_dir": str(tmp_path),
+                "backend": "seatbelt",
+            },
+        )
+    assert "not implemented" in exc_info.value.message.lower()
+
+
+def test_sandbox_create_firecracker_stub_raises(bridge, tmp_path):
+    with pytest.raises(CodeGuardianError) as exc_info:
+        bridge.call(
+            "sandbox.create",
+            {
+                "language": "python",
+                "working_dir": str(tmp_path),
+                "backend": "firecracker",
+            },
+        )
+    assert "not implemented" in exc_info.value.message.lower()
+
+
+def test_sandbox_create_unknown_backend_raises(bridge, tmp_path):
+    with pytest.raises(CodeGuardianError) as exc_info:
+        bridge.call(
+            "sandbox.create",
+            {
+                "language": "python",
+                "working_dir": str(tmp_path),
+                "backend": "qemu",
+            },
+        )
+    assert "unknown backend" in exc_info.value.message.lower()
 
 
 def test_sandbox_destroy_succeeds_for_created_handle(bridge, tmp_path):
@@ -150,23 +205,6 @@ def test_sandbox_destroy_unknown_backend_raises(bridge, tmp_path):
             {
                 "id": "fake-1",
                 "backend": "qemu",
-                "language": "python",
-                "working_dir": str(tmp_path),
-                "network_enabled": False,
-            },
-        )
-
-
-def test_sandbox_destroy_foreign_handle_raises(bridge, tmp_path):
-    # A handle whose backend field names bubblewrap but whose id has the
-    # docker prefix is not one bubblewrap produced; the backend returns
-    # NotFound because the field does not match its own name.
-    with pytest.raises(CodeGuardianError):
-        bridge.call(
-            "sandbox.destroy",
-            {
-                "id": "docker-99",
-                "backend": "qemu-not-a-real-backend",
                 "language": "python",
                 "working_dir": str(tmp_path),
                 "network_enabled": False,

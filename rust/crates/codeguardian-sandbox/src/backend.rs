@@ -6,10 +6,22 @@
 //! Firecracker, and Docker all implement the same five methods, and
 //! the caller does not know which one is in use.
 //!
-//! The trait is async because every backend either spawns a subprocess
-//! or talks to a socket. The `async_trait` attribute boxes the returned
-//! futures, so the trait stays object safe and callers hold a
-//! `Box<dyn SandboxBackend>`.
+//! # Language agnosticism
+//!
+//! A backend either runs a command or it does not. The `language`
+//! field on a spec is a hint to the caller; it is not a capability the
+//! backend enforces. A Docker backend can run any language whose image
+//! is installed; a Bubblewrap backend can run any Linux binary the
+//! host can execute. `supports_language` is honest about that.
+//!
+//! # Image selection
+//!
+//! `image` on a spec tells the backend which container image to use,
+//! if the backend needs one. Bubblewrap ignores it; the host filesystem
+//! is the source of binaries. Docker requires it; the container image
+//! is what defines what runs. A backend that cannot honour the
+//! requested image returns `ImageUnavailable` at create time, not at
+//! execute time.
 //!
 //! # Environment safety
 //!
@@ -17,17 +29,13 @@
 //! `sanitize_env` rejects a fixed list of environment variables that
 //! would let the caller run code before the command starts, load a
 //! shared object into the process, or redirect the language runtime's
-//! module search path. A spec that carries one of these variables is
-//! rejected at create time; a request that carries one is rejected at
-//! execute time.
+//! module search path.
 //!
 //! # Output safety
 //!
 //! `read_child_stream` reads at most `MAX_OUTPUT_BYTES` from a child's
 //! output. A process that writes more has its extra output discarded
-//! and the `output_truncated` flag set on the result. Without the cap,
-//! a runaway process that writes to stdout would grow the reader's
-//! buffer until the sandbox daemon is killed by the kernel OOM killer.
+//! and the `output_truncated` flag set on the result.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -70,7 +78,8 @@ pub const FORBIDDEN_ENV_KEYS: &[&str] = &[
 /// Everything the backend needs to construct a sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxSpec {
-    /// The language the sandbox will run, e.g. `"python"`.
+    /// The language the sandbox will run, e.g. `"python"`. Advisory;
+    /// see the module docstring.
     pub language: String,
     /// The directory the sandbox will mount or bind as its workspace.
     pub working_dir: PathBuf,
@@ -80,6 +89,11 @@ pub struct SandboxSpec {
     pub quota: ResourceQuota,
     /// Whether the sandbox has network access and in which phase.
     pub network: NetworkPolicy,
+    /// The container image to use, if the backend requires one. Bubblewrap
+    /// ignores this field. Docker requires it. A backend that cannot
+    /// honour the requested image returns `ImageUnavailable` at create
+    /// time.
+    pub image: Option<String>,
 }
 
 impl SandboxSpec {
@@ -92,6 +106,7 @@ impl SandboxSpec {
             env: HashMap::new(),
             quota: ResourceQuota::default(),
             network: NetworkPolicy::deny_all(),
+            image: None,
         }
     }
 }
@@ -103,9 +118,10 @@ impl SandboxSpec {
 /// receives a handle it did not produce returns `SandboxError::NotFound`
 /// rather than guessing.
 ///
-/// `network_enabled` and the three quota fields are captured at
-/// creation and travel with the handle so `execute` can reconstruct
-/// the sandbox's resource state without a side table.
+/// `image` carries the image the sandbox was created with, so `execute`
+/// can reconstruct the sandbox's container identity without a side
+/// table. Bubblewrap always sets it to `None`; docker always sets it to
+/// `Some`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxHandle {
     /// The opaque id assigned by the backend.
@@ -124,6 +140,8 @@ pub struct SandboxHandle {
     pub cpu_cores: u32,
     /// Process count limit.
     pub process_limit: u32,
+    /// The container image, if the backend uses one.
+    pub image: Option<String>,
 }
 
 /// One command to run inside a live sandbox.
@@ -199,6 +217,15 @@ pub trait SandboxBackend: Send + Sync {
     async fn destroy(&self, handle: SandboxHandle) -> Result<(), SandboxError>;
 
     /// Return whether this backend can execute the named language.
+    ///
+    /// A backend that runs any Linux binary — Bubblewrap — returns true
+    /// for every language. A backend whose execution depends on an
+    /// image — Docker — returns true because the image the caller
+    /// supplies determines what runs. A stub returns false because it
+    /// cannot execute anything at all.
+    ///
+    /// The answer is about the backend's capability, not about whether
+    /// the language's runtime is installed on the host.
     fn supports_language(&self, language: &str) -> bool;
 
     /// Return the resource limits this backend will enforce.
@@ -226,8 +253,7 @@ pub(crate) fn sanitize_env(env: &HashMap<String, String>) -> Result<(), SandboxE
 /// Return a canonical, validated working directory.
 ///
 /// Rejects a path that does not exist, is not a directory, or resolves
-/// to a top-level system directory. The canonical form is returned so
-/// the caller stores the resolved path rather than the input.
+/// to a top-level system directory.
 pub(crate) fn validate_working_dir(path: &Path) -> Result<PathBuf, SandboxError> {
     const FORBIDDEN: &[&str] = &[
         "/", "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/root", "/run",

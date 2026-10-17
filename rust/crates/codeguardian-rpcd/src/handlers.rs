@@ -10,9 +10,15 @@
 //! Every sandbox handler matches on the `backend` field and dispatches
 //! to the corresponding implementation. The four backends — bubblewrap,
 //! docker, seatbelt, firecracker — are all wired in. The two stubs
-//! return a `CreateFailed` that names the missing implementation, so a
-//! caller learns the backend exists but is not built rather than
-//! receiving "unknown backend".
+//! return a `CreateFailed` that names the missing implementation.
+//!
+//! # Language agnosticism
+//!
+//! `sandbox.create` does not check the language. A backend that can
+//! run arbitrary Linux binaries (bubblewrap) will run any language; a
+//! backend that runs container images (docker) uses whatever image the
+//! caller supplies. The `language` field is a caller hint, not an
+//! allow list.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -59,6 +65,13 @@ pub async fn sandbox_health(_params: Value) -> Result<Value, RpcError> {
 }
 
 /// Create a sandbox handle.
+///
+/// Required parameters: `language` and `working_dir`. Optional:
+/// `backend` (default `"bubblewrap"`), `memory_mb`, `cpu_cores`,
+/// `process_limit`, `network_enabled`, `image`.
+///
+/// The `image` parameter is required when `backend` is `"docker"`.
+/// Supplying an image to bubblewrap is allowed but ignored.
 pub async fn sandbox_create(params: Value) -> Result<Value, RpcError> {
     let language = get_string(&params, "language")?;
     let working_dir = get_string(&params, "working_dir")?;
@@ -76,6 +89,9 @@ pub async fn sandbox_create(params: Value) -> Result<Value, RpcError> {
     }
     if let Some(pids) = params.get("process_limit").and_then(Value::as_u64) {
         spec.quota.process_limit = pids as u32;
+    }
+    if let Some(image) = params.get("image").and_then(Value::as_str) {
+        spec.image = Some(image.to_owned());
     }
     if params
         .get("network_enabled")
@@ -258,6 +274,7 @@ fn handle_to_json(handle: &SandboxHandle) -> Value {
         "memory_mb": handle.memory_mb,
         "cpu_cores": handle.cpu_cores,
         "process_limit": handle.process_limit,
+        "image": handle.image,
     })
 }
 
@@ -283,6 +300,10 @@ fn handle_from_json(value: &Value) -> Result<SandboxHandle, RpcError> {
         .get("process_limit")
         .and_then(Value::as_u64)
         .unwrap_or(256) as u32;
+    let image = value
+        .get("image")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 
     Ok(SandboxHandle {
         id: SandboxId::new(id),
@@ -293,6 +314,7 @@ fn handle_from_json(value: &Value) -> Result<SandboxHandle, RpcError> {
         memory_mb,
         cpu_cores,
         process_limit,
+        image,
     })
 }
 

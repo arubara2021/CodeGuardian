@@ -5,6 +5,22 @@
 //! is weaker than Bubblewrap's because the daemon runs outside the
 //! sandbox's trust boundary.
 //!
+//! # Availability check
+//!
+//! `create` performs two probes before returning a handle. The first,
+//! `docker info`, proves the CLI can reach a running daemon. The second,
+//! `docker image inspect`, proves the language-specific image exists
+//! locally. Either probe failing produces a distinct error that names
+//! what is actually wrong: a missing binary, a WSL shim whose host
+//! integration is disabled, a daemon that is down, or an image that has
+//! not been pulled. The contract of `create` is that `execute` can
+//! follow; both probes are required to keep that contract honest.
+//!
+//! Images are never pulled implicitly. A host that has Docker but not
+//! the CodeGuardian images returns `ImageUnavailable` from `create`,
+//! and the caller decides whether to build or pull. Implicit pulls would
+//! make `create` unbounded in time and dependent on the network.
+//!
 //! # Enforcement
 //!
 //! The backend passes the handle's quota directly to `docker run`:
@@ -91,6 +107,76 @@ impl DockerBackend {
         }
     }
 
+    /// Verify that the docker CLI can reach a running daemon.
+    ///
+    /// Three failure modes are distinguished by the content of the
+    /// command's output. A spawn failure means the binary is absent.
+    /// An output that mentions the daemon is the daemon being down. Any
+    /// other non-zero exit is reported as the docker CLI being
+    /// unavailable, which covers the WSL shim whose integration is
+    /// disabled and any other exotic wrapper.
+    async fn verify_available(&self) -> Result<(), SandboxError> {
+        let output = Command::new(&self.binary)
+            .args(["info", "--format", "{{.ServerVersion}}"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|err| SandboxError::CreateFailed {
+                reason: format!("docker binary not found: {err}"),
+            })?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("{stderr}\n{stdout}");
+        let combined_lower = combined.to_ascii_lowercase();
+
+        let message = if combined_lower.contains("cannot connect to the docker daemon")
+            || combined_lower.contains("is the docker daemon running")
+            || combined_lower.contains("error during connect")
+        {
+            format!("docker daemon not reachable: {}", first_non_empty_line(&combined))
+        } else if combined_lower.contains("wsl")
+            || combined_lower.contains("could not be found")
+            || combined_lower.contains("not found in this")
+        {
+            format!("docker is not available on this host: {}", first_non_empty_line(&combined))
+        } else {
+            format!("docker CLI exited with status {}: {}", output.status, first_non_empty_line(&combined))
+        };
+
+        Err(SandboxError::CreateFailed { reason: message })
+    }
+
+    /// Verify that the image for the given language is present locally.
+    ///
+    /// The check runs `docker image inspect`. A missing image returns
+    /// `ImageUnavailable`. No pull is attempted; the caller decides how
+    /// to obtain the image.
+    async fn verify_image(&self, image: &str) -> Result<(), SandboxError> {
+        let output = Command::new(&self.binary)
+            .args(["image", "inspect", image])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|err| SandboxError::CreateFailed {
+                reason: format!("docker binary not found: {err}"),
+            })?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        Err(SandboxError::ImageUnavailable {
+            image: image.to_owned(),
+        })
+    }
+
     /// Return a container name unique to this execution.
     fn container_name(handle: &SandboxHandle, salt: u64) -> String {
         format!("codeguardian-{}-{}", handle.id.as_str(), salt)
@@ -157,11 +243,16 @@ impl SandboxBackend for DockerBackend {
     async fn create(&self, spec: &SandboxSpec) -> Result<SandboxHandle, SandboxError> {
         spec.quota.validate()?;
         sanitize_env(&spec.env)?;
-        if Self::image_for(&spec.language).is_none() {
-            return Err(SandboxError::ImageUnavailable {
+
+        let image = Self::image_for(&spec.language).ok_or_else(|| {
+            SandboxError::ImageUnavailable {
                 image: spec.language.clone(),
-            });
-        }
+            }
+        })?;
+
+        self.verify_available().await?;
+        self.verify_image(&image).await?;
+
         let working_dir = validate_working_dir(&spec.working_dir)?;
         Ok(SandboxHandle {
             id: self.next_id(),
@@ -254,9 +345,6 @@ impl SandboxBackend for DockerBackend {
                 })
             }
             Err(_) => {
-                // Stop the container before killing the CLI. The daemon
-                // stops the container asynchronously; the CLI exit
-                // releases the caller either way.
                 let _ = Command::new(&self.binary)
                     .args(["kill", &container_name])
                     .stdout(Stdio::null())
@@ -294,4 +382,17 @@ async fn collect(task: Option<tokio::task::JoinHandle<(Vec<u8>, bool)>>) -> (Vec
         Some(handle) => handle.await.unwrap_or_default(),
         None => (Vec::new(), false),
     }
+}
+
+/// Return the first non-empty line of `text`, trimmed.
+///
+/// Used to summarize a multi-line error message into a single line so
+/// the final `SandboxError` display stays readable. The full message is
+/// still available if the caller reaches into the error's source.
+fn first_non_empty_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_owned()
 }

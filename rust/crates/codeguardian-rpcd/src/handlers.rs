@@ -4,6 +4,15 @@
 //! returns a JSON value or an `RpcError`. Parameter validation is
 //! performed here; the sandbox and audit crates receive typed inputs
 //! and never see unvalidated JSON.
+//!
+//! # Backend routing
+//!
+//! Every sandbox handler matches on the `backend` field and dispatches
+//! to the corresponding implementation. The four backends — bubblewrap,
+//! docker, seatbelt, firecracker — are all wired in. The two stubs
+//! return a `CreateFailed` that names the missing implementation, so a
+//! caller learns the backend exists but is not built rather than
+//! receiving "unknown backend".
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,8 +22,8 @@ use serde_json::{json, Value};
 use codeguardian_audit::{export_json_array, export_jsonl, verify_chain, AuditWriter};
 use codeguardian_rpc::RpcError;
 use codeguardian_sandbox::{
-    BubblewrapBackend, DockerBackend, ExecutionRequest, SandboxBackend, SandboxHandle, SandboxId,
-    SandboxSpec,
+    BubblewrapBackend, DockerBackend, ExecutionRequest, FirecrackerBackend, SandboxBackend,
+    SandboxHandle, SandboxId, SandboxSpec, SeatbeltBackend,
 };
 
 /// The JSON-RPC error code for invalid method parameters.
@@ -24,6 +33,8 @@ const INVALID_PARAMS: i64 = -32602;
 pub async fn sandbox_health(_params: Value) -> Result<Value, RpcError> {
     let bubblewrap = BubblewrapBackend::new();
     let docker = DockerBackend::new();
+    let seatbelt = SeatbeltBackend::new();
+    let firecracker = FirecrackerBackend::new();
     Ok(json!({
         "status": "ok",
         "backends": {
@@ -35,15 +46,19 @@ pub async fn sandbox_health(_params: Value) -> Result<Value, RpcError> {
                 "supports_python": docker.supports_language("python"),
                 "supports_typescript": docker.supports_language("typescript"),
             },
+            "seatbelt": {
+                "supports_python": seatbelt.supports_language("python"),
+                "supports_typescript": seatbelt.supports_language("typescript"),
+            },
+            "firecracker": {
+                "supports_python": firecracker.supports_language("python"),
+                "supports_typescript": firecracker.supports_language("typescript"),
+            },
         }
     }))
 }
 
 /// Create a sandbox handle.
-///
-/// Required parameters: `language` and `working_dir`. Optional:
-/// `backend` (default `"bubblewrap"`), `memory_mb`, `cpu_cores`,
-/// `process_limit`, `network_enabled`.
 pub async fn sandbox_create(params: Value) -> Result<Value, RpcError> {
     let language = get_string(&params, "language")?;
     let working_dir = get_string(&params, "working_dir")?;
@@ -70,9 +85,11 @@ pub async fn sandbox_create(params: Value) -> Result<Value, RpcError> {
         spec.network = codeguardian_sandbox::NetworkPolicy::allow_for_dependencies();
     }
 
-    let handle_result = match backend_name {
+    let handle = match backend_name {
         "bubblewrap" => BubblewrapBackend::new().create(&spec).await,
         "docker" => DockerBackend::new().create(&spec).await,
+        "seatbelt" => SeatbeltBackend::new().create(&spec).await,
+        "firecracker" => FirecrackerBackend::new().create(&spec).await,
         other => {
             return Err(RpcError {
                 code: INVALID_PARAMS,
@@ -80,9 +97,9 @@ pub async fn sandbox_create(params: Value) -> Result<Value, RpcError> {
                 data: None,
             });
         }
-    };
+    }
+    .map_err(|err| internal_error(err.to_string()))?;
 
-    let handle = handle_result.map_err(|err| internal_error(err.to_string()))?;
     Ok(handle_to_json(&handle))
 }
 
@@ -93,6 +110,8 @@ pub async fn sandbox_destroy(params: Value) -> Result<Value, RpcError> {
     let result = match handle.backend.as_str() {
         "bubblewrap" => BubblewrapBackend::new().destroy(handle).await,
         "docker" => DockerBackend::new().destroy(handle).await,
+        "seatbelt" => SeatbeltBackend::new().destroy(handle).await,
+        "firecracker" => FirecrackerBackend::new().destroy(handle).await,
         other => {
             return Err(RpcError {
                 code: INVALID_PARAMS,
@@ -107,9 +126,6 @@ pub async fn sandbox_destroy(params: Value) -> Result<Value, RpcError> {
 }
 
 /// Run a command inside a live sandbox.
-///
-/// Required parameters: `handle` and `command`. Optional: `cwd`,
-/// `env`, `timeout_ms`, `stdin`.
 pub async fn sandbox_execute(params: Value) -> Result<Value, RpcError> {
     let handle_value = params.get("handle").ok_or_else(|| RpcError {
         code: INVALID_PARAMS,
@@ -156,6 +172,8 @@ pub async fn sandbox_execute(params: Value) -> Result<Value, RpcError> {
     let result = match handle.backend.as_str() {
         "bubblewrap" => BubblewrapBackend::new().execute(&handle, &request).await,
         "docker" => DockerBackend::new().execute(&handle, &request).await,
+        "seatbelt" => SeatbeltBackend::new().execute(&handle, &request).await,
+        "firecracker" => FirecrackerBackend::new().execute(&handle, &request).await,
         other => {
             return Err(RpcError {
                 code: INVALID_PARAMS,

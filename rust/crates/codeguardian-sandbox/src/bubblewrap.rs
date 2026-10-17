@@ -15,6 +15,17 @@
 //! second, so bwrap creates the working directory's parents inside the
 //! fresh tmpfs and the bind lands on top.
 //!
+//! # Environment
+//!
+//! `--clearenv` drops the inherited environment. Without it, a host
+//! that has an activated virtual environment prepends that venv's
+//! `bin/` directory to `PATH`, and a WSL host exposes Windows
+//! executables through interop. The first case made `pip3` resolve to
+//! a read-only venv on `/mnt/c/`; the second let `npm` run as a
+//! Windows process outside the sandbox. Both are incorrect. The
+//! builder sets a minimal environment explicitly and then applies the
+//! caller's `request.env` on top.
+//!
 //! # Enforcement
 //!
 //! The backend enforces six properties. The workspace is the only
@@ -53,6 +64,17 @@ const KILL_AFTER_SECONDS: u64 = 5;
 
 /// The languages this backend can execute.
 const SUPPORTED_LANGUAGES: &[&str] = &["python", "typescript"];
+
+/// The base `PATH` inside the sandbox.
+///
+/// `/usr/local/bin` covers locally-installed tools; `/usr/bin` and
+/// `/bin` cover the system. No other directory is on the path by
+/// design — the sandbox does not inherit the host's `PATH`.
+const BASE_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
+/// The base `HOME` inside the sandbox. `HOME` points at the tmpfs so
+/// anything a tool writes there is discarded when the sandbox exits.
+const BASE_HOME: &str = "/tmp";
 
 /// A Bubblewrap sandbox backend.
 pub struct BubblewrapBackend {
@@ -97,6 +119,10 @@ impl BubblewrapBackend {
     /// `/dev` are mounted. Reversing the tmpfs and working-directory
     /// steps causes the working directory to be shadowed when its path
     /// is under `/tmp`.
+    ///
+    /// The environment is cleared before any variable is set.
+    /// `--clearenv` runs first, then the base variables, then the
+    /// caller's overrides.
     fn build_command(&self, handle: &SandboxHandle, request: &ExecutionRequest) -> Command {
         let mut command = Command::new(&self.binary);
 
@@ -115,6 +141,14 @@ impl BubblewrapBackend {
         command.arg("--bind").arg(&handle.working_dir).arg(&handle.working_dir);
         command.arg("--proc").arg("/proc");
         command.arg("--dev").arg("/dev");
+
+        command.arg("--clearenv");
+        command.arg("--setenv").arg("PATH").arg(BASE_PATH);
+        command.arg("--setenv").arg("HOME").arg(BASE_HOME);
+        command.arg("--setenv").arg("LANG").arg("C.UTF-8");
+        command.arg("--setenv").arg("LC_ALL").arg("C.UTF-8");
+        command.arg("--setenv").arg("TERM").arg("dumb");
+        command.arg("--setenv").arg("TMPDIR").arg(BASE_HOME);
 
         for (key, value) in &request.env {
             command.arg("--setenv").arg(key).arg(value);

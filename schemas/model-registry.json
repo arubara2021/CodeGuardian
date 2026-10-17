@@ -1,0 +1,218 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://codeguardian.dev/schemas/model-registry/v2.0.json",
+    "title": "Model Registry",
+    "type": "object",
+    "required": [
+        "schema_version",
+        "providers",
+        "roles",
+        "cooldown_seconds"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "schema_version": {
+            "type": "string",
+            "const": "2.0"
+        },
+        "providers": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+                "$ref": "#/$defs/provider"
+            }
+        },
+        "roles": {
+            "type": "object",
+            "required": [
+                "analyst",
+                "tester",
+                "writer",
+                "correctness_verifier",
+                "security_verifier",
+                "contract_verifier",
+                "skill_curator"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "analyst": {
+                    "$ref": "#/$defs/role"
+                },
+                "tester": {
+                    "$ref": "#/$defs/role"
+                },
+                "writer": {
+                    "$ref": "#/$defs/role"
+                },
+                "correctness_verifier": {
+                    "$ref": "#/$defs/role"
+                },
+                "security_verifier": {
+                    "$ref": "#/$defs/role"
+                },
+                "contract_verifier": {
+                    "$ref": "#/$defs/role"
+                },
+                "skill_curator": {
+                    "$ref": "#/$defs/role"
+                }
+            }
+        },
+        "cooldown_seconds": {
+            "type": "number",
+            "minimum": 0
+        },
+        "extensions": {
+            "type": "object",
+            "additionalProperties": true
+        }
+    },
+    "$defs": {
+        "provider": {
+            "type": "object",
+            "required": [
+                "adapter",
+                "api_key_source"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "adapter": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "base_url": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "api_key_source": {
+                    "type": "string",
+                    "enum": [
+                        "keychain",
+                        "env",
+                        "none"
+                    ]
+                },
+                "api_key_env": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        },
+        "role": {
+            "type": "object",
+            "required": [
+                "mode"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": [
+                        "pinned",
+                        "chain",
+                        "auto"
+                    ]
+                },
+                "primary": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "fallbacks": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "uniqueItems": true
+                },
+                "constraints": {
+                    "$ref": "#/$defs/constraints"
+                },
+                "quality_cost_balance": {
+                    "$ref": "#/$defs/balance"
+                },
+                "require_no_tool_calls": {
+                    "type": "boolean"
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        },
+        "constraints": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "min_tier": {
+                    "type": [
+                        "string",
+                        "null"
+                    ],
+                    "enum": [
+                        "frontier",
+                        "mid",
+                        "local",
+                        null
+                    ]
+                },
+                "requires_capabilities": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "coding",
+                            "reasoning",
+                            "tools",
+                            "long_context"
+                        ]
+                    },
+                    "uniqueItems": true
+                },
+                "min_context_window": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "different_family_from": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "extensions": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        },
+        "balance": {
+            "type": "object",
+            "required": [
+                "alpha",
+                "beta"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "alpha": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                },
+                "beta": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                }
+            }
+        }
+    }
+}

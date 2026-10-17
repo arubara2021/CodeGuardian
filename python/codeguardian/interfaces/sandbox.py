@@ -9,8 +9,9 @@ dependency-resolution phase controlled by the caller.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 
 __all__ = [
@@ -27,34 +28,67 @@ class SandboxSpec:
     """The configuration used to create a sandbox.
 
     Attributes:
-        language: Primary language the sandbox will execute.
+        language: Primary language the sandbox will execute. It is a
+            caller hint, not an allow list. Bubblewrap runs any Linux
+            binary, and Docker runs whatever image the caller supplies,
+            so the language name does not gate creation.
+        working_dir: Host directory that is bind-mounted read-write
+            into the sandbox at the same absolute path. Every sandbox
+            must have one. The daemon uses it both as the bind source
+            and as the working directory commands run in, so a caller
+            that places files in ``working_dir`` before creation finds
+            them inside the sandbox without path translation.
         memory_mb: Memory limit in mebibytes.
         cpu_cores: CPU core limit.
         process_limit: Maximum number of processes.
         network_during_deps: Whether the network is enabled during
-            dependency resolution.
+            dependency resolution. The execution phase that follows is
+            always network-isolated.
+        image: Container image the backend will run. Required by the
+            Docker backend, ignored by Bubblewrap and by the stubs.
     """
 
     language: str
+    working_dir: Path
     memory_mb: int
     cpu_cores: int
     process_limit: int
     network_during_deps: bool
+    image: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class SandboxHandle:
-    """An opaque reference to a running sandbox.
+    """A handle to a running sandbox.
+
+    The fields mirror the handle the Rust daemon emits from
+    ``sandbox.create``. Keeping them in lockstep means that
+    ``execute`` and ``destroy`` can pass the handle back to the daemon
+    without a Python-side side table, and the daemon can reconstruct
+    the sandbox's resource state from the handle alone.
 
     Attributes:
         id: Backend-specific identifier for the sandbox.
         backend: Name of the backend that created the sandbox.
-        created_at: Timestamp the sandbox was created.
+        language: The language the sandbox was created for.
+        working_dir: The host directory bound into the sandbox.
+        network_enabled: Whether the sandbox permits network access.
+        memory_mb: Memory limit enforced on the sandbox.
+        cpu_cores: CPU limit enforced on the sandbox.
+        process_limit: Process limit enforced on the sandbox.
+        image: Container image the sandbox runs when the backend is
+            Docker; ``None`` for backends that do not use one.
     """
 
     id: str
     backend: str
-    created_at: datetime
+    language: str
+    working_dir: Path
+    network_enabled: bool
+    memory_mb: int
+    cpu_cores: int
+    process_limit: int
+    image: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +102,15 @@ class ExecutionResult:
         timed_out: Whether the process was killed for exceeding the
             timeout.
         duration_ms: Wall-clock duration of the run, in milliseconds.
+        oom_killed: Whether the process was killed by the kernel OOM
+            killer. Distinguishing this from a timeout matters: an
+            OOM kill means the memory limit was too low, a timeout
+            means the process was too slow, and a caller retrying with
+            a larger budget picks a different knob for each case.
+        output_truncated: Whether captured output exceeded the
+            backend's buffer and was truncated. Truncation is not an
+            error, but a caller that depends on the full output must
+            know that the value it sees is not the whole value.
     """
 
     stdout: str
@@ -75,6 +118,8 @@ class ExecutionResult:
     exit_code: int
     timed_out: bool
     duration_ms: int
+    oom_killed: bool
+    output_truncated: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,16 +170,40 @@ class SandboxBackend(Protocol):
     def execute(
         self,
         sandbox: SandboxHandle,
-        command: str,
-        timeout: int,
+        command: Sequence[str],
+        *,
+        env: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+        timeout_ms: int | None = None,
+        stdin: bytes | None = None,
     ) -> ExecutionResult:
         """Run ``command`` inside the sandbox.
 
+        ``command`` is an argument vector, not a shell string. A
+        vector passes through to the child process unchanged, so the
+        backend never has to make shell-quoting decisions, and a
+        caller that builds a vector cannot accidentally smuggle a
+        metacharacter into a shell word. A caller that wants shell
+        semantics runs ``["/bin/sh", "-c", script]`` explicitly.
+
         Args:
             sandbox: Handle returned by ``create``.
-            command: Shell command to run.
-            timeout: Maximum wall-clock seconds before the process is
-                killed.
+            command: Argument vector to run. The first element is the
+                program, the remaining elements are its arguments.
+            env: Environment variables to set on the child process.
+                When ``None``, the backend uses its own default
+                environment, which never includes the caller's
+                environment variables. The backend sanitizes this
+                mapping before it reaches the child.
+            cwd: Working directory for the command, expressed as an
+                absolute path. When ``None``, the command runs in the
+                sandbox's ``working_dir``.
+            timeout_ms: Maximum wall-clock milliseconds before the
+                process is killed. When ``None``, the backend uses
+                its default.
+            stdin: Bytes written to the child's standard input, after
+                which the stream is closed. When ``None``, the child
+                receives an immediate EOF.
 
         Returns:
             The result of the run.

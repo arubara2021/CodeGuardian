@@ -1,0 +1,142 @@
+{
+    "schema_version": "2.0",
+    "providers": {
+        "groq": {
+            "adapter": "openai_compatible",
+            "base_url": "https://api.groq.com/openai/v1",
+            "api_key_source": "env",
+            "api_key_env": "GROQ_API_KEY"
+        },
+        "anthropic": {
+            "adapter": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "api_key_source": "keychain",
+            "api_key_env": null
+        },
+        "openai": {
+            "adapter": "openai",
+            "base_url": "https://api.openai.com/v1",
+            "api_key_source": "keychain",
+            "api_key_env": null
+        },
+        "deepseek": {
+            "adapter": "deepseek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key_source": "keychain",
+            "api_key_env": null
+        }
+    },
+    "roles": {
+        "analyst": {
+            "mode": "auto",
+            "constraints": {
+                "min_tier": null,
+                "requires_capabilities": [
+                    "reasoning"
+                ],
+                "min_context_window": 0,
+                "different_family_from": null
+            },
+            "quality_cost_balance": {
+                "alpha": 0.5,
+                "beta": 0.5
+            },
+            "require_no_tool_calls": false
+        },
+        "tester": {
+            "mode": "auto",
+            "constraints": {
+                "min_tier": null,
+                "requires_capabilities": [
+                    "coding"
+                ],
+                "min_context_window": 0,
+                "different_family_from": null
+            },
+            "quality_cost_balance": {
+                "alpha": 0.7,
+                "beta": 0.3
+            },
+            "require_no_tool_calls": false
+        },
+        "writer": {
+            "mode": "auto",
+            "constraints": {
+                "min_tier": "frontier",
+                "requires_capabilities": [
+                    "coding"
+                ],
+                "min_context_window": 0,
+                "different_family_from": null
+            },
+            "quality_cost_balance": {
+                "alpha": 0.8,
+                "beta": 0.2
+            },
+            "require_no_tool_calls": true
+        },
+        "correctness_verifier": {
+            "mode": "auto",
+            "constraints": {
+                "min_tier": null,
+                "requires_capabilities": [
+                    "reasoning"
+                ],
+                "min_context_window": 0,
+                "different_family_from": "writer"
+            },
+            "quality_cost_balance": {
+                "alpha": 0.7,
+                "beta": 0.3
+            },
+            "require_no_tool_calls": true
+        },
+        "security_verifier": {
+            "mode": "auto",
+            "constraints": {
+                "min_tier": null,
+                "requires_capabilities": [
+                    "reasoning"
+                ],
+                "min_context_window": 0,
+                "different_family_from": "writer"
+            },
+            "quality_cost_balance": {
+                "alpha": 0.7,
+                "beta": 0.3
+            },
+            "require_no_tool_calls": true
+        },
+        "contract_verifier": {
+            "mode": "auto",
+            "constraints": {
+                "min_tier": null,
+                "requires_capabilities": [
+                    "reasoning"
+                ],
+                "min_context_window": 0,
+                "different_family_from": "writer"
+            },
+            "quality_cost_balance": {
+                "alpha": 0.7,
+                "beta": 0.3
+            },
+            "require_no_tool_calls": true
+        },
+        "skill_curator": {
+            "mode": "auto",
+            "constraints": {
+                "min_tier": null,
+                "requires_capabilities": [],
+                "min_context_window": 0,
+                "different_family_from": null
+            },
+            "quality_cost_balance": {
+                "alpha": 0.3,
+                "beta": 0.7
+            },
+            "require_no_tool_calls": false
+        }
+    },
+    "cooldown_seconds": 60
+}

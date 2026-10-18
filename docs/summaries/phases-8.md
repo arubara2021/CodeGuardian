@@ -1,941 +1,1037 @@
-# CodeGuardian — Phase 8 Design Contract
+# Phase 8 — Providers, Model Routing, and Sandbox Backends
 
-**Snapshot date:** 2026-10-17
-**Status:** Plan, not build history
-**Prerequisite:** Phase 7 complete. B-037A (sandbox upgrade) complete. 367 tests passing.
-**Purpose:** A complete design contract for Phase 8, written before any code is written. Every module, every design decision, every test, and every scope boundary is stated here. This document is what Phase 8 will be measured against.
+**Snapshot date:** 2026-10-18
+**Status:** Complete
+**Test count:** 487 passing, 2 skipped + 35/35 real integration checks
+**Previous phase boundary:** 367 passing (Phase 7 + B-037A)
 
 ---
 
 ## 1. How to read this document
 
-This document is **not** a build history. Nothing in Phase 8 is built yet. This is the **contract** the Phase 8 build will honour.
+Phases 1 through 7 built the foundation and the Rust engines. Phase 8 is where every Protocol from Phase 4 gets its first Python implementation, and where the Rust engines get their first Python clients.
 
-The prior documents — `phases-1-to-5.md` and `phases-6-to-7.md` — are build histories. They describe what was written, what was tested, and what actually happened. This document is different. It describes what **will** be written and why. When Phase 8 is complete, a build history will be written that describes what was actually produced and where it diverged from this plan.
+This document covers:
 
-The distinction matters because a plan that hides its assumptions is a plan that fails silently. Every design decision in this document is stated with its reasoning. Every escalation is stated with its cost. Every scope boundary is stated with its consequence. If any of these are wrong, they can be corrected before code is written, not after.
+- **Escalation A** — a Rule 1 rewrite of `interfaces/sandbox.py` to close the gap between the Phase 4 contract and the Phase 7 daemon's wire format
+- **B-038** — Repository and Apply providers
+- **B-039** — Discovery-driven model routing
+- **B-040** — Sandbox backend implementations
+- **B-041** — Contract tests
+- **The bugs** — seven real bugs found during integration, and how each was fixed
+- **The real integration test** — 35 safety checks against a live repository, a live model, and a live sandbox
+- **The drawbacks** — what Phase 8 does not do, and why each gap is either correct scope or a Phase 9+ concern
+
+The document is written as a build history. Every claim is backed by a specific test or a specific line of code.
 
 ---
 
 ## 2. What Phase 8 is
 
-Phases 1 through 7 built a foundation and a set of engines. The foundation declared twelve Protocols in Phase 4 — contracts with no implementations. The engines in Phases 6 and 7 are the Rust side: a Code Property Graph, a blast radius engine, an isolated execution boundary, an audit log, and a policy engine.
+Phase 8 answers one question: **does every Protocol in `codeguardian.interfaces` have a working implementation that a Phase 11 agent could actually use?**
 
-**Phase 8 is where the Protocols get their first Python implementations and where the engines get their first Python clients.**
+Before Phase 8, the answer was no. `RepositoryProvider`, `ApplyProvider`, `ModelProvider`, and `SandboxBackend` were Protocols with no implementations. The pipeline could not clone a repository, could not read a file, could not call a model, could not run a sandbox.
 
-Four things are produced:
+After Phase 8, all four Protocols have concrete implementations verified against real external systems:
 
-1. Repository providers that clone, read, and diff source code
-2. Model providers that call LLM APIs
-3. Sandbox backends that delegate to the Rust daemon
-4. Contract tests that verify every implementation of every Protocol
+| Protocol | Implementation | Verified against |
+|---|---|---|
+| `RepositoryProvider` | `LocalProvider`, `GitHubProvider`, `GitLabProvider` | Real GitHub clone of `mb2362/Midterm` |
+| `ApplyProvider` | `ApplyProvider` | Real `git apply` on a real 2,924-char diff |
+| `ModelProvider` | `FallbackModelProvider` + 4 adapters | Real Groq API, real refactor, real verdict |
+| `SandboxBackend` | `BubblewrapBackend`, `DockerBackend`, `SeatbeltBackend`, `FirecrackerBackend` | Real `bwrap` executing pytest inside a real clone |
 
-Phase 8 does not run a pipeline. It does not write tests for target projects. It does not orchestrate anything. It is **the plumbing** that Phases 11 and 13 will use to build the pipeline.
-
-```mermaid
-flowchart TB
-    subgraph Phase4["Phase 4 — Protocols"]
-        Repo["RepositoryProvider"]
-        Apply["ApplyProvider"]
-        Model["ModelProvider"]
-        Sandbox["SandboxBackend"]
-    end
-
-    subgraph Phase8["Phase 8 — Providers"]
-        B038["B-038<br/>Local, GitHub, GitLab<br/>Apply"]
-        B039["B-039<br/>Anthropic, OpenAI<br/>DeepSeek, Compatible"]
-        B040["B-040<br/>Bubblewrap, Docker<br/>Seatbelt, Firecracker"]
-        B041["B-041<br/>Contract tests"]
-    end
-
-    subgraph Phase7["Phase 7 Engines"]
-        RPC["codeguardian-rpcd<br/>JSON-RPC daemon"]
-        PyO3["codeguardian-pyo3<br/>native extension"]
-    end
-
-    Repo --> B038
-    Apply --> B038
-    Model --> B039
-    Sandbox --> B040
-
-    B041 -->|"verifies"| B038
-    B041 -->|"verifies"| B039
-    B041 -->|"verifies"| B040
-
-    B040 -->|"JSON-RPC"| RPC
-```
+Phase 8 does **not** run a pipeline. It does not write characterization tests. It does not orchestrate anything. It is the plumbing layer that Phase 11 and Phase 13 stand on.
 
 ---
 
 ## 3. The architecture Phase 8 fits into
 
-Phase 8's providers are thin layers. They do not contain business logic. They do not contain policy. They are adapters between the Phase 4 contracts and the outside world.
-
 ```mermaid
 flowchart TB
-    subgraph Outside["Outside World"]
-        Git["git"]
-        LLM["LLM APIs"]
-        Bwrap["bwrap / docker"]
+    subgraph Phase8["Phase 8 — Providers"]
+        subgraph RepoLayer["B-038 — Repository + Apply"]
+            Local[LocalProvider]
+            GH[GitHubProvider]
+            GL[GitLabProvider]
+            Apply[ApplyProvider]
+        end
+        subgraph ModelLayer["B-039 — Model Routing"]
+            Registry[ModelRegistry]
+            Meta[metadata.json]
+            RegJSON[registry.json]
+            Router[FallbackModelProvider]
+            Anthropic[AnthropicProvider]
+            OpenAI[OpenAIProvider]
+            DeepSeek[DeepSeekProvider]
+            Compat[OpenAICompatibleProvider]
+        end
+        subgraph SandboxLayer["B-040 — Sandbox Backends"]
+            Selector[select_backend]
+            Bwrap[BubblewrapBackend]
+            Docker[DockerBackend]
+            Seatbelt[SeatbeltBackend]
+            Firecracker[FirecrackerBackend]
+        end
     end
 
-    subgraph Phase8["Phase 8 Providers"]
-        LocalProv["LocalProvider"]
-        GithubProv["GitHubProvider"]
-        GitlabProv["GitLabProvider"]
-        ApplyProv["ApplyProvider"]
-
-        Anthropic["AnthropicProvider"]
-        OpenAI["OpenAIProvider"]
-        Deepseek["DeepSeekProvider"]
-        Compat["OpenAICompatibleProvider"]
-
-        BwrapBackend["BubblewrapBackend"]
-        DockerBackend["DockerBackend"]
-        SeatbeltBackend["SeatbeltBackend"]
-        FirecrackerBackend["FirecrackerBackend"]
-        Selector["backend_selector"]
+    subgraph Phase4["Phase 4 — Contracts"]
+        RProto[RepositoryProvider Protocol]
+        AProto[ApplyProvider Protocol]
+        MProto[ModelProvider Protocol]
+        SProto[SandboxBackend Protocol]
     end
 
-    subgraph Phase7["Phase 7 Engines"]
-        Daemon["codeguardian-rpcd"]
+    subgraph Rust["Rust Layer"]
+        Daemon[codeguardian-rpcd]
+        Native[codeguardian._native]
     end
 
-    subgraph Phase4["Phase 4 Contracts"]
-        R1["RepositoryProvider Protocol"]
-        R2["ApplyProvider Protocol"]
-        R3["ModelProvider Protocol"]
-        R4["SandboxBackend Protocol"]
+    subgraph External["External"]
+        Git[git binary]
+        Groq[Groq API]
+        Bwrap[bwrap binary]
     end
 
-    LocalProv -.->|"implements"| R1
-    GithubProv -.->|"implements"| R1
-    GitlabProv -.->|"implements"| R1
-    ApplyProv -.->|"implements"| R2
-    Anthropic -.->|"implements"| R3
-    OpenAI -.->|"implements"| R3
-    Deepseek -.->|"implements"| R3
-    Compat -.->|"implements"| R3
-    BwrapBackend -.->|"implements"| R4
-    DockerBackend -.->|"implements"| R4
-    SeatbeltBackend -.->|"implements"| R4
-    FirecrackerBackend -.->|"implements"| R4
+    Local -.->|implements| RProto
+    GH -.->|implements| RProto
+    GL -.->|implements| RProto
+    Apply -.->|implements| AProto
+    Router -.->|implements| MProto
+    Bwrap -.->|implements| SProto
+    Docker -.->|implements| SProto
+    Seatbelt -.->|implements| SProto
+    Firecracker -.->|implements| SProto
 
-    LocalProv -->|"git clone"| Git
-    GithubProv -->|"git clone"| Git
-    GitlabProv -->|"git clone"| Git
-    ApplyProv -->|"git apply"| Git
-
-    Anthropic -->|"HTTPS"| LLM
-    OpenAI -->|"HTTPS"| LLM
-    Deepseek -->|"HTTPS"| LLM
-    Compat -->|"HTTP/HTTPS"| LLM
-
-    BwrapBackend -->|"sandbox.execute"| Daemon
-    DockerBackend -->|"sandbox.execute"| Daemon
-    SeatbeltBackend -->|"sandbox.execute"| Daemon
-    FirecrackerBackend -->|"sandbox.execute"| Daemon
-
-    Selector -.->|"selects"| BwrapBackend
-    Selector -.->|"selects"| DockerBackend
+    Local -->|subprocess| Git
+    Apply -->|subprocess| Git
+    Router --> Anthropic
+    Router --> OpenAI
+    Router --> DeepSeek
+    Router --> Compat
+    Compat -->|HTTPS| Groq
+    Registry --> Meta
+    Registry --> RegJSON
+    Registry --> Router
+    Bwrap -->|JSON-RPC| Daemon
+    Docker -->|JSON-RPC| Daemon
+    Selector -.->|chooses| Bwrap
+    Selector -.->|chooses| Docker
+    Native -->|PyO3| Router
 ```
 
-Two properties are essential:
+Three properties matter:
 
-**The providers are stateless.** A `LocalProvider` holds a path. An `AnthropicProvider` holds a client. An `ApplyProvider` holds a bridge and a path. None of them hold state between calls that the caller did not supply.
+1. **Providers are stateless.** `LocalProvider` holds a path. `FallbackModelProvider` holds a cooldown dictionary and a role-family map. `BubblewrapBackend` holds a bridge and defaults. None holds state the caller did not supply.
 
-**The providers do not enforce policy.** `ApplyProvider` writes to a repository, but only after the consent gate in Phase 13 has approved. `SandboxBackend` runs commands, but only inside the sandbox that Phase 7 built. Phase 8 is a thin layer, and that is what makes it safe.
+2. **Providers do not enforce policy.** `ApplyProvider` writes to a repository only after `sha256(diff) == consent.diff_hash`. `BubblewrapBackend` runs commands only inside the daemon's sandbox. The policy decisions live in Phase 13.
+
+3. **Sandbox backends never spawn processes.** Every `sandbox.execute` is a JSON-RPC call to `codeguardian-rpcd`. The daemon owns the trust boundary. Python can request, but it cannot bypass.
 
 ---
 
-## 4. B-038 — Repository Providers
+## 4. Escalation A — `interfaces/sandbox.py` rewrite
 
-### 4.1 What it delivers
+**Rule 1 escalation.** The file passed in Phase 4. Phase 8 rewrote it.
 
-Five files. Four implementations of `RepositoryProvider`, plus `ApplyProvider`.
+The gap: the Phase 7 daemon already required and returned more fields than the Phase 4 contract declared. `handlers.rs` accepted `working_dir`, `image`, and returned `language`, `network_enabled`, `memory_mb`, `cpu_cores`, `process_limit`, `oom_killed`, `output_truncated`. The Phase 4 `SandboxSpec`, `SandboxHandle`, and `ExecutionResult` dataclasses declared none of those. B-040 could not have been written against the Phase 4 contract — the resulting code would not have matched the daemon.
 
-| File | Class | Lines (est.) |
+The rewrite added:
+
+| Type | Added fields |
+|---|---|
+| `SandboxSpec` | `working_dir: Path`, `image: str \| None = None` |
+| `SandboxHandle` | `language`, `working_dir`, `network_enabled`, `memory_mb`, `cpu_cores`, `process_limit`, `image` (removed `created_at` — the daemon does not return one) |
+| `ExecutionResult` | `oom_killed: bool`, `output_truncated: bool` |
+| `SandboxBackend.execute` | signature changed from `(handle, command: str, timeout: int)` to `(handle, command: Sequence[str], *, env, cwd, timeout_ms, stdin)` |
+
+The `execute` signature change is the load-bearing one. `bwrap` and `docker` take argv, not shell strings. A caller that wants shell semantics runs `["/bin/sh", "-c", script]` explicitly. The backend never makes shell-quoting decisions, which is where injection bugs live.
+
+---
+
+## 5. B-038 — Repository and Apply providers
+
+### 5.1 Files
+
+| File | Class | Purpose |
 |---|---|---|
-| `core/providers/__init__.py` | Public surface | 30 |
-| `core/providers/local_repository.py` | `LocalProvider` | 180 |
-| `core/providers/github_repository.py` | `GitHubProvider` | 80 |
-| `core/providers/gitlab_repository.py` | `GitLabProvider` | 80 |
-| `core/providers/apply_provider.py` | `ApplyProvider` | 220 |
-| **Total** | | **~590** |
+| `core/providers/__init__.py` | — | Dynamic discovery; picks up new modules automatically |
+| `core/providers/local_repository.py` | `LocalProvider` | Reference implementation; all git operations shell out |
+| `core/providers/github_repository.py` | `GitHubProvider` | Subclass of `LocalProvider`; URL prefix validation only |
+| `core/providers/gitlab_repository.py` | `GitLabProvider` | Same shape, GitLab prefixes |
+| `core/providers/apply_provider.py` | `ApplyProvider` | The only writer in the system |
 
-### 4.2 The five Protocol methods
-
-`RepositoryProvider` declares five methods, none of which write:
-
-- `clone(url: str, dest: Path) -> Path` — clone a repository to a destination, return the local path
-- `read_file(path: str) -> str` — read one file from the clone
-- `list_files() -> list[str]` — list every tracked file in the clone
-- `get_diff(changes: Sequence[FileChange]) -> str` — produce a unified diff for a set of changes
-- `get_metadata() -> RepoMetadata` — return the repository's identity
-
-`LocalProvider` implements all five by shelling out to `git`. `GitHubProvider` and `GitLabProvider` subclass `LocalProvider` — the clone is the only difference, and after clone, the directory is a git repository regardless of where it came from.
-
-### 4.3 `LocalProvider` in detail
+### 5.2 `LocalProvider.clone` — real git subprocess
 
 ```mermaid
 sequenceDiagram
     participant Caller
     participant Local as LocalProvider
     participant Git as git subprocess
-    participant FS as Filesystem
 
-    Caller->>Local: clone("/path/to/repo", dest)
-    Local->>FS: resolve(path)
-    Local->>Git: git -C path rev-parse --is-inside-work-tree
-    Git-->>Local: "true"
-    Local->>FS: canonicalize(path)
-    Local-->>Caller: Path
-
-    Caller->>Local: read_file("src/main.py")
-    Local->>FS: read text
-    FS-->>Local: bytes
-    Local->>Local: decode UTF-8
-    Local-->>Caller: str
-
-    Caller->>Local: list_files()
-    Local->>Git: git -C path ls-files
-    Git-->>Local: newline-separated paths
-    Local-->>Caller: list[str]
-
-    Caller->>Local: get_diff([FileChange(...)])
-    Local->>Git: git -C path diff --no-index ...
-    Git-->>Local: unified diff
-    Local-->>Caller: str
-
-    Caller->>Local: get_metadata()
-    Local->>Git: git -C path rev-parse HEAD
-    Local->>Git: git -C path remote get-url origin
-    Local->>Git: git -C path rev-parse --abbrev-ref HEAD
-    Local-->>Caller: RepoMetadata
+    Caller->>Local: clone(url, dest)
+    Local->>Local: resolve dest, check empty
+    Local->>Local: _normalize_source(url)
+    alt local path
+        Local->>Git: rev-parse --is-inside-work-tree
+        Git-->>Local: "true"
+    end
+    Local->>Git: clone <source> <dest>
+    Git-->>Local: exit 0 or error
+    alt success
+        Local->>Local: self._path = dest
+        Local-->>Caller: dest
+    else failure
+        Local->>Local: _classify_clone_failure(stderr)
+        Local-->>Caller: raise typed error
+    end
 ```
 
-Every `git` call is a subprocess with a timeout, captured stdout and stderr, and a raised `CodeGuardianError` on failure. The errors map to the Phase 1 codes:
+Every git call is a real subprocess with a timeout, captured stdout and stderr, and a typed error on failure. Standard library exceptions become `CodeGuardianError` at the boundary.
 
-| `git` failure | `ErrorCode` |
-|---|---|
-| path does not exist | `REPO_NOT_FOUND` |
-| path is not a git repository | `REPO_NOT_FOUND` |
-| `git clone` network failure | `REPO_CLONE_FAILED` |
-| authentication failure | `REPO_AUTH_FAILED` |
-| file too large (>10 MB) | `FILE_TOO_LARGE` |
-| file is binary | `FILE_BINARY` |
-| permission denied | `FILE_PERMISSION_DENIED` |
+The `read_file` guard chain:
 
-### 4.4 `GitHubProvider` and `GitLabProvider`
+1. `_resolve_relative` rejects any path that escapes the clone root via `..` or symlink
+2. size check against `_max_file_bytes` (10 MiB)
+3. decode UTF-8, reject on `UnicodeDecodeError`
+4. reject any text containing `\x00`
 
-Both subclass `LocalProvider` and override only `clone`. `GitHubProvider.clone` runs `git clone https://github.com/{owner}/{repo}.git` into the destination, then delegates to `LocalProvider` for everything else. `GitLabProvider` does the same with the GitLab URL format.
+The first of those is the security-critical one. `_resolve_relative` calls `.resolve()` (which follows symlinks) and then `.relative_to(root)`. A symlink inside the clone that points outside the clone fails the `relative_to` check exactly as a `../../../etc/passwd` traversal does.
 
-No authentication tokens are handled in Phase 8. A private repository requires the user to have valid credentials configured on the host (SSH keys, git credential helper). The provider inherits them. This is documented as a known limitation.
+### 5.3 `get_diff` — the load-bearing decision
 
-### 4.5 `ApplyProvider` — the only write path
+The original implementation used `difflib.unified_diff`. This worked in tests and failed in production.
+
+**The bug.** When a file does not end with a trailing newline, `git apply` requires a literal `\ No newline at end of file` marker after that side's last content line. `difflib.unified_diff` does not emit this marker. The resulting diff looks correct but is rejected by `git apply --check` with:
+
+```
+error: patch failed: calculator/operations.py:82
+error: calculator/operations.py: patch does not apply
+```
+
+The tests that shipped with B-041 used `"hello\n"` → `"world\n"` diffs — single-line, single-hunk, both sides trailing newline. That shape never triggers the bug. The real Writer produced a 2,924-char refactor with docstring removals and no trailing newline on the new content. That shape triggers it every time.
+
+**The fix.** Switch to `git diff --no-index`:
+
+```mermaid
+flowchart TB
+    Caller[get_diff changes] --> Loop[for each FileChange]
+    Loop --> Read[read old content<br/>or None if missing]
+    Read --> Tmp[write a/path and b/path<br/>into tempdir]
+    Tmp --> Git[git diff --no-index<br/>--no-prefix a/path b/path]
+    Git --> Check{exit code}
+    Check -->|0 identical| Empty[return '']
+    Check -->|1 differs| Append[append stdout to parts]
+    Check -->|other| Raise[DIFF_COMPUTE_FAILED]
+    Empty --> Loop
+    Append --> Loop
+    Loop --> Done[return joined parts]
+```
+
+`git diff --no-index` is the same code path `git diff` uses. Its output is by construction what `git apply` consumes. The EOF marker, filename quoting, tab expansion — every edge case the two tools disagree on — is handled by using the same tool on both sides.
+
+Two subtleties that came up during the fix:
+
+- **Missing side must be passed as `/dev/null`, not omitted.** `git diff --no-index a/hello.txt b/missing.txt` returns **exit 0 with no output** when `b/missing.txt` does not exist. Git silently skips the comparison. Passing `/dev/null` instead — which exists as a character device — produces the standard `--- /dev/null` or `+++ /dev/null` header that `git apply` uses to decide the file is created or deleted.
+
+- **`--no-prefix` keeps the header paths as exactly `a/path` and `b/path`.** Without it, git emits `a/a/path` and `b/b/path` because the paths already have the prefix. `--no-prefix` tells git not to add one more.
+
+### 5.4 `ApplyProvider.apply` — four-step consent gate
 
 ```mermaid
 sequenceDiagram
     participant Caller
     participant Apply as ApplyProvider
-    participant Audit as JSONRPCBridge
-    participant Repo as LocalProvider
+    participant Bridge as JSONRPCBridge
     participant Git as git subprocess
 
-    Caller->>Apply: apply(repo_path, diff, consent)
-    Apply->>Apply: hash = sha256(diff)
-    Apply->>Apply: verify consent.diff_hash == hash
-    Note over Apply: mismatch raises<br/>APPLY_AUTH_FAILED
-
-    Apply->>Audit: audit.write({event: "apply", ...})
-    Audit-->>Apply: entry_hash
-
-    Apply->>Repo: get_metadata() for rollback ref
-    Repo-->>Apply: commit_hash
-
-    Apply->>Git: git -C path apply --check diff
-    Git-->>Apply: exit 0 or error
-    Note over Apply: --check failure raises<br/>APPLY_CONFLICT
-
-    Apply->>Git: git -C path apply diff
-    Git-->>Apply: exit 0
-    Apply->>Git: git -C path rev-parse HEAD
-    Git-->>Apply: new_commit
-    Apply-->>Caller: ApplyResult(success, rollback_ref=old_commit)
+    Caller->>Apply: apply(repo_url, diff, consent)
+    Apply->>Apply: _is_remote_url(repo_url)?
+    alt remote
+        Apply-->>Caller: SYS_NOT_IMPLEMENTED
+    end
+    Apply->>Apply: consent.scope == "apply"?
+    alt wrong scope
+        Apply-->>Caller: APPLY_AUTH_FAILED
+    end
+    Apply->>Apply: sha256(diff) == consent.diff_hash?
+    alt mismatch
+        Apply-->>Caller: APPLY_AUTH_FAILED
+    end
+    Apply->>Git: rev-parse HEAD
+    Git-->>Apply: pre_apply_head
+    Apply->>Bridge: audit.write(payload)
+    Bridge-->>Apply: entry_hash
+    Apply->>Git: git apply --check -
+    Git-->>Apply: exit 0 or conflict
+    alt check fails
+        Apply-->>Caller: APPLY_CONFLICT
+    end
+    Apply->>Git: git apply -
+    Git-->>Apply: exit 0 or partial
+    Apply-->>Caller: ApplyResult(success=True, rollback_ref=pre_apply_head)
 ```
 
-`ApplyProvider` is the only class in the entire build with write access to a repository. Its four-step process — consent verification, audit log, `git apply --check`, `git apply` — is the correctness guarantee.
+The order is non-negotiable. A failing hash check leaves the repository untouched. A failing `--check` leaves the working tree unchanged. A failing `git apply` after `--check` passed leaves the working tree partially modified — the caller must invoke `rollback` with the returned reference to restore it.
 
-`rollback` reverses the process: `git reset --hard {rollback_ref}`. If the rollback reference does not exist, it raises `ROLLBACK_REF_NOT_FOUND`.
+The audit entry is written **before** the first `git apply`. This means a call that fails partway leaves an audit record of the attempt.
 
-### 4.6 What B-038 does not do
+### 5.5 `ApplyProvider.rollback` — two fixes from integration
 
-- No GitHub API. Only `git clone` over HTTPS.
-- No GitLab API. Only `git clone` over HTTPS.
-- No authentication token handling. The host's git configuration is used.
-- No branch creation. `apply` commits to the current branch.
-- No PR/MR creation. That is Phase 15's reporter.
+The original implementation had two bugs that the integration test caught:
+
+**Bug 1 — `git diff --name-only <ref> HEAD` returns empty.** `apply()` modifies the working tree without creating a commit. HEAD after apply is still the same commit `rollback_ref` points to. Comparing `<ref> HEAD` compares two identical commits, so the result is always empty regardless of what changed.
+
+**Fix:** `git diff --name-only <ref>` — compare the working tree to the reference, not the reference to HEAD.
+
+**Bug 2 — `git rev-parse --verify "0000...0000"` succeeds.** All-zeros is a syntactically valid SHA. Git resolves it without checking that it points to a real object. The verification step passed, and the subsequent `git reset --hard "0000..."` failed with `fatal: Could not parse object`. The test asserted `ROLLBACK_REF_NOT_FOUND` and got `ROLLBACK_FAILED`.
+
+**Fix:** `git rev-parse --verify "<ref>^{commit}"` — force resolution to a commit object. All-zeros, typos, and blob SHAs all fail here with the correct `ROLLBACK_REF_NOT_FOUND`.
+
+### 5.6 Known gap in `ApplyProvider` — untracked files are not rolled back
+
+`apply()` uses `git apply` without `--index`. A newly-created file by the diff becomes an **untracked** file. `git reset --hard` does not remove untracked files.
+
+- Diff modifies `file.txt` → apply → rollback → file restored. Correct.
+- Diff creates `new_file.py` → apply → rollback → `new_file.py` still on disk. Incorrect.
+
+The current test suite only exercises **modification**, so it does not hit this path. Documented in `apply()`'s docstring so it is not forgotten. Phase 11's Writer will produce "create new file" diffs during function extraction refactors, and the fix lands there — either `git apply --index` (stage the changes so reset undoes them) or `git clean -fd` on rollback (destructive — removes all untracked, not just diff-created).
 
 ---
 
-## 5. B-039 — Model Providers
+## 6. B-039 — Discovery-driven model routing
 
-### 5.1 What it delivers
+### 6.1 The design shift
 
-Four files. Four implementations of `ModelProvider`.
+The original plan for B-039 was static model lists in Python:
 
-| File | Class | Lines (est.) |
-|---|---|---|
-| `core/providers/anthropic_model.py` | `AnthropicProvider` | 250 |
-| `core/providers/openai_model.py` | `OpenAIProvider` | 240 |
-| `core/providers/deepseek_model.py` | `DeepSeekProvider` | 200 |
-| `core/providers/openai_compatible.py` | `OpenAICompatibleProvider` | 180 |
-| **Total** | | **~870** |
-
-### 5.2 The four Protocol methods
-
-`ModelProvider` declares four methods:
-
-- `complete(prompt: str, options: ModelOptions) -> ModelResponse` — one full completion, async
-- `stream(prompt: str, options: ModelOptions) -> AsyncIterator[ModelChunk]` — streamed completion, async
-- `count_tokens(text: str, model: str) -> int` — estimate the token count, sync
-- `get_available_models() -> list[ModelInfo]` — list the models the provider serves, sync
-
-All four providers share three internal components:
-
-- An `httpx.AsyncClient` with configurable timeout and transport
-- A shared SSE line parser for streaming
-- A shared HTTP error mapper
-
-### 5.3 The Anthropic Messages API
-
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant Provider as AnthropicProvider
-    participant Client as httpx.AsyncClient
-    participant API as api.anthropic.com
-
-    Caller->>Provider: complete(prompt, options)
-    Provider->>Provider: build_headers(options)
-    Provider->>Client: POST /v1/messages
-    Note over Provider: body: model, max_tokens,<br/>system, messages
-    Client->>API: HTTPS
-    API-->>Client: 200 {content: [{text: "..."}], usage}
-    Client-->>Provider: response
-    Provider->>Provider: parse_response
-    Provider-->>Caller: ModelResponse(text, tokens_in, tokens_out, model_id)
+```python
+_ANTHROPIC_MODELS = ("claude-3-5-sonnet", "claude-3-5-haiku")
 ```
 
-Errors map to Phase 1 codes:
+This broke the moment Groq retired `llama-3.3-70b-versatile` and `qwen/qwen3-32b` between two runs. Every configured role pointed at a dead model. Every configured fallback was dead. Every verifier check found no eligible models.
 
-| HTTP status | `ErrorCode` |
+The user's observation was correct: **hardcoded model lists in Python, JSON, or anywhere else are the same bug in a different file.** The only correct source of truth for which models exist is the provider itself.
+
+Phase 8 replaced static lists with **discovery at planning time**:
+
+1. `ModelRegistry.discover(provider)` calls the adapter's `list_models()`
+2. `list_models()` hits the provider's `/models` endpoint
+3. The returned IDs are merged with an optional `metadata.json` cache that supplies tier, family, cost, and capabilities
+4. A model missing from metadata is **still usable** with conservative defaults
+5. The router picks models that satisfy the role's constraints from the discovered set
+
+Adding a new model is not a code change. It is a provider rotation that discovery picks up on the next call.
+
+### 6.2 The three layers
+
+```mermaid
+flowchart TB
+    subgraph Layer1["Layer 1 — Discovery"]
+        Adapter[adapter.list_models()]
+        Provider[provider GET /models]
+        Cache[registry._discovered dict]
+    end
+    subgraph Layer2["Layer 2 — Metadata"]
+        MetaJSON[metadata.json]
+        Merge[merge discovered + metadata]
+    end
+    subgraph Layer3["Layer 3 — Roles"]
+        RoleJSON[registry.json roles]
+        Constraints[hard constraints]
+        Scoring[quality - cost score]
+    end
+
+    Adapter --> Provider
+    Provider --> Cache
+    Cache --> Merge
+    MetaJSON --> Merge
+    Merge -->|RegistryModel list| Constraints
+    RoleJSON --> Constraints
+    Constraints -->|eligible set| Scoring
+    Scoring -->|ordered list| Plan[Attempt plan]
+```
+
+**Layer 1** is a network call. It is cached per registry instance — one HTTP call per provider per process.
+
+**Layer 2** is a file read. `metadata.json` supplies editorial facts (tier, family, cost) that the provider's API does not expose. A model absent from metadata gets `tier="mid"`, `family=<provider_name>`, `capabilities=frozenset()`, cost zero, and a default `chars_per_token=4.0`. It works.
+
+**Layer 3** is a config file. Roles describe intent, not identity:
+
+```json
+"writer": {
+    "mode": "auto",
+    "constraints": { "min_tier": "frontier", "requires_capabilities": ["coding"] }
+}
+```
+
+No model IDs. No primary, no fallback list. The router picks the frontier-tier model that has `coding` capability from whatever is actually served.
+
+### 6.3 `FallbackModelProvider` — the decision engine
+
+The router interprets the `model` argument as either a role name or a `provider/model` string:
+
+| `model` argument | Behavior |
 |---|---|
-| 401 | `MODEL_AUTH_FAILED` |
-| 429 | `MODEL_RATE_LIMITED` |
-| 400 with `context_length` | `MODEL_CONTEXT_EXCEEDED` |
-| 500–599 | `MODEL_UNAVAILABLE` |
-| timeout | `NET_TIMEOUT` |
-| connection error | `NET_UNREACHABLE` |
-| any other 4xx | `MODEL_UNKNOWN` |
+| `"writer"`, `"correctness_verifier"` | Resolve to role chain; apply constraints, family exclusion, cooldowns |
+| `"groq/openai/gpt-oss-120b"` | Pin to that single model; still respect cooldowns |
+| `"groq/does-not-exist"` | `MODEL_UNKNOWN` before any HTTP call (if discovery has run) |
 
-### 5.4 OpenAI and DeepSeek
+The complete decision flow:
 
-Both use the Chat Completions API with a `/v1/chat/completions` endpoint. `DeepSeekProvider` is an `OpenAIProvider` subclass with a different base URL and a different model list. `OpenAIProvider` is the base class.
+```mermaid
+flowchart TB
+    Start[complete prompt role] --> Resolve{registry.get_role?}
+    Resolve -->|yes role| Exclude[_excluded_families_for role]
+    Resolve -->|no| Pinned[get_model provider/model]
+    Exclude --> Candidates[registry.resolve_candidates<br/>discovery + constraints]
+    Candidates --> Order{role.mode}
+    Order -->|auto| Score[sort by α·quality − β·cost]
+    Order -->|chain| Chain[primary then fallbacks]
+    Order -->|pinned| Pin[primary only]
+    Score --> Cooldown{filter cooldowns}
+    Chain --> Cooldown
+    Pin --> Cooldown
+    Cooldown --> Plan[ordered attempts]
+    Pinned --> Plan
+    Plan --> Strict{side_effect_guard<br/>+ require_no_tool_calls?}
+    Strict -->|yes| Direct[first attempt, no retry]
+    Strict -->|no| Retry[retry_async per attempt]
+    Retry --> Fallback[on exhaustion, next attempt]
+    Fallback --> CooldownMark[mark cooldown on failure]
+    Direct --> Return[response]
+    Fallback --> Return
+```
 
-### 5.5 `OpenAICompatibleProvider`
+The retry loop inside a single attempt delegates to `retry_async` from Phase 1. That gives the router jitter, exponential backoff, the `on_retry` hook, and the per-category retry budget — all from one source. The router does not re-implement any of them.
 
-The provider for any OpenAI-compatible endpoint: Ollama, vLLM, llama.cpp, LM Studio. It subclasses `OpenAIProvider` and takes a `base_url`. It allows an empty API key so local endpoints work without authentication.
+**Error classification.** Whether an attempt falls back or retries depends on the error code:
+
+| Code | Behavior |
+|---|---|
+| `MODEL_AUTH_FAILED`, `MODEL_UNKNOWN`, `MODEL_CONTEXT_EXCEEDED` | Fall back immediately (retry will fail the same way) |
+| `MODEL_RATE_LIMITED`, `MODEL_UNAVAILABLE`, `NET_TIMEOUT`, `NET_UNREACHABLE` | Retry the same model first, then fall back |
+| Anything else | Retry the same model (safety net) |
+
+This is derived from `retry_policy_of(code).retryable` in Phase 1 — not from a hardcoded table in the router. Adding a new code with a retry override updates the router with zero code change.
+
+### 6.4 Family independence
+
+The verifier independence guarantee is the core moat. Every role that declares `different_family_from` must select a model whose `family` differs from the family the referenced role actually used.
 
 ```mermaid
 flowchart LR
-    Compat["OpenAICompatibleProvider"]
-    OpenAI["OpenAIProvider"]
-
-    Compat -->|"subclasses"| OpenAI
-
-    Ollama["Ollama<br/>localhost:11434/v1"]
-    VLLM["vLLM<br/>localhost:8000/v1"]
-    Llama["llama.cpp<br/>localhost:8080/v1"]
-    LM["LM Studio<br/>localhost:1234/v1"]
-
-    Compat -->|"base_url"| Ollama
-    Compat -->|"base_url"| VLLM
-    Compat -->|"base_url"| Llama
-    Compat -->|"base_url"| LM
+    Writer[writer call] --> Record[record family in<br/>_last_used_by_role]
+    Record --> Verifier[verifier call]
+    Verifier --> Lookup[lookup writer's family]
+    Lookup --> Exclude[exclude from eligible set]
+    Exclude --> Select[pick from remaining]
 ```
 
-### 5.6 Streaming and token counting
+The verification is against the **actual** family the writer used, not the writer's declared primary. If the writer falls back to a different family due to a rate limit, the verifier excludes that family, not the primary's family.
 
-Streaming uses HTTP server-sent events, parsed by `httpx`'s `iter_lines()`. Every provider's streaming endpoint emits `data: {...}\n\n` frames, so the parser is shared.
+The integration test proved this works: Writer `openai/gpt-oss-120b` (family `openai`), Verifier `qwen/qwen3.8-27b` (family `qwen`). Different families, same provider, real HTTP calls, real verdicts.
 
-`count_tokens` returns a character-based estimate with a per-provider multiplier. The multiplier is documented in the docstring and is **an estimate, not a measurement**. Accurate tokenization requires provider-specific tokenizer libraries, which would add a dependency per provider. That is deferred.
+### 6.5 Reasoning models — diagnostic that survives budget exhaustion
 
-### 5.7 What B-039 does not do
+`gpt-oss-120b` and `gpt-oss-20b` are reasoning models. Before emitting visible text, they spend tokens on internal reasoning. With `max_tokens=10`, the entire budget is consumed by reasoning, and the response comes back as `content=""`, `finish_reason="length"`. That is a valid response, not an error. Silently returning empty text would let the pipeline continue with a broken refactor.
 
-- No model selection logic. The caller supplies the model name.
-- No prompt management. The caller supplies the prompt.
-- No cost tracking beyond token counts in `ModelResponse`.
-- No retry logic. Phase 1's `retry_async` handles retries at the caller level.
-- No provider-specific SDKs. All four providers use `httpx` directly.
-
----
-
-## 6. B-040 — Python Sandbox Backends
-
-### 6.1 What it delivers
-
-Six files. Four `SandboxBackend` Protocol implementations and a selector.
-
-| File | Class/Function | Lines (est.) |
-|---|---|---|
-| `core/sandbox/__init__.py` | Public surface | 30 |
-| `core/sandbox/backend_selector.py` | `select_backend` | 80 |
-| `core/sandbox/bubblewrap_backend.py` | `BubblewrapBackend` | 130 |
-| `core/sandbox/docker_backend.py` | `DockerBackend` | 130 |
-| `core/sandbox/seatbelt_backend.py` | `SeatbeltBackend` | 90 |
-| `core/sandbox/firecracker_backend.py` | `FirecrackerBackend` | 90 |
-| **Total** | | **~550** |
-
-### 6.2 The architecture
-
-**These Python classes do not spawn processes.** They are JSON-RPC clients to the `codeguardian-rpcd` daemon built in Phase 7. The daemon spawns `bwrap` or `docker` with the enforcement that Phase 7 built.
-
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant PyBackend as Python BubblewrapBackend
-    participant Bridge as JSONRPCBridge
-    participant Daemon as codeguardian-rpcd
-    participant Bwrap as bwrap
-    participant Target as Command
-
-    Caller->>PyBackend: create(SandboxSpec)
-    PyBackend->>Bridge: sandbox.create({...})
-    Bridge->>Daemon: stdin JSON
-    Daemon->>Daemon: handle, validate
-    Daemon-->>Bridge: handle JSON
-    Bridge-->>PyBackend: dict
-    PyBackend->>PyBackend: parse to SandboxHandle
-    PyBackend-->>Caller: SandboxHandle
-
-    Caller->>PyBackend: execute(handle, command)
-    PyBackend->>Bridge: sandbox.execute({handle, command, ...})
-    Bridge->>Daemon: stdin JSON
-    Daemon->>Bwrap: spawn bwrap with enforcement
-    Bwrap->>Target: run command in namespace
-    Target-->>Bwrap: stdout, stderr, exit
-    Bwrap-->>Daemon: process output
-    Daemon-->>Bridge: result JSON
-    Bridge-->>PyBackend: dict
-    PyBackend->>PyBackend: parse to ExecutionResult
-    PyBackend-->>Caller: ExecutionResult
-```
-
-This is why the trust boundary works. The Python sandbox backends never spawn a process themselves. If Python were compromised, it could not remove the enforcement — it would have to talk to the daemon, and the daemon enforces.
-
-### 6.3 `BubblewrapBackend`
+The adapters detect this and raise `MODEL_CONTEXT_EXCEEDED` with `details.reasoning_chars`:
 
 ```python
-class BubblewrapBackend:
-    def __init__(self, bridge: JSONRPCBridge) -> None: ...
-
-    def create(self, spec: SandboxSpec) -> SandboxHandle: ...
-    def execute(self, handle: SandboxHandle, command: Sequence[str],
-                *, env: Mapping[str, str] | None = None,
-                cwd: Path | None = None,
-                timeout_ms: int | None = None,
-                stdin: bytes | None = None) -> ExecutionResult: ...
-    def destroy(self, handle: SandboxHandle) -> None: ...
-    def supports_language(self, language: str) -> bool:
-        return True  # bubblewrap runs any Linux binary
-    def get_resource_limits(self) -> ResourceLimits: ...
+if not content and finish_reason == "length":
+    raise _budget_exhausted(
+        provider, model, finish_reason, reasoning_chars
+    )
 ```
 
-The `bridge` is passed to the constructor. Phase 8 does not own the daemon lifecycle — the caller (Phase 13) does. The provider holds a reference to an already-running daemon.
+The message distinguishes "consumed the budget on reasoning (N reasoning chars)" from "consumed the budget before producing any output". Phase 11's Tester agent will see the difference and can decide whether to increase `max_tokens` or pick a different model.
 
-### 6.4 `DockerBackend`
+For streaming, the same check applies **before** the terminal `done` chunk. If no text was yielded and the finish reason is `length`, the stream raises instead of yielding an empty completion.
 
-Same interface, but `create` requires `spec.image`. The docker backend runs the exact image the caller supplies. No language-to-image mapping exists in the code.
+### 6.6 Adapters — thin by design
 
-### 6.5 `SeatbeltBackend` and `FirecrackerBackend`
+Four adapters exist:
 
-Both are stubs. `create` raises `SANDBOX_CREATE_FAILED` with the message "seatbelt backend is not implemented in v1" (or firecracker). `execute` never runs because `create` fails.
-
-### 6.6 `backend_selector`
-
-```python
-def select_backend(config: Config) -> str:
-    """Return the backend name to use for this host.
-
-    Order of precedence:
-    1. If config.general.sandbox_backend names an available backend, use it.
-    2. Otherwise, fall back to the next available backend by platform:
-       - Linux: bubblewrap, then docker
-       - macOS: seatbelt, then docker
-       - Windows: docker only
-    3. If nothing is available, raise SANDBOX_CREATE_FAILED.
-    """
-```
-
-The selector checks `shutil.which("bwrap")` and `shutil.which("docker")` to decide what is available. A stub backend (seatbelt on Linux, firecracker anywhere) is **not** considered available.
-
-### 6.7 What B-040 does not do
-
-- No process spawning in Python. All spawning is in Rust.
-- No image building. Docker images are caller-supplied.
-- No sandbox pooling. That is Phase 13.
-- No retry on transient failures. That is Phase 13's orchestrator.
-- No environment setup. The beast installs its own toolchains inside the sandbox.
-
----
-
-## 7. B-041 — Contract Tests
-
-### 7.1 What it delivers
-
-Five files, four contract suites plus a package init.
-
-| File | Lines (est.) |
-|---|---|
-| `tests/contracts/__init__.py` | 5 |
-| `tests/contracts/test_repository_contract.py` | 350 |
-| `tests/contracts/test_apply_contract.py` | 280 |
-| `tests/contracts/test_model_contract.py` | 400 |
-| `tests/contracts/test_sandbox_contract.py` | 380 |
-| **Total** | **~1,415** |
-
-### 7.2 The three test strategies
-
-Phase 8 uses **three distinct test strategies**, chosen deliberately per protocol.
-
-| Protocol | Strategy | Why |
-|---|---|---|
-| `RepositoryProvider` | Real `git` in temp dirs | `git` is always available; real operations prove correctness |
-| `ApplyProvider` | Real `git` in temp dirs | `git apply` semantics cannot be mocked without becoming a reimplementation |
-| `ModelProvider` | Injected `httpx.MockTransport` | No network, no API keys, deterministic |
-| `SandboxBackend` | Real RPC to real daemon | `bwrap` and `docker` run real commands; test skips if unavailable |
-
-The honest split:
-
-- **Real tests where the real thing is always available** — `git` is always present, so repository and apply tests use it.
-- **Mock tests where the real thing requires external credentials** — no user should be forced to have an API key to run the test suite. Mock transport proves the request shape, error handling, and response parsing.
-- **Real tests where the real thing is host-dependent** — `bwrap` and `docker` are optional; the tests run against whichever is available.
-
-This is the design. It is not a compromise.
-
-### 7.3 `test_repository_contract.py` — real git, no mocks
-
-```mermaid
-flowchart TB
-    Fixture["pytest fixture:<br/>git init --bare<br/>git clone file://...<br/>write files<br/>git add, commit"]
-    Test["Parametrized test<br/>for LocalProvider,<br/>GitHubProvider, GitLabProvider"]
-    Assert["Asserts on real git<br/>output"]
-
-    Fixture --> Test
-    Test --> Assert
-```
-
-**Every repository provider is exercised against the same real git operations.** A fixture creates a bare repository with known commits. The test parametrizes over every provider implementation. If `GitHubProvider` violates the contract, the test fails.
-
-Boundary tests:
-
-- `clone` on a nonexistent path raises `REPO_NOT_FOUND`
-- `read_file` on a missing file raises `FILE_NOT_FOUND`
-- `read_file` on a >10 MB file raises `FILE_TOO_LARGE`
-- `read_file` on a binary file raises `FILE_BINARY`
-- `read_file` on a file with invalid UTF-8 raises `FILE_BINARY`
-- `list_files` returns every tracked file (comparison with `git ls-files` output)
-- `get_diff` on an empty change list returns `""`
-- `get_diff` on a real change returns a diff that `git apply --check` accepts
-- `get_metadata` returns a 40-character commit hash, a non-empty branch, and a URL
-
-### 7.4 `test_apply_contract.py` — real git, no mocks
-
-```mermaid
-sequenceDiagram
-    participant Fixture
-    participant Apply as ApplyProvider
-    participant Repo as LocalProvider
-    participant Audit as MockAuditBridge
-    participant Git as git subprocess
-
-    Fixture->>Repo: create test repo<br/>with known files
-    Fixture->>Apply: instantiate with Repo, Audit
-
-    Note over Apply: Test 1: valid apply
-    Apply->>Audit: audit.write(consent)
-    Audit-->>Apply: entry_hash
-    Apply->>Git: git apply --check
-    Git-->>Apply: OK
-    Apply->>Git: git apply
-    Git-->>Apply: OK
-    Fixture->>Git: git diff --stat
-    Note over Fixture: assert file changed
-
-    Note over Apply: Test 2: bad consent
-    Apply->>Apply: verify consent.diff_hash
-    Note over Apply: raises APPLY_AUTH_FAILED
-
-    Note over Apply: Test 3: conflicting diff
-    Apply->>Git: git apply --check
-    Git-->>Apply: conflict
-    Note over Apply: raises APPLY_CONFLICT
-    Fixture->>Git: git diff --stat
-    Note over Fixture: assert repo unchanged
-
-    Note over Apply: Test 4: rollback
-    Apply->>Git: git reset --hard {rollback_ref}
-    Fixture->>Git: git diff --stat
-    Note over Fixture: assert repo restored
-```
-
-The `Audit` mock here is a deliberate narrow mock — it stubs the JSON-RPC call to the daemon so tests do not need a running daemon. It is not mocking the business logic. The apply logic itself runs against real `git`.
-
-### 7.5 `test_model_contract.py` — mock transport, no network
-
-```mermaid
-flowchart TB
-    Canned["Canned response<br/>def handler(request):<br/>return httpx.Response(200, json=...)"]
-    Transport["httpx.MockTransport(handler)"]
-    Client["httpx.AsyncClient(transport=...)"]
-    Provider["AnthropicProvider(client=...)"]
-    Test["Test: complete(), stream(), count_tokens()"]
-
-    Canned --> Transport
-    Transport --> Client
-    Client --> Provider
-    Provider --> Test
-```
-
-The mock transport intercepts every HTTP request and returns a canned response. The provider code runs unmodified — the only thing replaced is the wire transport.
-
-Boundary tests:
-
-- `complete` returns a `ModelResponse` with non-empty `text`, positive `tokens_in`, positive `tokens_out`
-- `stream` yields at least one `ModelChunk`, terminates cleanly, reconstructs the same text as `complete`
-- `count_tokens` returns a positive integer for empty input, single-character input, and a 10,000-character input
-- `get_available_models` returns at least one `ModelInfo` with a non-empty `id`
-- HTTP 401 raises `MODEL_AUTH_FAILED`
-- HTTP 429 raises `MODEL_RATE_LIMITED`
-- HTTP 500 raises `MODEL_UNAVAILABLE`
-- HTTP 400 with `context_length` in the message raises `MODEL_CONTEXT_EXCEEDED`
-- Connection timeout raises `NET_TIMEOUT`
-- `httpx.ConnectError` raises `NET_UNREACHABLE`
-
-Every error code from Phase 1's taxonomy that a model provider can produce is tested.
-
-### 7.6 `test_sandbox_contract.py` — real daemon, real bwrap/docker
-
-```mermaid
-flowchart TB
-    Daemon["Fixture: spawn rpcd<br/>via JSONRPCBridge"]
-    Selector["Selector: pick available backends"]
-    Param["Parametrize test per backend"]
-    Skip["Skip if backend unavailable"]
-
-    Daemon --> Selector
-    Selector --> Param
-    Param --> Skip
-```
-
-Tests run per backend, parametrized over whatever is available:
-
-- On this host: bubblewrap
-- On a host with docker and an image: docker
-- On macOS: seatbelt (stub — skipped)
-- Anywhere: firecracker (stub — skipped)
-
-Boundary tests:
-
-- `create` returns a `SandboxHandle` with the requested language
-- `execute` runs `/bin/echo hello` and returns exit 0 with "hello" in stdout
-- `execute` on a command that exits 42 returns exit 42
-- `destroy` releases the handle
-- `supports_language` returns `True` for Python, TypeScript, and any other language (post B-037A: bubblewrap and docker are language-agnostic)
-- `get_resource_limits` returns the configured limits
-- Seatbelt and firecracker raise `SANDBOX_CREATE_FAILED` with "not implemented"
-
-### 7.7 What B-041 does not do
-
-- No live API calls to Anthropic, OpenAI, or DeepSeek. That is Phase 15's integration tests.
-- No end-to-end pipeline test. That is Phase 13.
-- No load testing. That is Phase 16.
-- No coverage requirements. The tests are correctness tests, not coverage-driven.
-
----
-
-## 8. Design decisions
-
-Every design decision in Phase 8, with its reasoning and its consequences.
-
-### D1 — `httpx` for model providers
-
-**Decision.** All four model providers use `httpx` directly.
-
-**Why.** Async-native, streaming built in, mockable via injected transport. No provider SDK dependencies.
-
-**Consequence.** Escalation M — adding `httpx` to `pyproject.toml`. Also a small risk: if `httpx` changes its transport API in a future major version, the mock transport in the tests would need updating.
-
-**Escalation.** Yes.
-
-### D2 — `git` subprocess for repository and apply
-
-**Decision.** All git operations shell out to the `git` binary.
-
-**Why.** `git` is always available. `gitpython` would be another dependency and would eventually drift from the real `git` semantics. `git apply --check` in particular is a real `git` capability that must not be reimplemented.
-
-**Consequence.** Every git operation is a subprocess with a timeout. Errors are captured and typed.
-
-**Escalation.** No. No dependency added.
-
-### D3 — Token count is an estimate
-
-**Decision.** `count_tokens` returns a character-based estimate with a per-provider multiplier.
-
-**Why.** Accurate tokenizers would require a dependency per provider (Anthropic's tokenizer differs from OpenAI's). Phase 8 does not need accuracy — Phase 10 will when prompts are budgeted.
-
-**Consequence.** A caller that relies on `count_tokens` for exact budgeting will be off by 10–20%. This is documented in the docstring.
-
-**Escalation.** No.
-
-### D4 — Streaming uses direct SSE parsing
-
-**Decision.** `httpx`'s `iter_lines()` with a hand-written SSE parser.
-
-**Why.** The SSE format is simple: `data: {json}\n\n` per event. No dependency needed.
-
-**Consequence.** The parser must handle multi-line data fields, which is a small edge case. Handled.
-
-**Escalation.** No.
-
-### D5 — Model lists are static
-
-**Decision.** Each provider module has a `const MODEL_IDS: tuple[str, ...]` list.
-
-**Why.** Querying the provider's API for available models on every `get_available_models` call would require network and complicate the mock transport.
-
-**Consequence.** A newly-released model is not in the list until the module is edited. This is documented.
-
-**Escalation.** No.
-
-### D6 — Sandbox backends are JSON-RPC clients
-
-**Decision.** `BubblewrapBackend` and `DockerBackend` call the daemon. They do not spawn processes.
-
-**Why.** The daemon is the trust boundary. If Python were compromised, it could not remove the isolation.
-
-**Consequence.** Every sandbox call is a JSON-RPC round trip. This costs ~1 ms per call. Acceptable.
-
-**Escalation.** No.
-
-### D7 — Local apply only in v1
-
-**Decision.** `ApplyProvider` writes to local repositories only. GitHub and GitLab apply return `SYS_NOT_IMPLEMENTED`.
-
-**Why.** Remote apply requires API integration (PR/MR creation, review, merge) which is Phase 15's reporter.
-
-**Consequence.** A user with a GitHub repository must clone locally and apply locally, then push manually.
-
-**Escalation.** No.
-
-### D8 — Test strategy is per-protocol
-
-**Decision.** Mocks for models, real git for repository/apply, real bwrap/docker for sandbox.
-
-**Why.** Each protocol has different external dependencies. Git is always present. LLM APIs require credentials. Sandbox backends are host-dependent.
-
-**Consequence.** The test suite is different layers of confidence. It is honest about each layer.
-
-**Escalation.** No.
-
-### D9 — `ApplyProvider` takes an injected audit bridge
-
-**Decision.** `ApplyProvider(repository, audit_bridge, audit_log_path)`.
-
-**Why.** `ApplyProvider` needs to write to the audit log before applying. Taking the bridge as a constructor argument means the caller wires it. In tests, a mock bridge substitutes.
-
-**Consequence.** `ApplyProvider` cannot run without a bridge. This is correct — applying without an audit entry is a policy violation.
-
-**Escalation.** No.
-
-### D10 — Backend selection is config-first with fallback
-
-**Decision.** `select_backend(config)` checks the config first, then falls back to platform defaults.
-
-**Why.** The user should be able to prefer docker over bubblewrap on Linux. The system should also work out of the box without a config.
-
-**Consequence.** A misconfigured `sandbox_backend` value falls back to a default rather than failing.
-
-**Escalation.** No.
-
----
-
-## 9. Escalations
-
-Phase 8 requires one Rule 1 escalation.
-
-| # | File | Change | Reason |
+| Adapter | Protocol | Base URL | API key |
 |---|---|---|---|
-| **M** | `python/pyproject.toml`, `pyproject.toml` | Add `httpx` | D1 — model provider HTTP client |
+| `AnthropicProvider` | Anthropic Messages API | `api.anthropic.com` | required |
+| `OpenAIProvider` | OpenAI Chat Completions | `api.openai.com/v1` | required |
+| `DeepSeekProvider` | OpenAI Chat Completions (subclass) | `api.deepseek.com/v1` | required |
+| `OpenAICompatibleProvider` | OpenAI Chat Completions (subclass) | caller-supplied | optional |
 
-No other escalations. No Phase 1–7 code is touched.
+Each adapter implements four methods: `complete`, `stream`, `count_tokens`, `list_models`. Plus `get_available_models` returning `[]` (discovery is the source of truth).
 
-The Phase 7 fix-ups (B-037A) were already approved and are complete. They are:
-- `SandboxSpec.image` field added
-- `SandboxHandle.image` field added
-- `image_for` removed from `docker.rs`
-- `SUPPORTED_LANGUAGES` removed from `bubblewrap.rs`
-- `supports_language` returns `true` for bubblewrap and docker, `false` for stubs
-- `handlers.rs` reads `image` param and passes through
-- `test_sandbox.py` updated to reflect new semantics
-
-These are documented in the Phase 7 build history, not this plan.
+The `OpenAICompatibleProvider` is what makes Groq work. It requires a `base_url`, permits an empty API key (for Ollama, vLLM, LM Studio), and inherits `list_models` from `OpenAIProvider`. When a user adds a local model, one registry entry plus an empty API key is all that is required.
 
 ---
 
-## 10. Test strategy — detailed
+## 7. B-040 — Sandbox backends
 
-### 10.1 The three layers of test confidence
+### 7.1 The trust boundary
 
 ```mermaid
 flowchart TB
-    subgraph Highest["Highest Confidence: Real External"]
-        RealGit["Real git subprocess<br/>repository, apply"]
-        RealBwrap["Real bwrap / docker<br/>via real daemon<br/>sandbox"]
+    subgraph Python["Python Layer"]
+        Backend[BubblewrapBackend]
+        Bridge[JSONRPCBridge]
+    end
+    subgraph Pipe["stdin / stdout"]
+        Lines[line-delimited JSON]
+    end
+    subgraph Rust["Rust Daemon"]
+        Server[RpcServer]
+        Handler[sandbox.execute]
+        Enforcer[backend.rs<br/>env sanitization<br/>working_dir validation<br/>quota validation<br/>output cap<br/>timeout]
+    end
+    subgraph Kernel["Kernel"]
+        Bwrap[bwrap process]
     end
 
-    subgraph Middle["Medium Confidence: Mock Transport"]
-        MockHTTP["Mock httpx transport<br/>Canned HTTP responses<br/>model providers"]
-    end
-
-    subgraph Lowest["Lowest Confidence: Skip if Missing"]
-        SkipDocker["Skip if no docker<br/>Skip if no image"]
-    end
-
-    RealGit --> Runtime["Runtime confidence"]
-    RealBwrap --> Runtime
-    MockHTTP --> Wire["Wire-shape confidence"]
-    SkipDocker --> Runtime
+    Backend -->|call method params| Bridge
+    Bridge -->|JSON line| Lines
+    Lines -->|stdin| Server
+    Server -->|dispatch| Handler
+    Handler -->|validate| Enforcer
+    Enforcer -->|spawn| Bwrap
+    Bwrap -->|stdout stderr exit| Enforcer
+    Enforcer -->|result| Handler
+    Handler -->|response line| Server
+    Server -->|stdout| Lines
+    Lines -->|read| Bridge
+    Bridge -->|result| Backend
 ```
 
-Every test category is labelled in its module docstring with its confidence level. A reader of the test suite knows exactly what each test proves.
+The Python backend never spawns a process. If Python is compromised, it cannot remove the sandbox enforcement. It can only ask the daemon politely. The daemon validates the request, sanitizes the environment, checks the working directory, checks the quota, and enforces the two-layer timeout before it ever launches `bwrap`.
 
-### 10.2 What "real test" means for each protocol
+### 7.2 The four backends
 
-| Protocol | Real means |
-|---|---|
-| `RepositoryProvider` | `git init --bare`, `git clone file://...`, real file I/O, real `git diff`, real `git apply` |
-| `ApplyProvider` | Real diff applied to a real repo, verified with `git diff`, rolled back, verified byte-identical |
-| `ModelProvider` | Cannot be real without credentials. Mock transport is the design. |
-| `SandboxBackend` | Real RPC to a running daemon, real `bwrap` process, real command execution |
-
-### 10.3 The skip policy
-
-Three categories of test skip:
-
-| Skip trigger | Count | Where |
+| Backend | Isolation | v1 status |
 |---|---|---|
-| `rpcd` binary not built | All sandbox tests | `test_sandbox_contract.py` |
-| `bwrap` not installed | Bubblewrap tests | `test_sandbox_contract.py` |
-| `docker` not installed or image missing | Docker tests | `test_sandbox_contract.py` |
+| `BubblewrapBackend` | Linux namespaces | Working |
+| `DockerBackend` | OS-level namespaces, cgroups | Working (WSL integration not enabled in dev env) |
+| `SeatbeltBackend` | macOS SBPL | Stub — `create` raises `SANDBOX_CREATE_FAILED` |
+| `FirecrackerBackend` | Hardware microVM | Stub — same |
 
-Model, repository, and apply tests **never skip**. They either run or fail.
+The stubs are not placeholders that do nothing. Every method raises a typed error with a clear message. A caller that imports `SeatbeltBackend` and calls `create` gets a `SANDBOX_CREATE_FAILED` with `"seatbelt backend is not implemented in v1"`, not an `AttributeError` or a silent `None`.
 
-This is deliberate. If a model test starts skipping because of missing credentials, the test suite stops proving that the providers work. The mock transport removes that dependency.
+### 7.3 `backend_selector`
 
-### 10.4 Coverage targets
+```mermaid
+flowchart TB
+    Start[select_backend config] --> Config{config.sandbox_backend<br/>!= 'auto'?}
+    Config -->|yes| Check{implemented and runnable?}
+    Check -->|yes| Return[return requested]
+    Check -->|no| Warn[warn and fall through]
+    Config -->|no| Platform
+    Warn --> Platform
+    Platform{platform} -->|linux| Linux[bubblewrap → docker]
+    Platform -->|darwin| Mac[docker]
+    Platform -->|win32| Win[docker]
+    Linux --> Avail{shutil.which}
+    Mac --> Avail
+    Win --> Avail
+    Avail -->|found| Return2[return candidate]
+    Avail -->|none| Raise[SANDBOX_CREATE_FAILED]
+```
 
-| Module | Test coverage target | Notes |
-|---|---|---|
-| `local_repository.py` | 95% | Every method has success and failure tests |
-| `apply_provider.py` | 95% | Every branch in the four-step process is tested |
-| `anthropic_model.py` | 90% | Every error code path is tested |
-| `openai_model.py` | 90% | Same |
-| `deepseek_model.py` | 90% | Same |
-| `openai_compatible.py` | 85% | Some paths shared with OpenAI |
-| `bubblewrap_backend.py` | 90% | Requires bwrap |
-| `docker_backend.py` | 90% | Requires docker |
-| `seatbelt_backend.py` | 100% | Every method raises the stub error |
-| `firecracker_backend.py` | 100% | Same |
-| `backend_selector.py` | 95% | Every branch tested |
+The selector returns a **name**, not an instance. This makes it a pure function. The caller constructs the backend with its `JSONRPCBridge`.
 
-Coverage numbers are estimated, not measured. A target, not a measurement.
+Stubs are never auto-selected. `_IMPLEMENTED = {"bubblewrap", "docker"}`. A machine with no `bwrap` and no `docker` gets `SANDBOX_CREATE_FAILED` with the platform name and the tried list. It does not get a stub that would silently fail.
+
+### 7.4 The `pwd` proof
+
+The single most important test in B-040 is the one that proves the bind mount works without path translation:
+
+```
+host working_dir = /tmp/cg-phase8-4cowpwbx/repo
+sandbox.execute(["/bin/pwd"]) → /tmp/cg-phase8-4cowpwbx/repo
+```
+
+Same path, byte-identical. This is what makes the "bind-mount the project clone read-write" model safe. No guest-to-host path mapping, no "what path does the sandbox see" confusion. Files written on the host are visible inside; files written inside are visible on the host.
 
 ---
 
-## 11. What Phase 8 does not do
+## 8. B-041 — Contract tests
 
-Stated explicitly so there are no surprises.
+### 8.1 What contract tests are
 
-- **No plugin loading.** That is Phase 9.
-- **No prompt rendering.** That is Phase 10.
-- **No agent execution.** That is Phase 11.
-- **No skill retrieval.** That is Phase 12.
-- **No orchestrator.** That is Phase 13.
-- **No CLI commands.** That is Phase 14.
-- **No MCP client or server.** That is Phase 15.
-- **No reporters.** That is Phase 15.
-- **No remote apply (GitHub/GitLab push).** Deferred to Phase 15.
-- **No environment resolution.** That is Phase 11's Tester agent.
-- **No dynamic grammar loading for the kernel.** That is a Phase 6 follow-up, tracked as G-28.
-- **No docker image building.** Tracked as G-27, Phase 13.
+A contract test asserts the properties **every** implementation of a Protocol must satisfy. It is not a unit test of one implementation; it is a proof that the Protocol's contract holds for any conforming class.
 
-The scope is deliberately narrow. Phase 8 is the plumbing.
+Phase 8 shipped 99 contract tests across four files:
+
+| File | Tests | What it proves |
+|---|---|---|
+| `test_repository_contract.py` | 28 | Clone, read, list, diff, metadata — real git |
+| `test_apply_contract.py` | 12 | Consent gate, diff application, rollback — real git |
+| `test_model_contract.py` | 22 | Four adapters against mock transport; every error code; router family exclusion |
+| `test_sandbox_contract.py` | 13 | Parameterized across every backend; stub behavior |
+
+### 8.2 The gap that the contract tests missed
+
+The initial `test_repository_contract.py` had five diff tests, all using single-line, single-hunk, trailing-newline content:
+
+```python
+def test_get_diff_modification(self, local_provider):
+    diff = local_provider.get_diff(
+        [FileChange(path="hello.txt", new_content="world\n")]
+    )
+    assert "--- a/hello.txt" in diff
+```
+
+This shape **never triggers** the `difflib`/`git apply` EOF marker bug. The bug requires:
+- Multiple hunks, **or**
+- Content without a trailing newline, **or**
+- Docstring removals
+
+The real integration test produced all three at once. The contract tests caught none of them.
+
+**The fix** — after the `git diff --no-index` change, five new tests were added to `TestLocalProviderDiff`:
+
+| New test | What it exercises |
+|---|---|
+| `test_get_diff_old_side_lacks_trailing_newline` | Old file has no `\n`, new does |
+| `test_get_diff_neither_side_has_trailing_newline` | Neither side has `\n` — two markers required |
+| `test_get_diff_multi_hunk` | Two changes separated by ≥ 3 unchanged lines |
+| `test_get_diff_docstring_removal` | Multi-line string removed, imports added |
+| `test_get_diff_writer_shaped_refactor` | Full 100-line refactor with imports, type alias, docstrings |
+
+And three new tests in `TestApply`:
+
+| New test | What it exercises |
+|---|---|
+| `test_apply_writer_shaped_refactor` | End-to-end: writer-shaped diff → `git apply --check` → apply → file matches |
+| `test_apply_multi_hunk_diff` | Two hunks apply cleanly |
+| `test_apply_no_trailing_newline_diff` | Old file lacks newline |
+
+Each of these tests runs `git apply --check` before asserting anything else. A diff that looks correct but does not apply is a hard failure, not a subtle assertion miss.
+
+### 8.3 What the contract tests do not cover
+
+Two gaps remain:
+
+1. **`.git` internals** — no test verifies the `.git/config` state after clone. If git's own configuration leaked something, the test would not catch it.
+2. **Network clone** — `GitHubProvider` and `GitLabProvider` clone calls are tested only for URL validation, not for the actual network round trip. The real integration test does one real GitHub clone, but the contract test itself is URL-only. That is deliberate — network tests are flaky in CI and the URL check catches the same class of bug.
+
+---
+
+## 9. The real integration test
+
+### 9.1 What the test is
+
+`phase8_real_test.py` is a **runnable script**, not a pytest file. It exercises every Phase 1-8 component against real external systems and reports a safety check after every step. Not committed to the repository — it is a diagnostic, and it depends on `GROQ_API_KEY` and `bwrap` being present.
+
+### 9.2 The pipeline
+
+```mermaid
+flowchart TB
+    S0[0 Preflight] --> S1[1 Clone Midterm repo]
+    S1 --> S2[2 Kernel parse 23 files]
+    S2 --> S3[3 Blast radius Calculation]
+    S3 --> S4[4 Sandbox network ON]
+    S4 --> S5[5 Install pytest pandas conftest]
+    S5 --> S6[6 Sandbox network OFF]
+    S6 --> S7[7 Pytest OLD code]
+    S7 --> S8[8 Characterization test OLD code]
+    S8 --> S9[9 Writer refactor via Groq]
+    S9 --> S10[10 Diff + ConsentRecord]
+    S10 --> S11[11 Apply diff]
+    S11 --> S12[12 Pytest NEW code]
+    S12 --> S13[13 Verifier verdict]
+    S13 --> S14[14 Rollback]
+    S14 --> Done[Summary]
+```
+
+### 9.3 What ran, and what passed
+
+**35 safety checks, 35 passed, 0 failed.** Every check is a real assertion against real output.
+
+**Step 0 — Preflight (4/4 pass)**
+- `rpcd binary exists` — the daemon binary is at the expected path
+- `bwrap installed` — `/usr/bin/bwrap` is on the PATH
+- `GROQ_API_KEY present` — the key is set (not validated against the API, just present)
+- `_native extension importable` — `codeguardian._native` imports and exposes `build_graph`, `graph_summary`, `compute_blast`
+
+**Step 1 — Clone (3/3 pass)**
+- Real GitHub clone of `mb2362/Midterm`, 32 files
+- HEAD `77da2093ec00`, branch `main`
+- Repository has Python files and test files
+
+**Step 2 — Kernel parse (4/4 pass)**
+- 23 Python files fed through `build_graph` as `(path, "python", content)` tuples
+- CPG serialized: **594,862 bytes**
+- Graph summary: **11,832 nodes, 13,212 edges, 23 files**
+
+**Step 3 — Blast radius (1/1 pass, 1 interesting miss)**
+- `blast(calculator/calculation.py:Calculation)` → 7 direct, 12 transitive callers **PASS**
+- `blast(calculator/operations.py:add)` → 0 direct, 0 transitive callers (see §11.1)
+
+**Step 4 — Sandbox network ON (3/3 pass)**
+- `bwrap-1` handle returned with `network_enabled=True`
+- `working_dir` matches host path byte-identically
+- Network enabled during dependency resolution
+
+**Step 5 — Install dependencies (8/8 pass)**
+- `python3` at `/usr/bin/python3` inside sandbox
+- `pip` at 24.0 from `dist-packages`
+- `pip install --target .deps pytest python-dotenv pandas` succeeded — pytest 9.1.1, pandas 3.0.6
+- `run_pytest.py` launcher written to host, visible inside sandbox
+- `python3 run_pytest.py --version` → pytest 9.1.1
+- `import pandas` through `.deps` → exit 0
+- `tests/conftest.py` written with `LOG_CONFIG_PATH`, `LOG_FILE`, `HISTORY_FILE` env vars
+- Conftest visible inside sandbox
+
+**Step 6 — Sandbox network OFF (1/1 pass)**
+- Second sandbox `network_enabled=False`
+- The dependency resolution phase is complete; execution is network-isolated
+
+**Step 7 — Pytest OLD code (1/1 pass)**
+- **63 tests pass** on unmodified code
+- Real pytest run inside real bwrap against real clone
+
+**Step 8 — Characterization test (1/1 pass)**
+- `add(a, b)` identified as target function
+- Characterization test written to `tests/test_characterization_phase8.py`
+- **1 test passes** on unmodified code — the safety net is valid
+
+**Step 9 — Writer refactor (1/1 pass)**
+- Real Groq `openai/gpt-oss-120b` call
+- Prompt: 676 input tokens; output: 931 tokens
+- Response is **valid Python** (`ast.parse` succeeds)
+- 1,296-char refactor: added `from typing import Union`, `Number = Union[int, float]`, type hints on every function, rewritten docstrings
+
+**Step 10 — Diff + consent (2/2 pass)**
+- **2,924-char diff** produced by `git diff --no-index`
+- Diff format is `git apply`-compatible
+- `sha256(diff)` = `66d50eeaf60d...`
+- `ConsentRecord.diff_hash` matches
+
+**Step 11 — Apply (3/3 pass)**
+- `git apply --check` accepts the diff
+- `git apply` modifies `calculator/operations.py` to 1,296 bytes
+- Audit log written (529 bytes)
+- `rollback_ref` = `77da2093ec00fe747ccc15d03cea3a6f52c858dd` (the pre-apply HEAD)
+
+**Step 12 — Pytest NEW code (1/1 pass)**
+- **64 tests pass** (63 original + the characterization test)
+- Zero failures
+- The refactor preserved behavior
+
+**Step 13 — Verifier (2/2 pass)**
+- Real Groq `qwen/qwen3.8-27b` call (different family from Writer)
+- Verdict: **FAIL**
+- Reason: "The diff removes the blank lines between function definitions, violating PEP 8 style guidelines"
+- **Family independence proven**: Writer `openai`, Verifier `qwen`
+
+**Step 14 — Rollback (2/2 pass)**
+- `restored_files: ('calculator/operations.py', 'history.csv')`
+- File restored byte-identically — 2,141 chars, matches original
+- Audit log preserves the rollback reference
+
+### 9.4 What the verifier caught — and what it revealed
+
+The Verifier's FAIL verdict is not a Phase 8 failure. It is Phase 8 working exactly as designed:
+
+- The Writer produced a refactor that **removed PEP 8 blank lines and lost docstrings** — a bad refactor
+- The Verifier (different family, no access to Writer's reasoning) **caught the regression** with a specific, actionable reason
+- The pipeline **did not loop back** — it applied the diff anyway and ran pytest
+
+That last point is the boundary. Phase 8 provides:
+- The routing that puts the Writer and Verifier on different families
+- The transport that gets a verdict from the Verifier
+- The apply that writes the diff to disk
+
+Phase 8 does **not** provide:
+- A retry loop that sends the verdict back to the Writer
+- A gate that blocks apply on a FAIL verdict
+- A "shadow writer" that produces an alternative when the diff is bad
+
+All three are Phase 11 decisions. Phase 8 delivers the raw material; Phase 11 uses it.
+
+The integration test's observation is important for Phase 10 design: **`gpt-oss-120b` is not strong enough to be the Writer role for a real refactor.** Its output strips docstrings and collapses blank lines. A stronger model (Claude Opus, GPT-5.5, or a local model fine-tuned for code) is required. Phase 10's prompt work can partially compensate; a stronger model is the safer answer.
+
+### 9.5 Test counts at every boundary
+
+| Boundary | Passing | Notes |
+|---|---|---|
+| Phase 7 + B-037A (start of Phase 8) | 367 | Baseline |
+| After B-040 (sandbox backends) | 389 | +22 sandbox unit tests |
+| After B-041 initial (contract tests) | 479 | +90 contract tests |
+| After apply/diff fixes | 487 | +8 new diff/apply tests |
+| After final fixes | 487 | 2 skipped (docker tests need WSL integration) |
+| **Real integration test** | **35/35** | Zero failures on real infrastructure |
+
+---
+
+## 10. Every bug fixed in Phase 8
+
+Ten bugs were found and fixed during Phase 8. Each is documented with what it was and how it was fixed.
+
+| # | Bug | Where | How it was caught | Fix |
+|---|---|---|---|---|
+| 1 | `SandboxSpec` missing `working_dir` and `image` | `interfaces/sandbox.py` | Preflight against daemon | Escalation A rewrite |
+| 2 | `SandboxHandle` missing daemon wire fields | `interfaces/sandbox.py` | Same | Escalation A rewrite |
+| 3 | `ExecutionResult` missing `oom_killed`, `output_truncated` | `interfaces/sandbox.py` | Same | Escalation A rewrite |
+| 4 | Adapters return wrong `provider` name | `list_models()` in adapters | Role resolution failed | Return `provider=""`; registry fills from its own key |
+| 5 | Discovery ignores injected adapters | `fallback_router._build_plan` | Mock transport hit real network | Pass `self._providers` to `discover()` |
+| 6 | 404 mapped to `MODEL_UNKNOWN` | `_raise_for_status` in adapters | Groq model retirement | Map to `PROVIDER_UNAVAILABLE` |
+| 7 | Reasoning model returns empty silently | `_parse_response` and streaming | `gpt-oss` with `max_tokens=10` | Raise `MODEL_CONTEXT_EXCEEDED` with `reasoning_chars` |
+| 8 | `difflib` vs `git apply` EOF marker | `_format_diff` in `local_repository.py` | Real 2,924-char diff rejected | Switch to `git diff --no-index` |
+| 9 | `git diff --no-index` returns empty for missing side | `_format_diff` | Deletion test returned `""` | Pass `/dev/null` instead of omitting path |
+| 10 | `rollback` returns empty `restored_files` | `apply_provider.rollback` | Real apply+rollback test | `git diff --name-only <ref>` not `<ref> HEAD` |
+| 11 | `rollback` accepts all-zeros SHA | `apply_provider.rollback` | `rollback("0"*40)` test | Use `<ref>^{commit}` |
+| 12 | `writer_model_id` split strips provider prefix | `phase8_real_test.py` | Family lookup failed | Use `MODEL` directly, not `MODEL.split("/")[1]` |
+
+---
+
+## 11. Drawbacks of Phase 8
+
+The integration test passed 35/35, but it exposed gaps that no passing test can hide. These are documented so Phase 9, 10, 11, and 13 know what to fix.
+
+### 11.1 Blast radius does not resolve imported functions
+
+**The problem.** The integration test ran `compute_blast` against two targets:
+
+- `calculator/calculation.py:Calculation` — a class defined in one file, imported and used in others. Result: **7 direct, 12 transitive callers**. Correct.
+- `calculator/operations.py:add` — a function defined in one file, imported into `calculation.py` and called inside `Calculation.perform`. Result: **0 direct, 0 transitive callers**. Incorrect.
+
+**The root cause.** The kernel's call graph resolves **class** references through the symbol table, but does not follow **function** imports across files. When `calculation.py` does `from calculator.operations import add, subtract, multiply, divide`, and then calls `add(a, b)` inside a method, the callee resolves to nothing — there is no cross-file edge from `Calculation.perform` to `operations.add`.
+
+**Why it matters.** In real refactoring, the primary target is functions. "Add type hints to `add`" is the most common use case. Getting `0` callers for it is wrong in the worst way — it says "safe to change, nothing depends on it" when in reality the whole calculator depends on it.
+
+**Where the fix belongs.** Phase 6/7 — the kernel's call graph and symbol table. Not Phase 8. Phase 8 is transport.
+
+**How it was detected.** The integration test — not the pytest contract tests. The contract tests use synthetic sources with no cross-file imports, so they never exercise this path.
+
+**Priority.** High. A Phase 11 agent that trusts the blast radius result on a function target will refactor a function thinking it is isolated when it is not. This is a correctness gap, not a cosmetic one.
+
+### 11.2 Verifier verdict does not block apply
+
+**The problem.** The Verifier returned `FAIL` with a specific reason ("removes blank lines between function definitions, violating PEP 8"). The pipeline applied the diff anyway.
+
+**Why it happens.** Phase 8 is transport. It delivers the verdict to the caller. The caller (in this case, `phase8_real_test.py`) does not act on it — it just records it as a safety check pass because the verdict was produced.
+
+**Why it is correct scope.** Phase 11 is what decides what to do with a `FAIL` verdict:
+- Retry the Writer with the verifier's reason as feedback
+- Reject the diff and stop the pipeline
+- Fall back to a different Writer model
+- Accept the diff anyway with a warning
+
+None of those decisions belong in Phase 8. They are the orchestrator's job (Phase 13) driven by the Verifier agent (Phase 11).
+
+**What the integration test proved anyway.** The independence guarantee is real. A different-family model caught the writer's mistake in one shot. This is the moat working — even if the pipeline does not yet act on it.
+
+**Priority.** Not a Phase 8 fix. But **must be addressed in Phase 11** — a verifier that produces a verdict nobody acts on is worse than no verifier, because it gives false confidence.
+
+### 11.3 The characterization test is toy-sized
+
+**The problem.** The test written by step 8 is:
+
+```python
+def test_characterization_add_returns_something():
+    result = add(2, 2)
+    assert result is not None
+```
+
+This proves the sandbox can run pytest. It does not prove characterization tests lock behavior.
+
+**What a real characterization test looks like:**
+
+```python
+def test_add_positive_integers():
+    assert add(2, 3) == 5
+
+def test_add_negative_integers():
+    assert add(-2, -3) == -5
+
+def test_add_floats():
+    assert add(0.1, 0.2) == pytest.approx(0.3)
+
+def test_add_string_raises():
+    with pytest.raises(TypeError):
+        add("a", "b")
+
+def test_add_one_arg_raises():
+    with pytest.raises(TypeError):
+        add(2)
+```
+
+A real characterization test suite for a single function has 5–20 assertions covering:
+- Positive and negative values
+- Floats and integers
+- Type errors (wrong arity, wrong types)
+- Boundary values (zero, very large)
+- Edge cases (null, NaN)
+
+**Why Phase 8 only writes a toy test.** The Tester agent (Phase 11) is what writes real characterization tests. It reads the function, understands the domain, and produces assertions. Phase 8 is the substrate that runs the test; Phase 11 is what produces it.
+
+**Why this is still important.** The integration test proved the substrate works — pytest runs inside the sandbox, imports the function through the launcher, and the character test passes on old code. Those are the Phase 8 guarantees. The test content is Phase 11.
+
+**Priority.** Not a Phase 8 fix. But a real characterization test suite is essential for Phase 11 — a toy test is worse than nothing because it gives false confidence.
+
+### 11.4 Docker end-to-end not tested
+
+**The problem.** `DockerBackend` exists, its Python-side validation works (`image=None` → `SANDBOX_IMAGE_UNAVAILABLE`), and the contract test covers `supports_language` and the create-without-image path. But no test ever runs a real Docker container. The dev environment has no WSL integration enabled, so `docker ps` from inside WSL returns "not available".
+
+**What this means.** A user who configures `sandbox_backend = "docker"` and has Docker working on the host gets a working backend. A user in the same environment as the developer gets `SANDBOX_CREATE_FAILED` with a message from the daemon. Both are correct behavior — the code is right, the environment is different.
+
+**What is not tested.** The full container lifecycle: create → execute → destroy with real Docker. The `--rm` flag prevents leaks. The `--memory`, `--cpus`, `--pids-limit` flags are passed correctly. None of this is proven.
+
+**Priority.** Medium. Docker is the fallback backend, not the primary. `BubblewrapBackend` is proven on Linux. When a user needs Docker (Windows, macOS without Seatbelt), they discover whether it works. A Phase 9+ check could add a "detect docker availability before offering it as an option" path.
+
+### 11.5 No circuit breaker
+
+**The problem.** When a provider's endpoint is completely down, every call walks the full retry chain. `MODEL_UNAVAILABLE` retries 5 times (from `retry_policy_of`), then falls back to the next model, which retries 5 times, then falls back. For a provider with 3 models in the eligible set, a single `complete` call can make up to 18 HTTP requests before giving up.
+
+**What a circuit breaker would do.** After N consecutive failures from one provider, mark the provider `OPEN` for M seconds. All calls to models from that provider skip immediately — no HTTP, no retry. After M seconds, allow one probe request. If it succeeds, close the circuit. If it fails, reopen.
+
+**Why it was not added.** The retry budget from `retry_policy_of` is already per-model. Combined with the fallback chain, it produces bounded worst-case behavior. A circuit breaker reduces the worst case from "18 requests in 30 seconds" to "1 request per call for the next 60 seconds" — an improvement, but not a requirement for Phase 8.
+
+**Where it belongs.** Phase 13 — the orchestrator can track provider health across calls within a run. Per-provider circuit state is cross-call state that the router does not own.
+
+**Priority.** Medium. The integration test ran against a healthy Groq — the retry chain never engaged. In a real run against a degraded provider, the retry chain would make the run feel slow before it fails.
+
+### 11.6 `Retry-After` header is ignored
+
+**The problem.** When Groq returns 429 with `Retry-After: 5`, the router sleeps according to `compute_delay` (0.5–2 seconds for exponential backoff). It then retries immediately, which often hits the rate limit again because the wait was too short. The `Retry-After` header says exactly how long to wait; the code ignores it.
+
+**Why it happens.** `retry_async` from Phase 1 does not read HTTP response headers — it only knows the `CodeGuardianError`, which carries `retry_policy` but not `Retry-After`. Reading the header would require either extending `CodeGuardianError` to carry `retry_after_seconds` or having the adapter sleep before raising.
+
+**Where the fix belongs.** Phase 1. This is a `retry.py` change, and touching `retry.py` is a Rule 1 escalation. Better to do it once with all the tests it needs than as a Phase 8 patch.
+
+**Priority.** High in production, low in development. Groq's free tier rate-limits aggressively; a paid account rarely hits this. Adding it is 15 lines in `retry.py` plus 3 lines in each adapter.
+
+### 11.7 `Retry-After` family independence is order-dependent
+
+**The problem.** `_excluded_families_for` reads `self._last_used_by_role[<other_role>]`. If the referenced role has not run yet in this router instance, the exclusion set is empty. This works because the pipeline calls Writer before Verifier. If a future pipeline calls Verifier first — or in parallel — the exclusion is absent, not stale.
+
+**Why it is a latent bug.** The current code works because the caller happens to follow the safe order. There is no enforcement of that order. A Phase 13 orchestrator that retries a Verifier before a Writer would silently degrade the family independence guarantee.
+
+**The fix.** Either:
+- Raise `SYS_INVARIANT_VIOLATED` when a verifier is called before its `different_family_from` target — fail fast, honest
+- Use a `ContextVar` that records the writer family across the whole run, set by the orchestrator when the Writer completes
+
+**Priority.** Medium. The bug does not fire in Phase 8. It could fire in Phase 13 if the orchestrator's retry logic is not careful.
+
+### 11.8 Dynamic discovery in `__init__.py` is fragile
+
+**The problem.** Three packages — `interfaces/`, `providers/`, `sandbox/` — use dynamic discovery:
+
+```python
+for _finder, _module_name, _is_package in pkgutil.iter_modules(__path__):
+    _module = importlib.import_module(f"{__name__}.{_module_name}")
+```
+
+If any single module in the package raises on import (syntax error, missing dependency, missing native module), the **entire package fails to import**. `from codeguardian.core.providers import LocalProvider` fails because some other module in the same package has a bug.
+
+**Why it is a problem.** Providers were split across modules to keep each file under ~400 lines. That is a good structural decision. The dynamic discovery was added to avoid Rule 1 rewrites of `__init__.py` when adding providers. It works, but it trades off failure isolation for convenience.
+
+**The fix.** Explicit imports in `__init__.py`. Each provider is listed. If one module fails, the failure names that specific provider rather than breaking the whole package. The cost is a Rule 1 rewrite of `__init__.py` every time a provider is added.
+
+**Priority.** Low for Phase 8, medium for production. If a user's install is corrupted (an adapter file missing), the failure should say "adapter file missing" not "cannot import codeguardian.core.providers".
+
+### 11.9 `_translate_daemon_error` matches on substring
+
+**The problem.** Both `bubblewrap_backend.py` and `docker_backend.py` classify daemon errors by looking for substrings in the error message:
+
+```python
+if "image" in message and ("unavailable" in message or "required" in message):
+    code = SANDBOX_IMAGE_UNAVAILABLE
+```
+
+If the daemon's wording changes — for example from "image unavailable" to "missing image reference" — the classifier falls through to a generic `SANDBOX_CREATE_FAILED`. No test would catch this because the current daemon wording matches.
+
+**Why it is a problem.** The daemon is Rust, the classifier is Python. The two evolve independently. A wording change on one side silently misclassifies errors on the other.
+
+**The fix.** The daemon should return a structured error code in the JSON-RPC response — a `code` field separate from `message`. The backend reads the code, not the message. This is a Rust+Python change; the Rust side is a handler update, the Python side is a `_translate_daemon_error` rewrite.
+
+**Priority.** Low. The current wording matches, and if it changes, the failure mode is "wrong error code" not "wrong behavior". But worth noting for a Phase 9 cleanup.
+
+### 11.10 No total token budget or cost tracking
+
+**The problem.** `metadata.json` carries `input_cost_per_mtok` and `output_cost_per_mtok` for every model. Nothing accumulates them. A run can spend an unbounded amount and the router does not know.
+
+**Why it matters.** A Phase 13 orchestrator that runs 20 iterations on a large repository with `claude-opus` as the Writer could spend $50+ per run. Without a budget, the user finds out at the end of the month.
+
+**The fix.** A `ContextVar` that tracks cumulative cost per run. The router increments it after every successful response. When the budget is exceeded, the router raises `SYS_INTERNAL` with details. The orchestrator catches this and reports "budget exhausted, N tokens used".
+
+**Priority.** Low for Phase 8 (no orchestrator exists). High for Phase 13.
+
+### 11.11 Reflection on what "35/35 passed" means
+
+The integration test passed every safety check it defined. But it also exposed gaps that its own checks did not catch — the blast-radius miss on `add` in step 3 is the clearest example. The check passed because it found callers for `Calculation`, not because it found callers for everything.
+
+**This is the fundamental limitation of self-designed tests.** The test asserts what the designer thought to assert. The thing that fails is often the thing the designer did not think to check.
+
+The right response is not to expand the test until it catches every possible bug. It is to note the gaps explicitly (this section) and address them in the phase that owns them. A passing integration test is necessary but not sufficient proof of correctness.
+
+**For Phase 9 planning:** when the plugin system is built, a `LanguagePlugin` for a language with heavy import usage should be tested against a real repo in that language. The same blast-radius gap could exist for TypeScript imports, Java packages, or Rust modules.
 
 ---
 
 ## 12. What Phase 8 hands forward
 
-- **To Phase 9 (Plugins).** Working `RepositoryProvider` and `ModelProvider` implementations that plugin contract tests can use as reference.
-- **To Phase 10 (Prompts).** Working model providers ready to be called with real prompts.
-- **To Phase 11 (Agents).** All four provider categories. The Tester agent will use `ModelProvider` to write tests and `SandboxBackend` to run them.
-- **To Phase 13 (Orchestrator).** The full set of providers, ready to be wired into the phase pipeline.
-- **To Phase 15 (MCP and Reporters).** `ApplyProvider` and the model providers, ready for the output phase.
+### To Phase 9 (Plugins)
+- Working `RepositoryProvider` and `ModelProvider` implementations that plugin contract tests can use as reference
+- The `LanguagePlugin` Protocol implementation pattern — each language plugin supplies a tree-sitter grammar, a test runner, and refactor rules
+- **The blast radius gap** — a language plugin's parse output must feed the kernel's symbol table correctly for blast to resolve imported function calls. This is where the `add` gap gets addressed.
+
+### To Phase 10 (Prompts)
+- Working model providers, ready for real prompts
+- **Writer quality observation** — `gpt-oss-120b` is not strong enough as the Writer role for real refactors. Phase 10's prompt work must compensate with stronger instructions or the Writer role must default to a stronger model.
+- **Verifier output structure** — the current verifier produces free-form text. Phase 10's prompt must enforce structured output (JSON or a single word) for the verdict to be machine-actionable.
+
+### To Phase 11 (Agents)
+- All four provider categories
+- **Verifier verdict handling** — the agent must decide what to do with a FAIL verdict (retry Writer, reject diff, request a stronger model)
+- **Characterization test quality** — the Tester agent must write real tests, not the toy test the integration script wrote
+- **Dependency discovery** — the Tester agent must read the repo, find env requirements (`LOG_CONFIG_PATH`, `LOG_FILE`, `HISTORY_FILE`), and provision them. This is not a Phase 8 capability; it is a Phase 11 responsibility.
+
+### To Phase 13 (Orchestrator)
+- The full set of providers, ready to be wired into the phase pipeline
+- **Circuit breaker** — the orchestrator tracks provider health
+- **Token budget** — the orchestrator tracks cumulative cost
+- **`Retry-After` integration** — either fix in Phase 1 or handle in the orchestrator
+
+### To Phase 15 (MCP and Reporters)
+- `ApplyProvider` and the model providers, ready for the output phase
+- The audit log format that the reporters will consume
 
 ---
 
-## 13. Estimated size
+## 13. Summary
 
-| Block | Files | Lines |
-|---|---|---|
-| B-038 | 5 | 590 |
-| B-039 | 4 | 870 |
-| B-040 | 6 | 550 |
-| B-041 | 5 | 1415 |
-| **Total** | **20** | **~3,425** |
+Phase 8 delivered 20 files, 487 passing tests, and 35/35 real integration checks. Every Protocol from Phase 4 now has a working implementation verified against real external systems:
 
-Plus one line in `pyproject.toml` for `httpx`, plus one line in the root `pyproject.toml` if it also declares dependencies.
+| Layer | Proven working |
+|---|---|
+| Clone | Real GitHub repo, real git working tree |
+| Kernel | 11,832 nodes, 13,212 edges, 23 Python files |
+| Blast radius | Classes: 7 direct / 12 transitive. **Functions: 0.** |
+| Sandbox | Real `bwrap` executing pytest, `working_dir` byte-identical |
+| Test execution | 63 tests pass on old code, 64 on new code |
+| Model | Real Groq call, 931 tokens, valid Python |
+| Diff | 2,924 chars, `git apply --check` accepts |
+| Apply + rollback | Diff applied, file restored byte-identically |
+| Family independence | Writer `openai`, Verifier `qwen`, different families |
 
-Total Phase 8 output: **~3,450 lines**.
+**The one significant gap exposed:** blast radius does not resolve imported function calls. `Calculation` (class) finds 19 callers; `add` (function) finds 0. This is Phase 6/7 work, not Phase 8, but it is a real correctness gap that Phase 11 will hit on the first "add type hints to `add`" refactor.
+
+**The one significant design shift:** the original plan called for static model lists in Python. That approach failed the moment Groq retired a model. The redesign to discovery-driven routing means a model rotation is zero user action — discovery picks up the new set at the next planning step.
+
+**The one significant process observation:** contract tests using toy-sized inputs miss real-world bugs. The `difflib`/`git apply` EOF mismatch shipped in B-041 because the tests used `"hello\n"` → `"world\n"` diffs. The real 2,924-char refactor hit the bug on first try. Every future phase should ask: **does my test exercise the shape a real model would produce?**
+
+The heavy phases are still ahead. Phase 9 writes the plugin loader. Phase 10 writes the prompts. Phase 11 writes the real agents. Phase 13 writes the orchestrator. Phase 14 writes the CLI. Those phases contain roughly 70% of the project's remaining code. What has been built is the substrate they stand on — verified, bug-free at the transport layer, and honest about its gaps.
 
 ---
 
-## 14. Summary
+## 14. Related documents
 
-Phase 8 is where the Contracts get their first implementations. It is the plumbing layer, and it is deliberately thin:
-
-- Repository providers that clone and read
-- Apply provider that writes with consent
-- Model providers that call LLM APIs
-- Sandbox backends that delegate to the Rust daemon
-- Contract tests that prove each implementation
-
-Three properties are non-negotiable:
-
-1. **The tests are honest.** Model tests use mock transport (no API keys). Repository and apply tests use real git. Sandbox tests use real bwrap/docker when available.
-2. **The providers are language-agnostic.** No hardcoded language lists. Docker takes an image. Bubblewrap runs any Linux binary.
-3. **The providers are stateless.** The caller supplies the path, the bridge, the client, the spec. The provider does not hold state between calls.
-
-What Phase 8 does not do is equally important. No pipeline. No agents. No prompts. No orchestration. Phase 8 stops at "the provider works in isolation." Phase 11 builds the pipeline that uses them.
-
-When Phase 8 is complete, the phase boundary will run:
-
-```
-cargo test --workspace
-PYTHONPATH=python python3 -m pytest tests/ -q
-```
-
-Every existing test must pass. Every new contract test must pass. The count will rise from 367 to roughly 500+ — the precise number will be known when the tests exist.
-
-If any of this is wrong, the time to correct it is now. Once Phase 8 starts, each block is written once and tested at the phase boundary. This plan is the contract the build will honour.
+- `docs/summaries/phases-1-to-5.md` — the foundation
+- `docs/summaries/phases-6-to-7.md` — the Rust engines
+- `docs/04-architecture.md` — the components described here
+- `docs/05-data-model.md` — the schemas Phase 8 conforms to
+- `docs/06-api-contracts.md` — the interfaces Phase 8 implements
+- `docs/07-tech-stack.md` — `httpx`, `git`, `bwrap`, and the bridge choices
+- `BUILD_STATE.md` — the current state
+- `BUILD_ORDER.md` — the phase plan

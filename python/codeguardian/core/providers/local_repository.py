@@ -10,9 +10,9 @@ the boundary so callers see only ``CodeGuardianError``.
 
 from __future__ import annotations
 
-import difflib
 import re
 import subprocess
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -37,11 +37,7 @@ def _is_remote_url(url: str) -> bool:
 
 
 def _normalize_source(url: str) -> tuple[str, bool]:
-    """Return ``(source, is_local)`` for a clone URL or path.
-
-    A ``file://`` URL is treated as a local path. A path with ``~`` is
-    expanded. A remote URL is returned unchanged.
-    """
+    """Return ``(source, is_local)`` for a clone URL or path."""
     if url.startswith("file://"):
         return str(Path(url[len("file://") :]).expanduser().resolve()), True
     if _is_remote_url(url):
@@ -56,12 +52,7 @@ def _run_git(
     timeout: int = _DEFAULT_GIT_TIMEOUT,
     stdin: bytes | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run ``git`` and return the completed process without raising.
-
-    The caller inspects ``returncode`` and ``stderr`` to decide which
-    typed error to raise. Only execution failures (missing git binary,
-    timeout, OS-level errors) raise here.
-    """
+    """Run ``git`` and return the completed process without raising."""
     command = ["git", *args]
     cwd_str = str(cwd) if cwd is not None else None
     try:
@@ -95,13 +86,7 @@ def _run_git(
 
 
 def _classify_clone_failure(stderr: str) -> ErrorCode:
-    """Map git clone stderr text onto a typed error code.
-
-    The markers are the ones git actually emits. Anything unrecognized
-    falls through to ``REPO_CLONE_FAILED``, which is safe: the retry
-    policy for a network error gives the caller a bounded number of
-    attempts before giving up.
-    """
+    """Map git clone stderr text onto a typed error code."""
     text = stderr.lower()
     if "authentication failed" in text or "permission denied (publickey)" in text:
         return ErrorCode.REPO_AUTH_FAILED
@@ -121,12 +106,7 @@ def _classify_clone_failure(stderr: str) -> ErrorCode:
 
 
 def _glob_to_regex(pattern: str) -> re.Pattern[str]:
-    """Translate a git-style glob to a compiled regular expression.
-
-    ``**`` matches across directory separators, ``*`` matches within a
-    single path segment, and ``?`` matches one character within a
-    segment. Other characters are matched literally.
-    """
+    """Translate a git-style glob to a compiled regular expression."""
     parts: list[str] = ["^"]
     index = 0
     length = len(pattern)
@@ -152,40 +132,66 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("".join(parts))
 
 
-def _as_lines(content: str | None) -> list[str]:
-    """Split content into lines with a trailing newline on every line.
-
-    ``difflib.unified_diff`` expects each line to end with a newline so
-    that a hunk terminates cleanly and the resulting patch is accepted
-    by ``git apply``.
-    """
-    if content is None or content == "":
-        return []
-    lines = content.splitlines(keepends=True)
-    if lines and not lines[-1].endswith("\n"):
-        lines[-1] += "\n"
-    return lines
-
-
 def _format_diff(path: str, old: str | None, new: str | None) -> str:
-    """Render one file's change as a unified diff hunk block.
+    """Render one file's change as a ``git apply``-compatible diff.
 
-    ``old`` is ``None`` for a new file and ``new`` is ``None`` for a
-    deletion. A change where the two sides are identical renders to
-    the empty string.
+    Uses ``git diff --no-index`` rather than ``difflib`` because
+    ``git apply`` and ``difflib`` disagree on two things that matter:
+
+    - **End-of-file marker.** When a side has no trailing newline,
+      ``git apply`` requires a literal ``\\ No newline at end of file``
+      line after that side's last content line. ``difflib`` does not
+      emit this marker, so a patch that involves such a file is
+      rejected with a conflict.
+    - **Filename quoting.** Paths that contain tabs, quotes, or
+      non-ASCII characters need C-style escaping in the header.
+
+    A missing side is passed to ``git diff`` as ``/dev/null`` — an
+    existing character device — rather than omitting the path.
+    ``git diff --no-index`` silently returns no output when one of its
+    two arguments does not exist, which would make every creation and
+    deletion produce an empty diff. ``/dev/null`` exists, so git
+    compares against it and emits the standard ``--- /dev/null`` or
+    ``+++ /dev/null`` header that ``git apply`` uses to decide the
+    file is created or deleted.
+
+    ``git diff --no-index`` exits 1 when the two sides differ, which
+    is the expected result for a real change. Exit 0 (identical)
+    returns an empty string; any other exit code is a hard failure.
     """
     if old == new:
         return ""
-    fromfile = f"a/{path}" if old is not None else "/dev/null"
-    tofile = f"b/{path}" if new is not None else "/dev/null"
-    return "".join(
-        difflib.unified_diff(
-            _as_lines(old),
-            _as_lines(new),
-            fromfile=fromfile,
-            tofile=tofile,
+    if old is None and new is None:
+        return ""
+
+    with tempfile.TemporaryDirectory(prefix="cg-diff-") as tmpdir:
+        tmp_root = Path(tmpdir)
+        left_path = f"a/{path}" if old is not None else "/dev/null"
+        right_path = f"b/{path}" if new is not None else "/dev/null"
+
+        if old is not None:
+            old_file = tmp_root / "a" / path
+            old_file.parent.mkdir(parents=True, exist_ok=True)
+            old_file.write_bytes(old.encode("utf-8"))
+        if new is not None:
+            new_file = tmp_root / "b" / path
+            new_file.parent.mkdir(parents=True, exist_ok=True)
+            new_file.write_bytes(new.encode("utf-8"))
+
+        result = _run_git(
+            ["diff", "--no-index", "--no-prefix", left_path, right_path],
+            cwd=tmp_root,
         )
-    )
+        if result.returncode not in (0, 1):
+            stderr = result.stderr.decode("utf-8", "replace").strip()
+            raise CodeGuardianError(
+                ErrorCode.DIFF_COMPUTE_FAILED,
+                f"git diff --no-index failed for {path}: {stderr}",
+                details={"path": path, "exit_code": result.returncode},
+            )
+        if result.returncode == 0:
+            return ""
+        return result.stdout.decode("utf-8")
 
 
 class LocalProvider:
@@ -203,11 +209,7 @@ class LocalProvider:
         return self._path
 
     def clone(self, url: str, dest: Path) -> Path:
-        """Clone ``url`` into ``dest`` and remember it as the active clone.
-
-        A local path is validated as a git working tree before it is
-        cloned. A remote URL is passed to ``git clone`` unchanged.
-        """
+        """Clone ``url`` into ``dest`` and remember it as the active clone."""
         dest_resolved = dest.expanduser().resolve()
         if dest_resolved.exists() and any(dest_resolved.iterdir()):
             raise CodeGuardianError(
@@ -326,8 +328,7 @@ class LocalProvider:
 
     def get_diff(self, changes: Sequence[FileChange]) -> str:
         """Return a unified diff that renders every change in ``changes``."""
-        root = self._require_cloned()
-        del root
+        self._require_cloned()
         parts: list[str] = []
         for change in changes:
             try:
@@ -382,12 +383,7 @@ class LocalProvider:
         return self._path
 
     def _resolve_relative(self, path: str) -> Path:
-        """Resolve ``path`` against the clone root and reject any escape.
-
-        ``resolve()`` follows symlinks, so a symlink inside the clone
-        that points outside the clone is rejected the same way a
-        ``..`` traversal is.
-        """
+        """Resolve ``path`` against the clone root and reject any escape."""
         root = self._require_cloned()
         candidate = (root / path).resolve()
         try:

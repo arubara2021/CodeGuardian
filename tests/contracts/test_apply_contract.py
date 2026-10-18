@@ -7,6 +7,14 @@ logic under test is the production code, not a reimplementation.
 Every failure branch is tested: bad consent hash, wrong consent scope,
 remote URL, path not a directory, conflicting diff, rollback of an
 unknown reference, and rollback before any apply.
+
+The three ``test_apply_*_shape_*`` tests at the end of ``TestApply``
+exist because the original suite only exercised single-line,
+single-hunk, trailing-newline diffs. A real 120B model produces
+multi-hunk diffs with rewritten signatures and removed docstring
+blocks, and those shapes exposed a ``git apply`` incompatibility that
+the simple diffs did not. Those three tests are the regression
+guarantee.
 """
 
 from __future__ import annotations
@@ -50,9 +58,22 @@ class _MockAuditBridge:
         return {"entry_hash": "test-hash", "prev_hash": "GENESIS"}
 
 
+def _build_consent(diff: str) -> ConsentRecord:
+    """Build a ConsentRecord whose hash matches ``diff``."""
+    return ConsentRecord(
+        consent_id="consent-1",
+        run_id="run-1",
+        granted_at=datetime.now(UTC),
+        granted_by="test",
+        scope="apply",
+        diff_hash=hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+        rollback_ref="",
+    )
+
+
 @pytest.fixture
 def setup(tmp_path: Path):
-    """Return (repo_path, diff, consent, audit_bridge) ready to apply."""
+    """Return (repo_path, diff, consent, audit_bridge, provider) ready to apply."""
     source = tmp_path / "source"
     source.mkdir()
     _git(source, "init", "-q", "-b", "main")
@@ -67,16 +88,7 @@ def setup(tmp_path: Path):
     repository.clone(str(source), clone)
 
     diff = repository.get_diff([FileChange(path="file.txt", new_content="new\n")])
-
-    consent = ConsentRecord(
-        consent_id="consent-1",
-        run_id="run-1",
-        granted_at=datetime.now(UTC),
-        granted_by="test",
-        scope="apply",
-        diff_hash=hashlib.sha256(diff.encode("utf-8")).hexdigest(),
-        rollback_ref="",
-    )
+    consent = _build_consent(diff)
     bridge = _MockAuditBridge()
     audit_log = tmp_path / "audit.jsonl"
     provider = ApplyProvider(repository, bridge, audit_log)
@@ -152,6 +164,105 @@ class TestApply:
             provider.apply(str(clone), diff, consent)
         assert exc.value.code is ErrorCode.APPLY_CONFLICT
         assert (clone / "file.txt").read_text(encoding="utf-8") == "already-changed\n"
+
+    def test_apply_writer_shaped_refactor(self, tmp_path):
+        """A real Writer-shaped diff must apply cleanly.
+
+        Reproduces the exact shape that failed in the Phase 8
+        integration run: new imports, new type alias, rewritten
+        function signature, rewritten docstring.
+        """
+        source = tmp_path / "source"
+        source.mkdir()
+        _git(source, "init", "-q", "-b", "main")
+        _git(source, "config", "user.name", "test")
+        _git(source, "config", "user.email", "test@test.example")
+        old = (
+            "def add(a, b):\n"
+            '    """Add two numbers."""\n'
+            "    return a + b\n"
+            "\n"
+            "\n"
+            "def subtract(a, b):\n"
+            '    """Subtract b from a."""\n'
+            "    return a - b\n"
+        )
+        (source / "calc.py").write_text(old, encoding="utf-8")
+        _git(source, "add", ".")
+        _git(source, "commit", "-q", "-m", "initial")
+
+        clone = tmp_path / "clone"
+        repository = LocalProvider()
+        repository.clone(str(source), clone)
+
+        new = (
+            "from typing import Union\n"
+            "\n"
+            "Number = Union[int, float]\n"
+            "\n"
+            "\n"
+            "def add(a: Number, b: Number) -> Number:\n"
+            '    """Return the sum of a and b."""\n'
+            "    return a + b\n"
+            "\n"
+            "\n"
+            "def subtract(a: Number, b: Number) -> Number:\n"
+            '    """Return the difference of a and b."""\n'
+            "    return a - b\n"
+        )
+        diff = repository.get_diff([FileChange(path="calc.py", new_content=new)])
+        consent = _build_consent(diff)
+        bridge = _MockAuditBridge()
+        provider = ApplyProvider(repository, bridge, tmp_path / "audit.jsonl")
+        result = provider.apply(str(clone), diff, consent)
+        assert result.success is True
+        assert (clone / "calc.py").read_text(encoding="utf-8") == new
+
+    def test_apply_multi_hunk_diff(self, tmp_path):
+        """A diff with two hunks separated by unchanged context applies cleanly."""
+        source = tmp_path / "source"
+        source.mkdir()
+        _git(source, "init", "-q", "-b", "main")
+        _git(source, "config", "user.name", "test")
+        _git(source, "config", "user.email", "test@test.example")
+        original = "".join(f"line{i}\n" for i in range(1, 21))
+        new = original.replace("line2\n", "CHANGED2\n").replace("line18\n", "CHANGED18\n")
+        (source / "big.txt").write_text(original, encoding="utf-8")
+        _git(source, "add", ".")
+        _git(source, "commit", "-q", "-m", "initial")
+
+        clone = tmp_path / "clone"
+        repository = LocalProvider()
+        repository.clone(str(source), clone)
+        diff = repository.get_diff([FileChange(path="big.txt", new_content=new)])
+        consent = _build_consent(diff)
+        bridge = _MockAuditBridge()
+        provider = ApplyProvider(repository, bridge, tmp_path / "audit.jsonl")
+        result = provider.apply(str(clone), diff, consent)
+        assert result.success is True
+        assert (clone / "big.txt").read_text(encoding="utf-8") == new
+
+    def test_apply_no_trailing_newline_diff(self, tmp_path):
+        """A diff where the old file lacks a trailing newline applies cleanly."""
+        source = tmp_path / "source"
+        source.mkdir()
+        _git(source, "init", "-q", "-b", "main")
+        _git(source, "config", "user.name", "test")
+        _git(source, "config", "user.email", "test@test.example")
+        (source / "file.txt").write_bytes(b"old")
+        _git(source, "add", ".")
+        _git(source, "commit", "-q", "-m", "initial")
+
+        clone = tmp_path / "clone"
+        repository = LocalProvider()
+        repository.clone(str(source), clone)
+        diff = repository.get_diff([FileChange(path="file.txt", new_content="new\n")])
+        consent = _build_consent(diff)
+        bridge = _MockAuditBridge()
+        provider = ApplyProvider(repository, bridge, tmp_path / "audit.jsonl")
+        result = provider.apply(str(clone), diff, consent)
+        assert result.success is True
+        assert (clone / "file.txt").read_text(encoding="utf-8") == "new\n"
 
 
 class TestRollback:

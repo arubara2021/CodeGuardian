@@ -6,10 +6,11 @@ contract against a real git repository. ``GitHubProvider`` and
 difference is the URL validation in ``clone``, which is tested without
 a network.
 
-The real clone path is verified once, against the local provider. The
-GitHub and GitLab providers would test the identical ``git clone``
-subprocess if given a valid URL, so testing their URL validation and
-their inheritance is the meaningful contract, not a network round trip.
+The diff tests are shaped to catch the exact bugs that ``git apply``
+will reject: no trailing newline on either side, multiple hunks, and
+a realistic Python refactor. Every diff is verified with
+``git apply --check`` before the test asserts anything else, so a diff
+that looks right but does not apply is a hard failure.
 """
 
 from __future__ import annotations
@@ -38,6 +39,18 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr}")
     return result
+
+
+def _git_apply_check(diff: str, repo: Path) -> bool:
+    """Return whether ``git apply --check`` accepts ``diff`` in ``repo``."""
+    result = subprocess.run(
+        ["git", "apply", "--check", "-"],
+        cwd=str(repo),
+        input=diff.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 @pytest.fixture
@@ -172,21 +185,25 @@ class TestLocalProviderList:
 class TestLocalProviderDiff:
     def test_get_diff_modification(self, local_provider):
         diff = local_provider.get_diff([FileChange(path="hello.txt", new_content="world\n")])
-        assert diff.startswith("--- a/hello.txt\n+++ b/hello.txt\n")
+        assert "--- a/hello.txt" in diff
+        assert "+++ b/hello.txt" in diff
         assert "-hello" in diff
         assert "+world" in diff
+        assert _git_apply_check(diff, local_provider.path)
 
     def test_get_diff_new_file(self, local_provider):
         diff = local_provider.get_diff([FileChange(path="new.txt", new_content="fresh\n")])
         assert "--- /dev/null" in diff
         assert "+++ b/new.txt" in diff
         assert "+fresh" in diff
+        assert _git_apply_check(diff, local_provider.path)
 
     def test_get_diff_deletion(self, local_provider):
         diff = local_provider.get_diff([FileChange(path="hello.txt", new_content=None)])
         assert "--- a/hello.txt" in diff
         assert "+++ /dev/null" in diff
         assert "-hello" in diff
+        assert _git_apply_check(diff, local_provider.path)
 
     def test_get_diff_empty_changes_returns_empty(self, local_provider):
         assert local_provider.get_diff([]) == ""
@@ -194,6 +211,115 @@ class TestLocalProviderDiff:
     def test_get_diff_identical_content_returns_empty(self, local_provider):
         diff = local_provider.get_diff([FileChange(path="hello.txt", new_content="hello\n")])
         assert diff == ""
+
+    def test_get_diff_old_side_lacks_trailing_newline(self, local_provider):
+        """The old file has no trailing newline; new does.
+
+        Before the ``git diff --no-index`` fix, this produced a diff
+        that ``git apply`` rejected because ``difflib`` did not emit
+        the ``\\ No newline at end of file`` marker.
+        """
+        clone_file = local_provider.path / "hello.txt"
+        clone_file.write_bytes(b"hello")
+        diff = local_provider.get_diff([FileChange(path="hello.txt", new_content="hello\n")])
+        assert diff != ""
+        assert "\\ No newline at end of file" in diff
+        assert _git_apply_check(diff, local_provider.path)
+
+    def test_get_diff_neither_side_has_trailing_newline(self, local_provider):
+        clone_file = local_provider.path / "hello.txt"
+        clone_file.write_bytes(b"hello")
+        diff = local_provider.get_diff([FileChange(path="hello.txt", new_content="world")])
+        assert diff != ""
+        assert diff.count("\\ No newline at end of file") == 2
+        assert _git_apply_check(diff, local_provider.path)
+
+    def test_get_diff_multi_hunk(self, local_provider):
+        original = "".join(f"line{i}\n" for i in range(1, 21))
+        new = original.replace("line2\n", "CHANGED2\n").replace("line18\n", "CHANGED18\n")
+        (local_provider.path / "multi.txt").write_bytes(original.encode())
+        diff = local_provider.get_diff([FileChange(path="multi.txt", new_content=new)])
+        # Each hunk header contains "@@" at start and end, so count
+        # "@@ -" (which appears only at hunk starts) to get 2.
+        assert diff.count("@@ -") == 2
+        assert "CHANGED2" in diff
+        assert "CHANGED18" in diff
+        assert _git_apply_check(diff, local_provider.path)
+
+    def test_get_diff_docstring_removal(self, local_provider):
+        old = (
+            '"""Calc module."""\n'
+            "\n"
+            "\n"
+            "def add(a, b):\n"
+            '    """\n'
+            "    Add two numbers.\n"
+            "\n"
+            "    Parameters:\n"
+            "    -----------\n"
+            "    a: First number\n"
+            "    b: Second number\n"
+            '    """\n'
+            "    return a + b\n"
+        )
+        new = (
+            '"""Calc module."""\n'
+            "\n"
+            "\n"
+            "def add(a: int, b: int) -> int:\n"
+            '    """Return the sum of a and b."""\n'
+            "    return a + b\n"
+        )
+        (local_provider.path / "calc.py").write_bytes(old.encode())
+        diff = local_provider.get_diff([FileChange(path="calc.py", new_content=new)])
+        assert "-    -----------" in diff
+        assert "+def add(a: int, b: int) -> int:" in diff
+        assert _git_apply_check(diff, local_provider.path)
+
+    def test_get_diff_writer_shaped_refactor(self, local_provider):
+        """The exact shape that failed in the Phase 8 integration run.
+
+        A real 120B model refactoring a real Python file produces:
+        new imports, new type alias, rewritten function signatures,
+        rewritten docstrings, and full docstring block removals. Every
+        one of those is present here.
+        """
+        old = (
+            '"""Calc module."""\n'
+            "\n"
+            "\n"
+            "def add(a, b):\n"
+            '    """Add two numbers."""\n'
+            "    return a + b\n"
+            "\n"
+            "\n"
+            "def subtract(a, b):\n"
+            '    """Subtract b from a."""\n'
+            "    return a - b\n"
+        )
+        new = (
+            '"""Calc module."""\n'
+            "\n"
+            "from typing import Union\n"
+            "\n"
+            "Number = Union[int, float]\n"
+            "\n"
+            "\n"
+            "def add(a: Number, b: Number) -> Number:\n"
+            '    """Return the sum of a and b."""\n'
+            "    return a + b\n"
+            "\n"
+            "\n"
+            "def subtract(a: Number, b: Number) -> Number:\n"
+            '    """Return the difference of a and b."""\n'
+            "    return a - b\n"
+        )
+        (local_provider.path / "calc.py").write_bytes(old.encode())
+        diff = local_provider.get_diff([FileChange(path="calc.py", new_content=new)])
+        assert "+from typing import Union" in diff
+        assert "+Number = Union[int, float]" in diff
+        assert "+def add(a: Number, b: Number) -> Number:" in diff
+        assert _git_apply_check(diff, local_provider.path)
 
 
 class TestLocalProviderMetadata:

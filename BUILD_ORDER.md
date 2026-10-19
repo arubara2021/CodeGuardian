@@ -1,4 +1,3 @@
-
 # BUILD_ORDER.md
 
 **The complete file-by-file implementation sequence for CodeGuardian, built in phases, tested at phase boundaries.**
@@ -26,6 +25,8 @@ Every file is written exactly once. When a block writes a file, that file is fin
 ### Rule 2 — Blocks group four or five files
 
 A block contains four or five files that belong together. Blocks are not split into single files, and they are not merged into twenty-file dumps. Four or five is the range. Every block is a coherent unit: one module, one package, or one tightly related set of files.
+
+**Exception — Phase 9.** Phase 9 merges the originally-planned Phase 9 (plugin metadata) with the originally-planned Phase 9.5 (runtime grammar loading) into one phase. To keep the merged phase buildable in coherent increments, some Phase 9 blocks group more than five files or fewer than four. The exception is recorded per block in the Phase 9 section and is not a precedent for other phases.
 
 ### Rule 3 — Test at phase boundaries, not block boundaries
 
@@ -94,17 +95,17 @@ flowchart TB
     P3["Phase 3 — Storage<br/>B-017 to B-019"]
     P4["Phase 4 — Code Interfaces<br/>B-020 to B-022"]
     P5["Phase 5 — Bridges<br/>B-023 to B-025"]
-    P6["Phase 6 — Rust Kernel<br/>B-026 to B-031"]
+    P6["Phase 6 — Rust Kernel<br/>B-026 to B-030"]
     P7["Phase 7 — Rust Engines<br/>B-032 to B-037"]
     P8["Phase 8 — Providers<br/>B-038 to B-041"]
-    P9["Phase 9 — Plugins<br/>B-042 to B-047"]
-    P10["Phase 10 — Prompts<br/>B-048"]
-    P11["Phase 11 — Agents<br/>B-049 to B-052"]
-    P12["Phase 12 — Skills Module<br/>B-053 to B-054"]
-    P13["Phase 13 — Orchestrator<br/>B-055 to B-058"]
-    P14["Phase 14 — CLI<br/>B-059 to B-064"]
-    P15["Phase 15 — MCP and Reporters<br/>B-065 to B-069"]
-    P16["Phase 16 — Full Assembly<br/>B-070 to B-072"]
+    P9["Phase 9 — Plugins<br/>B-042 to B-049"]
+    P10["Phase 10 — Prompts<br/>B-050"]
+    P11["Phase 11 — Agents<br/>B-051 to B-053"]
+    P12["Phase 12 — Skills Module<br/>B-054 to B-055"]
+    P13["Phase 13 — Orchestrator<br/>B-056 to B-059"]
+    P14["Phase 14 — CLI<br/>B-060 to B-066"]
+    P15["Phase 15 — MCP and Reporters<br/>B-067 to B-071"]
+    P16["Phase 16 — Full Assembly<br/>B-072 to B-074"]
 
     P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8
     P8 --> P9 --> P10 --> P11 --> P12 --> P13 --> P14 --> P15 --> P16
@@ -570,6 +571,10 @@ Repository providers, model providers, the apply provider, and the Python sandbo
 | `python/codeguardian/core/providers/openai_model.py` | OpenAI provider |
 | `python/codeguardian/core/providers/deepseek_model.py` | DeepSeek provider |
 | `python/codeguardian/core/providers/openai_compatible.py` | OpenAI-compatible provider |
+| `python/codeguardian/core/providers/model_registry.py` | Discovery-driven model routing |
+| `python/codeguardian/core/providers/fallback_router.py` | Role-based fallback router |
+| `python/codeguardian/core/providers/metadata.json` | Model metadata cache |
+| `python/codeguardian/core/providers/registry.json` | Role configuration |
 
 ### Block B-040 — Python Sandbox Backends
 
@@ -601,73 +606,128 @@ Repository providers, model providers, the apply provider, and the Python sandbo
 
 ## 14. Phase 9 — Plugins
 
-Plugin loader, registry, manifest, fault barrier, versioning, and the bundled language, tool, and reporter plugins.
+**Merged phase.** This phase replaces what was originally planned as Phase 9 (plugin metadata and discovery) plus Phase 9.5 (runtime grammar loading). It delivers a plugin system that can add a new programming language to the kernel without recompiling the binary, enforce plugin permissions at the Python level, isolate plugin hangs with timeouts, negotiate interface versions with N / N-1 compatibility, and prove plugin behavior through behavioral contract tests.
 
-### Block B-042 — Plugin Loader Infrastructure
+The complete design settlement — the seven weaknesses, the eight blocks, the exact file list, the behavioral assertions, the audit hook event table, the version negotiation rules, and the three explicit residuals — is recorded in `docs/summaries/phase-9-design.md`. That document is the authoritative specification for this phase. This section is the build order that follows from it.
 
-| File | Purpose |
-|---|---|
-| `python/codeguardian/core/plugins/__init__.py` | Plugin package init |
-| `python/codeguardian/core/plugins/manifest.py` | Manifest schema and validation |
-| `python/codeguardian/core/plugins/registry.py` | Plugin registry |
-| `python/codeguardian/core/plugins/loader.py` | Entry-point discovery |
-| `python/codeguardian/core/plugins/fault_barrier.py` | Fault isolation |
+**Merged-scope note.** Some blocks in this phase group more than five files or fewer than four. That is intentional. The plugin infrastructure is one coherent unit, but it is too large to fit in a single block; the eight blocks below are the smallest coherent subdivisions that still produce a buildable intermediate state.
 
-### Block B-043 — Plugin Versioning and Bundled Language Plugins Part 1
+### Block B-042 — Plugin Manifest Schema Update
 
 | File | Purpose |
 |---|---|
-| `python/codeguardian/core/plugins/versioning.py` | N and N-1 compatibility |
+| `schemas/plugin-manifest.json` | Schema v1.2 — adds `capabilities`, `blast_scope`, `kernel_extensible`, `grammar_path` |
+
+This block runs first. The schema is the contract every subsequent block validates against. It is a rewrite of the Phase 2 file, adding four optional fields with safe defaults so v1.1 manifests still validate.
+
+### Block B-043 — Rust Kernel Runtime Grammar Loading
+
+| File | Purpose |
+|---|---|
+| `rust/Cargo.toml` | Add `libloading` dependency and enable `tree-sitter`'s `loader` feature |
+| `rust/crates/codeguardian-kernel/Cargo.toml` | Add `libloading` inheritance |
+| `rust/crates/codeguardian-kernel/src/grammar_loader.rs` | New — runtime `.so` grammar loading with ABI check |
+| `rust/crates/codeguardian-kernel/src/langs/mod.rs` | Rewrite — add runtime language registry and dispatch |
+| `rust/crates/codeguardian-kernel/src/parser.rs` | Rewrite — accept `&dyn LanguageModule` instead of enum value |
+| `rust/crates/codeguardian-kernel/src/lib.rs` | Rewrite — export grammar_loader module and new public functions |
+| `rust/crates/codeguardian-pyo3/src/kernel.rs` | Rewrite — add `load_grammar` and `list_languages` PyO3 functions |
+
+This block changes the kernel. It is the only block in Phase 9 that touches compiled Rust code. After it lands, third-party plugins can add new languages.
+
+### Block B-044 — Python Plugin Infrastructure
+
+| File | Purpose |
+|---|---|
+| `python/codeguardian/core/plugins/__init__.py` | Plugin package init, public surface |
+| `python/codeguardian/core/plugins/manifest.py` | Manifest parser and validator against `plugin-manifest.json` |
+| `python/codeguardian/core/plugins/versioning.py` | Interface version N / N-1 negotiation |
+| `python/codeguardian/core/plugins/loader.py` | `PluginSource` protocol, `BundledSource`, `EntryPointSource`, unified discovery |
+| `python/codeguardian/core/plugins/fault_barrier.py` | Exception isolation + per-type timeout |
+| `python/codeguardian/core/plugins/permissions.py` | `sys.addaudithook` permission enforcement |
+| `python/codeguardian/core/plugins/registry.py` | Central registry, plugin loading, contract test invocation |
+
+Seven files. This block replaces what the earlier plan split across B-042, B-043, and part of B-046.
+
+### Block B-045 — Bundled Language Plugins
+
+| File | Purpose |
+|---|---|
 | `python/codeguardian/plugins_bundled/__init__.py` | Bundled plugin package init |
 | `python/codeguardian/plugins_bundled/languages/__init__.py` | Language plugin package init |
 | `python/codeguardian/plugins_bundled/languages/python/plugin.py` | Python language plugin |
-| `python/codeguardian/plugins_bundled/languages/python/pyproject.toml` | Python plugin metadata |
-
-### Block B-044 — Bundled Language Plugins Part 2
-
-| File | Purpose |
-|---|---|
 | `python/codeguardian/plugins_bundled/languages/typescript/plugin.py` | TypeScript language plugin |
-| `python/codeguardian/plugins_bundled/languages/typescript/pyproject.toml` | TypeScript plugin metadata |
+| `python/codeguardian/plugins_bundled/languages/javascript/plugin.py` | JavaScript language plugin |
+| `python/codeguardian/plugins_bundled/languages/java/plugin.py` | Java language plugin |
+| `python/codeguardian/plugins_bundled/languages/go/plugin.py` | Go language plugin |
+| `python/codeguardian/plugins_bundled/languages/rust/plugin.py` | Rust language plugin |
+| `python/codeguardian/plugins_bundled/languages/c/plugin.py` | C language plugin |
+| `python/codeguardian/plugins_bundled/languages/cpp/plugin.py` | C++ language plugin |
+
+Ten files. Each plugin declares `reliability_tier`, `blast_scope`, and `kernel_extensible: false` because all eight languages are already compiled into the kernel. C and C++ ship at `best-effort` tier until G-15 (declarator chain) is fixed. Every language declares `blast_scope: "same-file"` until G-16 (cross-file resolution) is fixed.
+
+### Block B-046 — Bundled Tool Plugins
+
+| File | Purpose |
+|---|---|
 | `python/codeguardian/plugins_bundled/tools/__init__.py` | Tool plugin package init |
-| `python/codeguardian/plugins_bundled/tools/ast_grep/plugin.py` | ast-grep plugin |
-| `python/codeguardian/plugins_bundled/tools/ast_grep/pyproject.toml` | ast-grep plugin metadata |
+| `python/codeguardian/plugins_bundled/tools/ast_grep/plugin.py` | ast-grep subprocess wrapper |
+| `python/codeguardian/plugins_bundled/tools/code_analysis/plugin.py` | In-process structural analysis (cyclomatic complexity, dead code) |
 
-### Block B-045 — Bundled Tool and Reporter Plugins
+Three files.
+
+### Block B-047 — Bundled Reporter Plugin
 
 | File | Purpose |
 |---|---|
-| `python/codeguardian/plugins_bundled/tools/code_analysis/plugin.py` | Code analysis plugin |
-| `python/codeguardian/plugins_bundled/tools/code_analysis/pyproject.toml` | Code analysis plugin metadata |
 | `python/codeguardian/plugins_bundled/reporters/__init__.py` | Reporter plugin package init |
-| `python/codeguardian/plugins_bundled/reporters/sarif_reporter/plugin.py` | SARIF reporter plugin |
-| `python/codeguardian/plugins_bundled/reporters/sarif_reporter/pyproject.toml` | SARIF plugin metadata |
+| `python/codeguardian/plugins_bundled/reporters/sarif_reporter/plugin.py` | SARIF 2.1.0 reporter |
 
-### Block B-046 — Plugin Contract Tests
+Two files.
 
-| File | Purpose |
-|---|---|
-| `tests/contracts/test_language_contract.py` | LanguagePlugin contract |
-| `tests/contracts/test_tool_contract.py` | ToolPlugin contract |
-| `tests/contracts/test_verifier_contract.py` | VerifierPlugin contract |
-| `tests/contracts/test_reporter_contract.py` | ReporterPlugin contract |
-
-### Block B-047 — Plugin Integration Tests
+### Block B-048 — Behavioral Contract Tests
 
 | File | Purpose |
 |---|---|
-| `tests/integration/test_plugin_loading.py` | Plugin discovery and fault isolation |
+| `tests/contracts/test_language_contract.py` | Behavioral assertions for every language plugin |
+| `tests/contracts/test_tool_contract.py` | Behavioral assertions for every tool plugin |
+| `tests/contracts/test_verifier_contract.py` | Verifier contract via fake test verifier (real verifiers Phase 11) |
+| `tests/contracts/test_reporter_contract.py` | Behavioral assertions for every reporter plugin |
+
+Four files. Every assertion is behavioral (`parse` produces nodes, `call` output validates against schema, `report` parses as declared format) rather than shape-only.
+
+### Block B-049 — Integration Tests
+
+| File | Purpose |
+|---|---|
+| `tests/integration/test_plugin_loading.py` | Full discovery path: bundled + entry-point sources, fault isolation, contract test gating |
+| `tests/integration/test_dynamic_grammar_loading.py` | Runtime `.so` grammar loading end to end |
+
+Two files.
 
 **Phase boundary test:**
-- Isolation: `pytest tests/contracts/test_language_contract.py tests/contracts/test_tool_contract.py tests/contracts/test_reporter_contract.py -v`
+- Isolation: `pytest tests/contracts/test_language_contract.py tests/contracts/test_tool_contract.py tests/contracts/test_reporter_contract.py tests/integration/test_plugin_loading.py tests/integration/test_dynamic_grammar_loading.py -v`
 - Chain: `pytest tests/`
-- Integration: install a dummy plugin via entry point, discover it, call it, and confirm the core is unaffected when the plugin crashes
+- Integration: install a bundled plugin, discover it, call a tool, produce a SARIF report from a real run, and verify a runtime-loaded grammar parses a file
+
+**Phase 9 total: 8 blocks, 36 files.**
+
+**Merged-scope honest note.** The original BUILD_ORDER planned Phase 9 at 6 blocks and 25 files, with a separate Phase 9.5 for runtime grammar loading. That plan was consolidated: this phase delivers what the original plan split across two phases. Total file count rises from 25 to 36. The extra 11 files are `grammar_loader.rs` plus its kernel rewrites (2 files beyond the original kernel skeleton), `permissions.py`, eight bundled language plugin files beyond the original two (Python and TypeScript), and two integration test files.
+
+**What Phase 9 does not deliver (documented residuals):**
+
+| Residual | Phase that fixes it |
+|---|---|
+| Permission enforcement against C extensions | Phase 13+ (WASM or OS capability model) |
+| Plugin process crash isolation | Phase 13 (orchestrator owns plugin lifetimes) |
+| End-to-end pipeline proof of plugins | Phase 11 (agents) + Phase 13 (orchestrator) |
+| MCP dynamic tool discovery | Phase 15 |
+| User-facing plugin CLI | Phase 14 |
 
 ---
 
 ## 15. Phase 10 — Prompts
 
-### Block B-048 — All Prompt Files
+### Block B-050 — All Prompt Files
 
 | File | Purpose |
 |---|---|
@@ -690,7 +750,7 @@ Plugin loader, registry, manifest, fault barrier, versioning, and the bundled la
 
 Recon agent, blast radius agent, analyst, tester, writer, and the three verifiers.
 
-### Block B-049 — Deterministic Agents
+### Block B-051 — Deterministic Agents
 
 | File | Purpose |
 |---|---|
@@ -700,7 +760,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/agents/analyst.py` | Analyst agent |
 | `python/codeguardian/core/agents/tester.py` | Tester agent |
 
-### Block B-050 — Writer and Verifiers
+### Block B-052 — Writer and Verifiers
 
 | File | Purpose |
 |---|---|
@@ -710,7 +770,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/agents/contract_verifier.py` | Contract verifier |
 | `python/codeguardian/core/agents/skill_curator.py` | Skill curator |
 
-### Block B-051 — Agent Tests
+### Block B-053 — Agent Tests
 
 | File | Purpose |
 |---|---|
@@ -727,7 +787,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 
 ## 17. Phase 12 — Skills Module
 
-### Block B-052 — Skill Library
+### Block B-054 — Skill Library
 
 | File | Purpose |
 |---|---|
@@ -737,7 +797,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/skills/retriever.py` | Semantic retrieval |
 | `python/codeguardian/core/skills/embeddings.py` | Vector embeddings |
 
-### Block B-053 — Skill Tests
+### Block B-055 — Skill Tests
 
 | File | Purpose |
 |---|---|
@@ -752,7 +812,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 
 ## 18. Phase 13 — Orchestrator
 
-### Block B-054 — Orchestrator Core
+### Block B-056 — Orchestrator Core
 
 | File | Purpose |
 |---|---|
@@ -762,13 +822,13 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/orchestrator/verification_prompt.py` | Per-run verification prompt |
 | `python/codeguardian/core/orchestrator/checkpointing.py` | Resume from last checkpoint |
 
-### Block B-055 — Orchestrator Implementation
+### Block B-057 — Orchestrator Implementation
 
 | File | Purpose |
 |---|---|
 | `python/codeguardian/core/orchestrator/langgraph_orchestrator.py` | Full pipeline implementation |
 
-### Block B-056 — Telemetry
+### Block B-058 — Telemetry
 
 | File | Purpose |
 |---|---|
@@ -777,7 +837,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/telemetry/tracing.py` | LangSmith trace correlation |
 | `python/codeguardian/core/telemetry/langsmith.py` | LangSmith integration |
 
-### Block B-057 — Orchestrator Tests
+### Block B-059 — Orchestrator Tests
 
 | File | Purpose |
 |---|---|
@@ -796,7 +856,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 
 ## 19. Phase 14 — CLI
 
-### Block B-058 — CLI Entry Point and Commands Part 1
+### Block B-060 — CLI Entry Point and Commands Part 1
 
 | File | Purpose |
 |---|---|
@@ -806,7 +866,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/cli/commands/run.py` | `codeguardian run` |
 | `python/codeguardian/cli/commands/recon.py` | `codeguardian recon` |
 
-### Block B-059 — CLI Commands Part 2
+### Block B-061 — CLI Commands Part 2
 
 | File | Purpose |
 |---|---|
@@ -816,7 +876,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/cli/commands/serve.py` | `codeguardian serve` |
 | `python/codeguardian/cli/commands/config.py` | `codeguardian config` |
 
-### Block B-060 — CLI Views
+### Block B-062 — CLI Views
 
 | File | Purpose |
 |---|---|
@@ -827,7 +887,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/cli/views/diff_view.py` | Diff preview |
 | `python/codeguardian/cli/views/verify_view.py` | Verification report |
 
-### Block B-061 — CLI UI Components
+### Block B-063 — CLI UI Components
 
 | File | Purpose |
 |---|---|
@@ -837,7 +897,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/cli/ui/prompts.py` | prompt_toolkit input |
 | `python/codeguardian/cli/ui/progress.py` | Progress bars |
 
-### Block B-062 — CLI Output Modes
+### Block B-064 — CLI Output Modes
 
 | File | Purpose |
 |---|---|
@@ -846,14 +906,14 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/cli/output/json.py` | JSON output |
 | `python/codeguardian/cli/output/sarif.py` | SARIF output |
 
-### Block B-063 — CLI Tests Part 1
+### Block B-065 — CLI Tests Part 1
 
 | File | Purpose |
 |---|---|
 | `tests/unit/cli/__init__.py` | CLI test package init |
 | `tests/unit/cli/test_commands.py` | Command tests |
 
-### Block B-064 — CLI Tests Part 2
+### Block B-066 — CLI Tests Part 2
 
 | File | Purpose |
 |---|---|
@@ -869,7 +929,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 
 ## 20. Phase 15 — MCP and Reporters
 
-### Block B-065 — MCP Client
+### Block B-067 — MCP Client
 
 | File | Purpose |
 |---|---|
@@ -877,14 +937,14 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/mcp/client.py` | Dynamic MCP client |
 | `python/codeguardian/core/mcp/transports.py` | stdio and streamable HTTP transports |
 
-### Block B-066 — MCP Server
+### Block B-068 — MCP Server
 
 | File | Purpose |
 |---|---|
 | `python/codeguardian/core/mcp/server.py` | MCP server |
 | `python/codeguardian/core/mcp/tools.py` | Exposed tool definitions |
 
-### Block B-067 — Reporters
+### Block B-069 — Reporters
 
 | File | Purpose |
 |---|---|
@@ -894,7 +954,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/reporting/blast_summary.py` | Blast radius summary |
 | `python/codeguardian/core/reporting/run_summary.py` | Run summary |
 
-### Block B-068 — Reporter Output Formats
+### Block B-070 — Reporter Output Formats
 
 | File | Purpose |
 |---|---|
@@ -903,7 +963,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/reporting/markdown_reporter.py` | Markdown reporter |
 | `tests/contracts/test_reporter_contract.py` | Reporter contract tests |
 
-### Block B-069 — MCP Tests
+### Block B-071 — MCP Tests
 
 | File | Purpose |
 |---|---|
@@ -920,7 +980,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 
 ## 21. Phase 16 — Full Assembly
 
-### Block B-070 — Entry Point and Scripts
+### Block B-072 — Entry Point and Scripts
 
 | File | Purpose |
 |---|---|
@@ -930,7 +990,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `scripts/build_docs.py` | Documentation build script |
 | `scripts/package.py` | Distribution packaging script |
 
-### Block B-071 — Release and Migration Scripts
+### Block B-073 — Release and Migration Scripts
 
 | File | Purpose |
 |---|---|
@@ -940,7 +1000,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `scripts/validate_schemas.py` | Schema validation script |
 | `scripts/integration_phase.py` | Cross-phase integration script |
 
-### Block B-072 — End-to-End Tests and Fixtures
+### Block B-074 — End-to-End Tests and Fixtures
 
 | File | Purpose |
 |---|---|
@@ -975,7 +1035,7 @@ At each phase boundary, the integration script covers every phase completed so f
 | Phase 6 | Parse a repository, build the CPG, run a query |
 | Phase 7 | Blast radius computation, sandbox execute, audit hash chain |
 | Phase 8 | Clone a local repo, call a model provider stub, run a Python file in the sandbox |
-| Phase 9 | Install a plugin, discover it, isolate its failure |
+| Phase 9 | Discover every bundled plugin, call a tool, produce a SARIF report, load a runtime grammar, enforce a permission |
 | Phase 10 | Render every prompt through one code path |
 | Phase 11 | Run recon, blast, analyst, tester, writer against a fixture |
 | Phase 12 | Store a skill, retrieve it, rebuild the index |
@@ -984,7 +1044,7 @@ At each phase boundary, the integration script covers every phase completed so f
 | Phase 15 | MCP client and server round trip, every reporter format |
 | Phase 16 | Full pipeline on every fixture, every artifact validates |
 
-The integration script lives at `scripts/integration_phase.py` and is written at B-071. Until then, each phase boundary runs its integration steps manually.
+The integration script lives at `scripts/integration_phase.py` and is written at B-073. Until then, each phase boundary runs its integration steps manually.
 
 ---
 
@@ -1007,7 +1067,7 @@ The integration script lives at `scripts/integration_phase.py` and is written at
 | Phase 6 — Rust Kernel | 5 | 14 |
 | Phase 7 — Rust Engines | 7 | 31 |
 | Phase 8 — Providers | 4 | 20 |
-| Phase 9 — Plugins | 6 | 25 |
+| **Phase 9 — Plugins (merged)** | **8** | **36** |
 | Phase 10 — Prompts | 1 | 7 |
 | Phase 11 — Agents | 3 | 10 |
 | Phase 12 — Skills Module | 2 | 6 |
@@ -1015,14 +1075,17 @@ The integration script lives at `scripts/integration_phase.py` and is written at
 | Phase 14 — CLI | 7 | 27 |
 | Phase 15 — MCP and Reporters | 5 | 17 |
 | Phase 16 — Full Assembly | 3 | 18 |
-| **Total** | **74** | **304** |
+| **Total** | **76** | **315** |
 
-74 blocks. Every block has 4 or 5 files. Every phase ends with three tests. Every phase re-runs the integration from Phase 0 forward.
+76 blocks. Every block groups four or five files, except Phase 9 where the merged scope requires two larger blocks and one smaller block. Every phase ends with three tests. Every phase re-runs the integration from Phase 0 forward.
+
+**Change from the previous version.** Phase 9 grew from 6 blocks / 25 files to 8 blocks / 36 files. The originally-planned Phase 9.5 (runtime grammar loading) was merged into Phase 9. Total block count rose from 74 to 76. Total file count rose from 304 to 315.
 
 ---
 
 ## 25. Related Documents
 
+- `docs/summaries/phase-9-design.md` — the complete Phase 9 design settlement (the seven weaknesses, the eight blocks, the exact file list, the behavioral assertions, the audit hook event table, the version negotiation rules, the three explicit residuals)
 - `docs/04-architecture.md` — what each phase builds
 - `docs/05-data-model.md` — schemas each phase produces or consumes
 - `docs/06-api-contracts.md` — interfaces each phase implements

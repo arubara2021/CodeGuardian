@@ -1,6 +1,6 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://codeguardian.dev/schemas/plugin-manifest/v1.1.json",
+    "$id": "https://codeguardian.dev/schemas/plugin-manifest/v1.2.json",
     "title": "Plugin Manifest",
     "type": "object",
     "required": [
@@ -44,6 +44,13 @@
         "license": {
             "type": "string"
         },
+        "capabilities": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "description": "Free-form capability tags describing what the plugin offers. Language plugins declare syntactic or semantic features the language supports (for example 'async', 'generics', 'decorators', 'macros'). Tool plugins declare domains (for example 'code-search', 'structural-refactoring'). Verifier plugins declare the lens they apply (for example 'security', 'memory-safety'). Reporter plugins declare the format they emit (for example 'sarif', 'markdown', 'json'). Capabilities are used for discovery and filtering by the registry; they are not enforced by the runtime."
+        },
         "language": {
             "type": "object",
             "additionalProperties": false,
@@ -70,12 +77,49 @@
                         "best-effort"
                     ]
                 },
+                "blast_scope": {
+                    "type": "string",
+                    "enum": [
+                        "same-file",
+                        "cross-file"
+                    ],
+                    "default": "same-file",
+                    "description": "The level of cross-file call resolution this language supports in the current kernel. 'same-file' means the blast engine resolves callers within one file only; 'cross-file' means it resolves callers across files. Every bundled plugin ships 'same-file' until the kernel's cross-file resolution gap (G-16 in BUILD_STATE) is closed. A plugin that declares 'cross-file' while the kernel does not support it will silently under-report callers, so this field is the runtime's honest signal to users about what the blast engine can and cannot find."
+                },
+                "kernel_extensible": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether this plugin ships a compiled tree-sitter grammar that the kernel loads at runtime via tree_sitter::Loader. When true, the plugin must also provide grammar_path. Bundled plugins for Python, TypeScript, JavaScript, Java, Go, Rust, C, and C++ set this to false because their grammars are compiled into the CodeGuardian native extension. A third-party language plugin for a language the kernel does not ship (for example Ruby, PHP, Kotlin) sets this to true and provides its own grammar."
+                },
+                "grammar_path": {
+                    "type": "string",
+                    "description": "Path to the compiled grammar library, relative to the plugin package root. Required when kernel_extensible is true. Convention: 'lib/libtree_sitter_<language>.so' on Linux, 'lib/libtree_sitter_<language>.dylib' on macOS, 'lib/tree_sitter_<language>.dll' on Windows. The plugin's own __init__.py resolves the platform-specific file at load time using sys.platform and sysconfig; if the file is missing for the current platform, the plugin raises PLUGIN_LOAD_FAILED with a clear message. The plugin author is responsible for shipping platform-specific wheels (manylinux, macosx, win_amd64)."
+                },
                 "extensions": {
                     "type": "object",
                     "additionalProperties": true,
                     "description": "Extension bag for the language block. Allows a language plugin to declare additional configuration specific to its grammar or test runner without a version bump."
                 }
-            }
+            },
+            "allOf": [
+                {
+                    "if": {
+                        "required": [
+                            "kernel_extensible"
+                        ],
+                        "properties": {
+                            "kernel_extensible": {
+                                "const": true
+                            }
+                        }
+                    },
+                    "then": {
+                        "required": [
+                            "grammar_path"
+                        ]
+                    }
+                }
+            ]
         },
         "provider": {
             "type": "object",

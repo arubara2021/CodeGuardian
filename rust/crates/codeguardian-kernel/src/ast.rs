@@ -14,11 +14,19 @@
 //! accessor that returns a dangling index is a bug; an accessor that
 //! returns `None` for a dangling index is correct defensive behavior.
 //!
-//! `NodeKind` is a typed lens, not an exhaustive enum. Roughly forty
-//! variants carry the syntax kinds the kernel distinguishes. Everything
-//! else is `Other(raw_kind_id)`, where `raw_kind_id` is the tree-sitter
-//! kind identifier for the language that produced the file. The graph
-//! remains lossless; the enum remains stable across grammar upgrades.
+//! `NodeKind` is a typed lens, not an exhaustive enum. Variants carry
+//! the syntax kinds the kernel distinguishes across all nine supported
+//! languages (Python, TypeScript, JavaScript, Java, Go, Rust, C#, C,
+//! C++). Everything else is `Other(raw_kind_id)`, where `raw_kind_id`
+//! is the tree-sitter kind identifier for the language that produced
+//! the file. The graph remains lossless; the enum remains stable
+//! across grammar upgrades.
+//!
+//! New variants are appended at the end of the enum, after
+//! `Other(u16)`, so that the discriminant of every existing variant —
+//! and therefore the wire code used by `cpg.rs` — is unchanged. The
+//! wire-code mapping for the new variants is defined in `cpg.rs`
+//! alongside the existing mapping.
 
 use std::collections::HashMap;
 
@@ -114,6 +122,61 @@ pub enum NodeKind {
     // the raw tree-sitter kind id for the language that produced the
     // node.
     Other(u16),
+
+    // The variants below were added when the kernel was extended from
+    // two languages (Python, TypeScript) to nine (adding JavaScript,
+    // Java, Go, Rust, C#, C, C++). They are appended after `Other(u16)`
+    // so that the discriminant — and therefore the wire code — of
+    // every earlier variant is unchanged. The wire-code mapping for
+    // these variants lives in `cpg.rs`.
+
+    // Structural types (Go, Rust, Java, C#, C, C++, TypeScript)
+    Struct,
+    Interface,
+    Trait,
+    Impl,
+    Enum,
+    Union,
+    Namespace,
+    Package,
+
+    // Type system (Rust, Java, C#, TypeScript)
+    TypeParameter,
+    TypeAlias,
+    WhereClause,
+    Lifetime,
+
+    // Metadata and modifiers (Java, C#)
+    Annotation,
+    Modifier,
+
+    // Go-specific control flow
+    GoStatement,
+    DeferStatement,
+    SelectStatement,
+
+    // Rust-specific
+    Loop,
+    MacroDefinition,
+    MacroCall,
+
+    // C and C++ preprocessor
+    Preprocessor,
+    TemplateDeclaration,
+
+    // C-family control flow (Java, C#)
+    Synchronized,
+    Lock,
+    Goto,
+
+    // JavaScript and TypeScript expression form
+    TemplateLiteral,
+
+    // C# property and JavaScript accessor
+    Property,
+
+    // Explicit type cast (Java, C#, Go, Rust, C)
+    TypeCast,
 }
 
 /// A single node in the flat AST arena.

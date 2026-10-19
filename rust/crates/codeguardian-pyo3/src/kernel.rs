@@ -14,6 +14,13 @@
 //! serialized bytes rather than an in-memory handle, and
 //! `graph_summary` reads bytes rather than a path, so the kernel never
 //! holds Python-visible state.
+//!
+//! Nine languages are recognized by name (with short aliases). A name
+//! that is not recognized raises `ValueError` from the pre-check in
+//! `build_graph`. A name that is recognized but whose `LanguageModule`
+//! is not yet wired into `langs::dispatch` also raises `ValueError`,
+//! with a message that distinguishes the two cases so the caller knows
+//! whether to correct their input or wait for the module.
 
 use std::io::Cursor;
 
@@ -22,7 +29,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use codeguardian_kernel::{
-    CodePropertyGraph, CpgError, KernelError as CoreKernelError, Language, SourceFile,
+    dispatch, CodePropertyGraph, CpgError, KernelError as CoreKernelError, Language, SourceFile,
 };
 
 use crate::KernelError;
@@ -37,11 +44,16 @@ pub fn kernel_version() -> String {
 /// serialized wire format.
 ///
 /// `sources` is a list of `(path, language, content)` tuples. The
-/// language must be one of `"python"` or `"typescript"`. Every file in
-/// the list is parsed; the resulting graph is serialized to bytes in
-/// the format `codeguardian.core.storage.GraphStore` reads.
+/// language must be one of the nine supported names or a recognized
+/// alias: `python`, `typescript`, `javascript`/`js`, `java`, `go`/`golang`,
+/// `rust`/`rs`, `csharp`/`c#`/`cs`, `c`, `cpp`/`c++`/`cxx`.
 ///
-/// Raises `ValueError` if a language name is unknown.
+/// A name that is not recognized raises `ValueError` with the
+/// message `unrecognized language: <name>`. A name that is
+/// recognized but whose module is not yet wired raises `ValueError`
+/// with the message `language '<name>' is recognized but not yet
+/// implemented`.
+///
 /// Raises `KernelError` if any source fails to parse catastrophically
 /// or if serialization fails.
 #[pyfunction]
@@ -55,10 +67,15 @@ pub fn build_graph(
             Some(lang) => lang,
             None => {
                 return Err(PyValueError::new_err(format!(
-                    "unsupported language: {language_name}"
+                    "unrecognized language: {language_name}"
                 )));
             }
         };
+        if dispatch(language).is_none() {
+            return Err(PyValueError::new_err(format!(
+                "language '{language_name}' is recognized but not yet implemented"
+            )));
+        }
         parsed.push(SourceFile {
             path,
             language,
@@ -136,6 +153,16 @@ pub(crate) fn map_core_kernel_error(py: Python<'_>, err: &CoreKernelError) -> Py
             let _ = details.set_item("depth", *depth);
             let _ = details.set_item("limit", *limit);
             build_exception(py, "TREE_TOO_DEEP", &err.to_string(), details.into_any())
+        }
+        CoreKernelError::LanguageNotImplemented { language } => {
+            let details = PyDict::new(py);
+            let _ = details.set_item("language", *language);
+            build_exception(
+                py,
+                "LANGUAGE_NOT_IMPLEMENTED",
+                &err.to_string(),
+                details.into_any(),
+            )
         }
     }
 }

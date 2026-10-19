@@ -16,6 +16,12 @@
 //! `resolved = true` has both endpoints pointing at live nodes. An
 //! unresolved edge carries `callee_node_id = NO_NODE` and is
 //! distinguishable by the `resolved` flag.
+//!
+//! `default_extract_callee_name` is the language-agnostic callee-name
+//! extractor that `LanguageModule::extract_callee` delegates to by
+//! default. It is public so a language module that needs to override
+//! the default can call it for the cases where its own logic does not
+//! apply.
 
 use crate::ast::{AstArena, NodeKind, NO_NODE};
 use crate::symbol_table::SymbolTable;
@@ -48,7 +54,7 @@ pub fn extract_calls(arena: &AstArena, symbols: &SymbolTable, root: u32) -> Vec<
         if node.kind != NodeKind::Call {
             continue;
         }
-        let callee_name = match extract_callee_name(arena, node_id) {
+        let callee_name = match default_extract_callee_name(arena, node_id) {
             Some(name) => name,
             None => continue,
         };
@@ -92,7 +98,13 @@ fn enclosing_function(arena: &AstArena, node_id: u32) -> u32 {
 /// the callee expression. This is a simplification: a fully-qualified
 /// callee chain would require import resolution, which this block does
 /// not perform.
-fn extract_callee_name(arena: &AstArena, call_node: u32) -> Option<String> {
+///
+/// This function is public because it is the default implementation
+/// `LanguageModule::extract_callee` delegates to. A language module
+/// that needs to handle call syntax this function does not cover can
+/// override `extract_callee` and still call this function for the
+/// straightforward cases.
+pub fn default_extract_callee_name(arena: &AstArena, call_node: u32) -> Option<String> {
     let node = arena.get(call_node)?;
     let first = node.first_child;
     if first == NO_NODE {

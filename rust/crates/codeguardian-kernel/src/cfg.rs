@@ -8,8 +8,9 @@
 //!
 //! The builder models the tree-sitter structure directly. A block is a
 //! sequence of statements. Control-flow statements (`If`, `While`,
-//! `For`, `Try`, `With`) each produce their own sub-CFG, and their
-//! exits are threaded into the enclosing sequence.
+//! `For`, `Loop`, `SelectStatement`, `Try`, `With`, `Synchronized`,
+//! `Lock`) each produce their own sub-CFG, and their exits are threaded
+//! into the enclosing sequence.
 //!
 //! The invariant this module protects is that every edge's source and
 //! target are real arena node ids. The `Block` internal type carries
@@ -212,9 +213,14 @@ impl<'a> CfgBuilder<'a> {
         };
         match kind {
             NodeKind::If => self.build_if(node_id),
-            NodeKind::While | NodeKind::For => self.build_loop(node_id),
+            NodeKind::While
+            | NodeKind::For
+            | NodeKind::Loop
+            | NodeKind::SelectStatement => self.build_loop(node_id),
             NodeKind::Try => self.build_try(node_id),
-            NodeKind::With => self.build_with(node_id),
+            NodeKind::With | NodeKind::Synchronized | NodeKind::Lock => {
+                self.build_with(node_id)
+            }
             NodeKind::Return | NodeKind::Yield => {
                 self.build_terminator(node_id, ExitKind::Return)
             }
@@ -415,11 +421,12 @@ impl<'a> CfgBuilder<'a> {
         Some((else_node, exits))
     }
 
-    /// Build the CFG for a `while` or `for` loop.
+    /// Build the CFG for a loop: `while`, `for`, Rust's `loop`, or Go's
+    /// `select`.
     ///
-    /// Both statements share the same control-flow shape: a header, a
-    /// body, a back edge from every normal body exit to the header, and
-    /// a normal exit representing the loop terminating.
+    /// All four statements share the same control-flow shape: a header,
+    /// a body, a back edge from every normal body exit to the header,
+    /// and a normal exit representing the loop terminating.
     fn build_loop(&mut self, loop_node: u32) -> Block {
         let body = self.first_block_child(loop_node);
         let body_cfg = match body {
@@ -543,10 +550,11 @@ impl<'a> CfgBuilder<'a> {
         }
     }
 
-    /// Build the CFG for a `with` statement.
+    /// Build the CFG for a pass-through block construct: `with`,
+    /// `synchronized`, or `lock`.
     ///
-    /// The `with` node is a pass-through: it flows to its body, and the
-    /// body's exits become the exits of the whole statement.
+    /// Each is a pass-through: it flows to its body, and the body's
+    /// exits become the exits of the whole statement.
     fn build_with(&mut self, with_node: u32) -> Block {
         let body = self.first_block_child(with_node);
         let body_cfg = match body {

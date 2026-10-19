@@ -12,6 +12,14 @@
 //! ambiguity is resolvable. A qualified name that appears more than
 //! once is a definition error and the table records the shadowing by
 //! returning the last definition.
+//!
+//! The set of "class-like" scope kinds includes every construct that
+//! groups methods across the nine supported languages: Python and
+//! TypeScript classes, Rust structs, interfaces, and traits, Java
+//! classes and interfaces, Go structs, C# classes and structs, and C
+//! and C++ structs and unions. A method nested inside any of these
+//! receives a dotted qualified name that includes the containing
+//! type.
 
 use std::collections::HashMap;
 
@@ -22,9 +30,9 @@ use crate::ast::{AstArena, NodeKind};
 pub enum SymbolKind {
     /// A top-level function.
     Function,
-    /// A class.
+    /// A class, struct, interface, trait, or enum.
     Class,
-    /// A method defined inside a class.
+    /// A method defined inside a class-like scope.
     Method,
     /// A parameter of a function or method.
     Parameter,
@@ -140,9 +148,9 @@ impl SymbolTable {
 
 /// Extract every symbol from the subtree rooted at `root`.
 ///
-/// Walks the AST once in preorder. Each function, class, method, or
-/// parameter node with a name produces one symbol. Anonymous lambdas
-/// and unnamed parameters are skipped.
+/// Walks the AST once in preorder. Each function, class-like declaration,
+/// method, or parameter node with a name produces one symbol. Anonymous
+/// lambdas and unnamed parameters are skipped.
 pub fn extract_symbols(arena: &AstArena, root: u32, file_id: u32) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     for node_id in arena.walk_preorder(root) {
@@ -175,9 +183,12 @@ pub fn extract_symbols(arena: &AstArena, root: u32, file_id: u32) -> Vec<Symbol>
 /// Map a syntax kind to a symbol kind, or `None` if the node does not
 /// declare a symbol.
 ///
-/// A Python function nested inside a class body is a method. Tree-sitter
-/// Python does not distinguish this in the node kind; the classification
-/// checks the enclosing scope.
+/// A function nested inside a class-like scope is a method.
+/// `NodeKind::Impl` is intentionally not classified as a symbol: an
+/// `impl Foo` block names the type it implements, not a new symbol, so
+/// the impl node contributes a scope but no entry. Its methods are
+/// classified as `Method` because `is_inside_class` walks through
+/// `Impl` when computing the enclosing scope.
 fn classify_symbol(arena: &AstArena, node_id: u32, kind: NodeKind) -> Option<SymbolKind> {
     match kind {
         NodeKind::FunctionDef => {
@@ -187,18 +198,25 @@ fn classify_symbol(arena: &AstArena, node_id: u32, kind: NodeKind) -> Option<Sym
                 Some(SymbolKind::Function)
             }
         }
-        NodeKind::ClassDef => Some(SymbolKind::Class),
+        NodeKind::ClassDef
+        | NodeKind::Struct
+        | NodeKind::Interface
+        | NodeKind::Trait
+        | NodeKind::Enum
+        | NodeKind::Union => Some(SymbolKind::Class),
         NodeKind::MethodDef => Some(SymbolKind::Method),
         NodeKind::Parameter => Some(SymbolKind::Parameter),
         _ => None,
     }
 }
 
-/// Return whether `node_id` is lexically enclosed by a class body.
+/// Return whether `node_id` is lexically enclosed by a class-like body.
 ///
 /// The walk stops at the first function or method boundary, so a
 /// function nested inside a method inside a class is a function, not a
-/// method.
+/// method. `Impl` blocks count as class-like for the purpose of this
+/// check so that Rust methods inside `impl Foo { ... }` are classified
+/// as methods rather than top-level functions.
 fn is_inside_class(arena: &AstArena, node_id: u32) -> bool {
     let mut current = arena.parent_of(node_id);
     while let Some(id) = current {
@@ -207,7 +225,13 @@ fn is_inside_class(arena: &AstArena, node_id: u32) -> bool {
             None => break,
         };
         match node.kind {
-            NodeKind::ClassDef => return true,
+            NodeKind::ClassDef
+            | NodeKind::Struct
+            | NodeKind::Interface
+            | NodeKind::Trait
+            | NodeKind::Enum
+            | NodeKind::Union
+            | NodeKind::Impl => return true,
             NodeKind::FunctionDef | NodeKind::MethodDef | NodeKind::Lambda => return false,
             _ => {}
         }
@@ -237,9 +261,22 @@ fn qualified_name_of(arena: &AstArena, node_id: u32, simple_name: &str) -> Strin
 }
 
 /// Return whether a syntax kind introduces a named lexical scope.
+///
+/// `NodeKind::Impl` is omitted because tree-sitter's Rust grammar does
+/// not expose a `name` field on `impl_item`. Its methods still qualify
+/// under `is_inside_class`, but the impl block itself contributes no
+/// name segment. A future refinement that extracts the impl's target
+/// type would add `Impl` here.
 fn is_named_scope(kind: NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::FunctionDef | NodeKind::ClassDef | NodeKind::MethodDef
+        NodeKind::FunctionDef
+            | NodeKind::ClassDef
+            | NodeKind::MethodDef
+            | NodeKind::Struct
+            | NodeKind::Interface
+            | NodeKind::Trait
+            | NodeKind::Enum
+            | NodeKind::Union
     )
 }

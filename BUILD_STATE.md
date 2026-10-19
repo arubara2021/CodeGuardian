@@ -1,10 +1,10 @@
 
 # CodeGuardian — Build State
 
-**Snapshot date:** 2026-10-15
-**Last phase completed:** Phase 5 — Bridges
-**Next phase to start:** Phase 6 — Rust Kernel
-**Phase 0 remaining work:** deferred to the end of the build, per user decision
+**Snapshot date:** 2026-10-18
+**Last phase completed:** Multi-language kernel extension (pre-Phase 9)
+**Next phase to start:** Phase 9 — Plugins (B-042 through B-047)
+**Phase 0 remaining work:** Deferred to the end of the build, per user decision
 
 ---
 
@@ -18,23 +18,23 @@
 | Virtual environment | `.venv` at repo root |
 | Activate command | `source .venv/bin/activate` |
 | Test command | `PYTHONPATH=python python3 -m pytest tests/ -q` |
-| Git identity | `arubara2021` / `arubara2021@users.noreply.github.com` |
-| Git credential helper | Windows GCM via `/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe` |
-| Sandbox backend | Bubblewrap (target), Docker (fallback) |
-| Rust toolchain | 1.99.0 (stable, installed via rustup) |
-| Cargo target dir | `$HOME/.cache/codeguardian-target` (exported in `.bashrc`, appended to `.venv/bin/activate`) |
-| Rust runtime dependency | None installed yet beyond tree-sitter crate |
-| Python runtime dependencies installed | `jsonschema` 4.x, `sqlite-vec` 0.1.9, `PyYAML` 6.0.3, `keyring` 25.7.0, `ruff` 0.17.0, `mypy` 2.4.0 |
+| Build command | `cargo build --workspace --release` |
+| Extension install | `cp "$CARGO_TARGET_DIR/release/libcodeguardian_native.so" python/codeguardian/_native.so` |
+| Rust toolchain | 1.99.0 (stable) |
+| Cargo target dir | `$HOME/.cache/codeguardian-target` |
+| Maturin | Installed (1.15.0) but not used; the extension is installed via `cargo build` plus `cp` |
 
 ### Environment notes
 
-- `rust/Cargo.toml` (empty placeholder) was deleted. Cargo now works from any directory because the workspace root at the repo root is the only manifest above the crates.
-- The venv's activate script has been modified in `.venv/bin/activate` to append `$HOME/.cargo/bin` to `PATH`. This is an environment fix, not a repo change.
-- The PyO3 extension is built with `PYO3_PYTHON="$(pwd)/.venv/bin/python3"` and copied to `python/codeguardian/_native.so` after every build. `.gitignore` excludes the file.
+- `maturin develop` does not work with this workspace. The `pyproject.toml` `[tool.maturin]` section previously had `features = ["extension-module"]`, which fails because the feature is enabled on the `pyo3` dependency rather than as a crate feature. The `features` line has been removed. The build path is `cargo build --workspace --release` followed by a manual `cp`, matching the process described in `phases-1-to-5.md` for Phase 5.
+- The `.so` is approximately 8.8 MB after the multi-language work (was 2.6 MB before). The increase is the linked grammar object files.
+- `rust/crates/codeguardian-rpc/Cargo.toml` was accidentally overwritten with root workspace content during a heredoc paste. It was restored with `git checkout HEAD -- rust/crates/codeguardian-rpc/Cargo.toml`. The file is the Phase 5 version.
 
 ---
 
 ## Completed phases
+
+Phases 1 through 8 are complete. Their details are in `docs/summaries/phases-1-to-5.md`, `docs/summaries/phases-6-to-7.md`, and `docs/summaries/phases-8.md`. This snapshot records the multi-language phase that followed Phase 8.
 
 ### Phase 0 — Repository Scaffold (partial)
 
@@ -45,180 +45,134 @@
 | B-003 Root Editor and Documentation | done | .editorconfig, .env.example, .python-version, .pre-commit-config.yaml, mkdocs.yml |
 | B-004 through B-009 | deferred to end | 30 files, no runtime impact |
 
-The seven Rust crate stubs under `rust/crates/` carried only a `[package]` section after Phase 0. Phase 5 filled the manifests for the `rpc`, `pyo3`, and `kernel` crates. The remaining four crates remain stubs.
+### Phases 1 through 8 (complete)
 
-### Phase 1 — Foundation (complete)
+See the summary documents for details. Test state at the Phase 8 boundary: 487 passed, 2 skipped.
 
-| Block | Status | Files |
+### Multi-language kernel extension (this snapshot)
+
+**Scope:** extend the Rust kernel from two languages (Python, TypeScript) to nine (adding JavaScript, Java, Go, Rust, C#, C, C++), expose them through PyO3, and add tests.
+
+**Outcome:** eight languages wired and passing. C# was removed because `tree-sitter-c-sharp` 0.23.5 produces a grammar ABI that tree-sitter 0.24 refuses to load, and no other version exists on crates.io.
+
+**Batches delivered:**
+
+| Batch | Files | Purpose |
 |---|---|---|
-| B-010 Package Identity and Error Codes | done | version.py, __init__.py, python/pyproject.toml, errors/codes.py, errors/taxonomy.py |
-| B-011 Error Runtime | done | errors/__init__.py, errors/translation.py, errors/retry.py, errors/redaction.py, test_errors.py |
-| B-012 Configuration Package | done | config/__init__.py, config/schema.py, config/defaults.py, config/loader.py, test_config.py |
-| B-013 Configuration Secrets and Remaining Tests | done | config/secrets.py, test_translation.py, test_redaction.py, test_config_secrets.py |
+| 1 | ast.rs, root Cargo.toml, kernel Cargo.toml, langs/mod.rs, langs/python.rs | New `NodeKind` variants, 7 grammar dependencies, dispatch skeleton, Python module |
+| 2 | lib.rs, langs/mod.rs, langs/typescript.rs, parser.rs, pyo3/kernel.rs | TypeScript module, dispatch delegation, 9-variant `Language` enum, `LanguageNotImplemented` error |
+| 3 | cpg.rs, symbol_table.rs, call_graph.rs, cfg.rs, langs/mod.rs, langs/javascript.rs | Wire codes 55 through 82, new class-like scopes, exposed callee extractor, new control-flow kinds, JavaScript module |
+| 4 | langs/java.rs, langs/go.rs, langs/rust.rs, langs/mod.rs, test_kernel_multilang.py | Java, Go, Rust modules and the first multilang test file |
+| 5 | langs/csharp.rs, langs/c.rs, langs/cpp.rs, langs/mod.rs, test_kernel_multilang.py, test_blast_multilang.py | C#, C, C++ modules and blast tests; C# later removed |
+| 6 | 9 fixture files under tests/e2e/fixtures/sample_multi_language_repo/ | One target-caller pair per language |
 
-`test_config_secrets.py` is deferred. It is listed in `BUILD_ORDER.md` B-013 but does not yet exist in the tree. The chain test currently counts 256 tests without it. When it is written, the count will rise accordingly.
+**Post-batch corrections:**
 
-The translation layer was extended after Phase 5 to add two mappings: `json.JSONDecodeError` and `tomllib.TOMLDecodeError`, both to `CONFIG_PARSE_ERROR`. See the Phase 5 deviations below.
-
-### Phase 2 — Schemas (complete)
-
-| Block | Status | Files |
-|---|---|---|
-| B-014 Core Structural Schemas | done | cpg.json, runtime-contract-map.json, recon.json, blast-radius.json, contract-assertions.json |
-| B-015 Flow and Verification Schemas | done | context-pack.json, verification.json, plan-approval.json, consent.json, checkpoint.json |
-| B-016 Output and Extension Schemas | done | audit-entry.json, plugin-manifest.json, skill.json, run-summary.json |
-
-Fourteen schemas, all draft 2020-12. Every schema has `additionalProperties: false` on closed objects and a top-level `extensions` field with `additionalProperties: true`.
-
-### Phase 3 — Storage (complete)
-
-| Block | Status | Files |
-|---|---|---|
-| B-017 Migrations, SQLite Store, Filesystem Store | done | storage/__init__.py, migrations/__init__.py, migrations/001_initial.sql, sqlite_store.py, filesystem_store.py |
-| B-018 Graph, Cache, Migrations Runner, Cleanup | done | graph_store.py, cache.py, migration_runner.py, cleanup.py |
-| B-019 Skill Store and Storage Tests | done | skill_store.py, test_storage.py, test_sqlite_wal.py, test_skill_store.py |
-
-Twenty application tables plus `_schema_migrations`. The CPG binary header format is defined here as a 64-byte little-endian structure. The skill store uses FTS5 for keyword search and vec0 for semantic search.
-
-### Phase 4 — Code Interfaces (complete)
-
-| Block | Status | Files |
-|---|---|---|
-| B-020 Core Provider Interfaces | done | interfaces/__init__.py, repository.py, apply.py, model.py, sandbox.py |
-| B-021 Core Engine Interfaces | done | orchestrator.py, agent.py, tool.py, verifier.py, reporter.py |
-| B-022 Extension Interfaces and Bridge Protocol | done | language.py, mcp_client.py, mcp_server.py, core/bridges/__init__.py, core/bridges/protocol.py |
-
-Twelve Protocols plus their DTOs. 43 symbols exported from `codeguardian.interfaces`. 11 symbols exported from `codeguardian.core.bridges`. No implementations.
-
-Three design decisions were settled before writing began:
-
-1. DTOs live in their interface's own file. `SandboxConfig` renamed to `SandboxSpec` to avoid collision with `config.SandboxConfig`. `Change` renamed to `FileChange`. `Sandbox` renamed to `SandboxHandle`.
-2. Async applies to methods invoked concurrently: Model, Tool, Verifier, MCPClient, MCPServer, Agent. Sync applies to methods invoked once: Repository, Apply, Sandbox, Orchestrator, Reporter, Language.
-3. `@runtime_checkable` on exactly four Protocols: ToolPlugin, VerifierPlugin, ReporterPlugin, LanguagePlugin.
-
-### Phase 5 — Bridges (complete)
-
-| Block | Status | Files |
-|---|---|---|
-| B-023 Python Bridge Implementations | done | pyo3_bridge.py, jsonrpc_bridge.py, rpc/Cargo.toml, rpc/src/lib.rs, rpc/src/protocol.rs |
-| B-024 Rust RPC and Kernel Crate Skeleton | done | rpc/src/server.rs, rpc/src/client.rs, kernel/Cargo.toml, kernel/src/lib.rs |
-| B-025 Bridge Tests | done | integration/__init__.py, test_pyo3_bridge.py, test_jsonrpc_bridge.py, test_phase_pipeline.py |
-
-Three design decisions were settled before writing began:
-
-1. JSON-RPC framing is line-delimited JSON. Each message is one JSON object followed by a newline.
-2. The PyO3 bridge is proved end-to-end in Phase 5 with a single `echo` function. Phase 6 extends the same `lib.rs` to register kernel bindings.
-3. The PyO3 extension module is named `codeguardian._native`.
-
-The Rust `RpcServer` and `RpcClient` compile and pass `cargo test --workspace` with zero tests. The Rust `RpcServer` has not been exercised against real input. Its first real exercise will be in Phase 6, when a Rust binary is wired that the Python bridge can spawn.
+1. `cpg.rs` exhaustive `match` on `NodeKind` was broken by batch 1's 28 new variants. Folded into batch 3 as a sixth file.
+2. `pyo3/kernel.rs` was moved from batch 1 to batch 2 because its 9-language mapping was dead code until `parser.rs` used the new enum.
+3. `test_kernel_multilang.py` was rewritten in batch 5 to add C#, C, C++ to `LANGUAGES` and remove the "not yet implemented" test, which became false when the three languages were wired.
+4. `test_blast_multilang.py` was written from an empty file in a follow-up step (the `touch` created it but did not fill it).
+5. C# was removed: `langs/csharp.rs` deleted, `Language::CSharp` removed from `langs/mod.rs`, dispatch arm removed, kernel Cargo.toml line removed, root Cargo.toml line removed, both test files updated to assert C# raises "unrecognized language" instead of "recognized but not yet implemented".
+6. TypeScript and JavaScript `function_declaration` nodes contain a nested `function` node that also carries the same `name`. Classifying both as `NodeKind::FunctionDef` produced two nodes named `target` per file, and blast's target resolution rejected the ambiguity. Only `function_declaration` maps to `FunctionDef` now. `function` falls through to `NodeKind::Other`.
+7. `test_eight_languages_build_and_blast_independently` had a case mismatch: `Main.java` in `sources` but `main.java` in the blast loop. Corrected to `main.java` throughout. Java naming convention normally capitalizes, but the kernel stores file paths verbatim and does not enforce convention.
 
 ---
 
 ## Test counts
 
-| Phase boundary | Passing tests |
-|---|---|
-| Phase 1 | 165 |
-| Phase 2 | 165 (no new tests) |
-| Phase 3 | 227 (165 + 62 new) |
-| Phase 4 | 227 (no new tests) |
-| Phase 5 | 252 (227 + 25 new integration tests) |
-| Post-Phase-5 translation fix | 256 (252 + 4 new translation tests) |
+| Phase boundary | Passing | Skipped | Xfailed | Xpassed |
+|---|---|---|---|---|
+| Phase 8 (before multi-language) | 487 | 2 | 0 | 0 |
+| Multi-language (after batch 6 + fixes) | 563 | 2 | 7 | 5 |
 
-Chain test command: `PYTHONPATH=python python3 -m pytest tests/ -q`
-Expected result: `256 passed`.
+**Chain test command:** `PYTHONPATH=python python3 -m pytest tests/ -q`
+**Current result:** `563 passed, 2 skipped, 7 xfailed, 5 xpassed`
 
-Isolation test command for Phase 5 tests: `PYTHONPATH=python python3 -m pytest tests/integration/ -v`
-Expected result: `25 passed`.
+**Breakdown of the 7 xfails (all named in `test_blast_multilang.py`):**
 
-Rust workspace: `cargo test --workspace`
-Expected result: seven test binaries, all reporting zero tests. No failures.
+| Count | Test | Reason |
+|---|---|---|
+| 2 | `test_same_file_call_resolves_c_family` | C/C++ `function_definition` has no `name` field; name is in a nested declarator that `parser.rs::extract_name_id` does not walk |
+| 3 | `test_cross_file_call_resolves` | Phase 8 §11.1 known gap; object-prefixed callees and file offsets not applied |
+| 2 | `test_lone_function_has_zero_callers_c_family` | Same as above: target name not in the symbol table |
+
+**Breakdown of the 5 xpasses:** five of the eight cross-file tests happen to resolve now, likely depending on file ordering and grammar shape. They are marked `xfail(strict=False)` so passing does not register as a failure. They will continue to reflect the shared cross-file resolver's behavior until that gap is fixed.
+
+**Rust workspace:** `cargo build --workspace --release` finishes in 11 to 30 seconds. `cargo test --workspace` reports zero tests across all eight crates and passes.
 
 ---
 
 ## Deviations from BUILD_ORDER
 
-### Phase 1 deviations
+The multi-language phase is not in `BUILD_ORDER.md`. It sits between Phase 8 and Phase 9. It was authorized by the user as a scope expansion of the Phase 9 plan, on the rationale that Phase 9's language plugins depend on the kernel supporting more than two languages.
 
 | # | What | Why |
 |---|---|---|
-| 1 | Added `errors/translation.py` and `test_translation.py` | The leak probe found 12/12 stdlib exceptions leaking past the taxonomy. The translation layer is the single chokepoint that converts them. |
-| 2 | Added `FILE_PERMISSION_DENIED` to codes.py | `PermissionError` had no accurate code to map to. |
-| 3 | Added `CONFIG_PARSE_ERROR` and `SECRET_KEYCHAIN_ERROR` to codes.py | Distinguishes TOML syntax errors from schema errors, and separates keychain failures from schema errors. |
-| 4 | Wrote seven Rust crate `Cargo.toml` stubs early | Empty workspace members broke `cargo metadata` and blocked every commit. |
-
-### Phase 2 deviations
-
-| # | What | Why |
-|---|---|---|
-| 5 | `additionalProperties: false` on every closed object in all fourteen schemas | The design doc left this off. Closed objects catch typos and field drift at validation time. Authorized before Block B-014. |
-| 6 | `extensions` field added to every schema and to selected nested objects | The schema needs a path for new fields without a version bump. Authorized before Block B-014 rewrite. |
-| 7 | Tested per block instead of per phase | Per-block commands caught errors one block at a time rather than all at once. The phase-boundary triple test still ran as required. |
-| 8 | Test command uses `Draft202012Validator.check_schema()` instead of `jsonschema.validate()` with the meta-schema | `check_schema` is the canonical API for validating a schema document. |
-
-### Phase 3 deviations
-
-| # | What | Why |
-|---|---|---|
-| 9 | `migrations.py` renamed to `migration_runner.py` | A module and a package cannot share a name in the same parent. BUILD_ORDER.md corrected to match. |
-| 10 | Added `STORAGE_MIGRATION_FAILED`, `STORAGE_SCHEMA_INVALID`, `STORAGE_GRAPH_CORRUPTED` to codes.py and taxonomy.py | Storage had no codes that mapped to its failure modes. All three are categorized as SYSTEM. The latter two carry non-retryable overrides because their failures are deterministic. |
-| 11 | Added `_schema_migrations` table not in the design doc | Every migration runner needs a table that records applied versions. Created by `SQLiteStore.open()` before any migration is considered. |
-| 12 | Defined the CPG binary header format in Phase 3 | The design doc says the CPG is a binary file but does not specify its layout. A 64-byte little-endian header was defined and committed as the v1 format. Phase 6 writes files that match it byte for byte. |
-| 13 | Real pytest files under `tests/` instead of per-block inline scripts | The B-017 and B-018 inline scripts were verification tools. The permanent suite lives in `tests/`. |
-| 14 | `sqlite_store.py` uses `contextlib.suppress` in two places | Ruff's SIM105 rule flagged `try`/`except`/`pass`. The change is cosmetic. |
-
-### Phase 4 deviations
-
-| # | What | Why |
-|---|---|---|
-| 15 | `SandboxConfig` renamed to `SandboxSpec` | Avoids collision with `config.SandboxConfig` from Phase 1. |
-| 16 | `Change` renamed to `FileChange` in repository.py | `Change` was too generic. `FileChange` states what it is. |
-| 17 | `Sandbox` renamed to `SandboxHandle` in sandbox.py | Avoids confusion with `SandboxSpec`. |
-| 18 | `ModelProvider.stream` is a regular `def` returning `AsyncIterator[ModelChunk]`, not `async def` | An `async def` returning an async iterator forces callers to `await` before iterating. The regular `def` is the correct shape for an async generator. |
-| 19 | `Agent` is generic over `[InputT, OutputT]` | Each agent has a different input and output. A non-generic protocol would force every agent to accept a generic bag and return an untyped result. |
-| 20 | `VerifierPlugin.verify` takes one argument, not two | Both docs show `verify(diff, context)`, but `context` contains `diff`. Collapsed to `verify(context)`. |
-| 21 | `interfaces/__init__.py` rewritten with a `TYPE_CHECKING` block | The dynamic import loop was invisible to mypy. The `TYPE_CHECKING` block declares the same names statically without changing runtime behavior. **Rule 1 escalation.** |
-
-### Phase 5 deviations
-
-| # | What | Why |
-|---|---|---|
-| 22 | `rust/Cargo.toml` (empty placeholder) deleted | It broke cargo commands run from inside `rust/`. The workspace root at the repo root is the only manifest needed. |
-| 23 | `rust/crates/codeguardian-pyo3/Cargo.toml` and `src/lib.rs` written in Phase 5 | Chosen so the PyO3 bridge is proved end-to-end in Phase 5 rather than deferred. **Rule 1 escalation, approved before Phase 5 started.** |
-| 24 | `rust/crates/codeguardian-rpc/src/lib.rs` rewritten in B-024 to add `pub mod client; pub mod server;` | The expected pattern for a Rust crate: `lib.rs` is the module registry and grows as modules land. **Rule 1 escalation.** |
-| 25 | Two new entries in `errors/translation.py`'s `_EXCEPTION_CODES` for `json.JSONDecodeError` and `tomllib.TOMLDecodeError`, both mapping to `CONFIG_PARSE_ERROR` | Without these, a malformed JSON or TOML file reaches the fallback and is classified as `SYS_INTERNAL`, which is retryable. Retrying a syntax error wastes three attempts. **Rule 1 escalation, done after Phase 5.** |
-| 26 | Four new tests in `test_translation.py` for the two new mappings | Each mapping gets a test for the code and a test for the non-retryable policy. |
+| 1 | Added 28 new `NodeKind` variants to `ast.rs` | Required by the seven new languages |
+| 2 | Added 28 new wire codes (55 through 82) to `cpg.rs` | Wire codes must be assigned in the same commit as the variants; codes 0–54 unchanged |
+| 3 | Added `Impl`, `Struct`, `Interface`, `Trait`, `Enum`, `Union` as named scopes to `symbol_table.rs` | Qualified names for methods in Rust `impl` blocks and Java/C#/Go class-like constructs |
+| 4 | Renamed `extract_callee_name` to `default_extract_callee_name` and made it `pub` in `call_graph.rs` | The `LanguageModule` trait's default `extract_callee` method delegates to it |
+| 5 | Added `Loop`, `SelectStatement` to the loop branch and `Synchronized`, `Lock` to the with-branch of `cfg.rs::build_statement` | Go `select`, Rust `loop`, Java/C# synchronization blocks |
+| 6 | Added `KernelError::LanguageNotImplemented` variant to `parser.rs` | Distinguishes "grammar broke" from "module not yet wired" |
+| 7 | Added a dispatch pre-check to `pyo3/kernel.rs::build_graph` | Rejects recognized-but-unwired languages with a clear `ValueError` before invoking the kernel |
+| 8 | Created `langs/csharp.rs` and then removed it | ABI incompatibility described above |
+| 9 | Removed `tree-sitter-c-sharp` from root `Cargo.toml` and kernel `Cargo.toml` | No working version exists |
+| 10 | Moved the 9-language mapping test to `test_kernel_multilang.py` instead of adding to `test_kernel.py` | Keeps the pre-existing kernel tests unmodified |
 
 ---
 
 ## Escalation queue
 
+Rule 1 escalations performed during the multi-language phase. Every rewrite is additive at the behavioral level; no existing variant, arm, or function was removed except the C# entries during removal.
+
 | # | File | Status |
 |---|---|---|
-| 1 | `interfaces/__init__.py` | Resolved in Phase 4. |
-| 2 | `rust/crates/codeguardian-pyo3/src/lib.rs` | **Open.** Phase 6 must extend this file to register kernel bindings. This is the pre-approved extension of the PyO3 module. |
-| 3 | `rust/crates/codeguardian-rpc/src/lib.rs` | Resolved in Phase 5 B-024. |
-| 4 | `errors/translation.py` and `tests/unit/core/test_translation.py` | Resolved after Phase 5. |
+| 1 | `rust/Cargo.toml` | Resolved. 7 grammar dependencies added, then `tree-sitter-c-sharp` removed after the ABI failure. Net: 9 lines (8 grammar lines + `tree-sitter`). |
+| 2 | `rust/crates/codeguardian-kernel/Cargo.toml` | Resolved. Same pattern. |
+| 3 | `rust/crates/codeguardian-kernel/src/ast.rs` | Resolved. 28 new variants appended after `Other(u16)`, so existing wire codes stay stable. |
+| 4 | `rust/crates/codeguardian-kernel/src/cpg.rs` | Resolved. 28 new wire code arms in `node_kind_wire_parts` and `node_kind_from_wire`. |
+| 5 | `rust/crates/codeguardian-kernel/src/lib.rs` | Resolved. `pub mod langs;`, exports `Language`, `dispatch`, `LanguageModule`. |
+| 6 | `rust/crates/codeguardian-kernel/src/parser.rs` | Resolved. Delegates to `langs::dispatch`; `Language` re-exported from `langs`. |
+| 7 | `rust/crates/codeguardian-kernel/src/symbol_table.rs` | Resolved. |
+| 8 | `rust/crates/codeguardian-kernel/src/call_graph.rs` | Resolved. |
+| 9 | `rust/crates/codeguardian-kernel/src/cfg.rs` | Resolved. |
+| 10 | `rust/crates/codeguardian-pyo3/src/kernel.rs` | Resolved. 9-name mapping and `LanguageNotImplemented` arm. C# name now raises "unrecognized language" because the enum no longer contains it. |
+| 11 | `rust/crates/codeguardian-kernel/src/langs/mod.rs` | Resolved. Five rewrites across batches 1 through 5. |
+| 12 | `rust/crates/codeguardian-kernel/src/langs/typescript.rs` | Resolved after batch 4 (removed `function` from `FunctionDef` mapping). |
+| 13 | `rust/crates/codeguardian-kernel/src/langs/javascript.rs` | Resolved after batch 4 (same fix). |
+| 14 | `tests/unit/rust/test_kernel_multilang.py` | Resolved. Two full rewrites: initial in batch 4, C# removal in batch 5. |
+| 15 | `tests/unit/rust/test_blast_multilang.py` | Resolved. Written from empty; one path-case fix via `sed`. |
 
-Only escalation 2 remains open.
+No open escalations. The `langs/mod.rs` file will need another escalation when C# returns, when a tenth language is added, or when the cross-file resolver is fixed.
 
 ---
 
 ## What the next chat must do first
 
 1. Read `skills.md`, `BUILD_ORDER.md`, `BUILD_STATE.md`, and `docs/public-api.md`.
-2. Do not attempt to re-verify Phases 1 through 5. They are green and pushed. Trust the state.
+2. Do not attempt to re-verify Phases 1 through 8 or the multi-language phase. They are green. Trust the state.
 3. Ask the user to `source .venv/bin/activate` before any Python command.
-4. Confirm the Rust toolchain is on `PATH` inside the venv. If `cargo --version` fails, the venv activate script no longer appends `$HOME/.cargo/bin`.
-5. Start Phase 6 — Rust Kernel. Blocks B-026 through B-030.
-6. Before writing any file, settle the design questions Phase 6 raises:
-   - What is the concrete AST node type?
-   - What is the concrete CPG node and edge representation?
-   - How is the graph serialized to match the Phase 3 header?
-   - What is the incremental update algorithm?
-   - What queries does the query interface expose?
-   - Which Tree-sitter grammars are bundled?
-7. Remember escalation 2. Phase 6 extends `rust/crates/codeguardian-pyo3/src/lib.rs` to register kernel bindings. That rewrite is pre-approved.
+4. Confirm `cargo --version` works inside the venv. If it fails, the venv activate script no longer appends `$HOME/.cargo/bin`.
+5. Start Phase 9 — Plugins. Blocks B-042 through B-047.
+6. Before writing any Phase 9 file, settle the eight design questions recorded in `phases-9-design-notes` (see below). Only two remain open:
+   - Q2 (bundled plugin discovery: entry points or direct import) — recommendation: both paths, bundled via direct import, third-party via `importlib.metadata.entry_points()`
+   - Q8 (bundled tool plugin mechanism: subprocess, MCP wrapper, or in-process) — recommendation: `ast_grep` as subprocess, `code_analysis` in-process using the existing tree-sitter parser
+7. Confirm the eight-language set is stable. If the user wants more languages (Ruby, PHP, Kotlin, Swift, Scala), they ship as separate installable packages under a "Phase 9.5" track, not bundled into the main wheel.
+
+### Phase 9 design notes — questions 1 through 8
+
+Six of the eight are already answered by inspection of `interfaces/language.py`, `interfaces/tool.py`, `interfaces/verifier.py`, `interfaces/reporter.py`, and the empty `plugins_bundled/` tree. This is what each answer depends on.
+
+| # | Question | Status |
+|---|---|---|
+| Q1 | Concrete `AstNode` shape | **Resolved by interface inspection.** `LanguagePlugin.parse(path) -> object`, documented as opaque. No plugin needs a concrete AST type. |
+| Q3 | `interface_version` compatibility | **Recommendation: accept only `"1.0"`.** N-1 does not exist. Adding `"2.0"` acceptance is a one-line change when it ships. |
+| Q4 | Fault barrier disable scope | **Recommendation: in-memory `set[str]` on `PluginRegistry` plus `disabled` flag on the loaded plugin wrapper.** No SQLite write; `plugin_registry.enabled` is for user-config disable, a different concept. Catch `Exception`, not `BaseException`. |
+| Q5 | Does Phase 9 write to `plugin_registry`? | **Recommendation: yes, on load.** `INSERT ... ON CONFLICT DO UPDATE`. `enabled` stays 1 always. |
+| Q6 | Grammars bundled | **Confirmed by tree inspection.** Python and TypeScript are the only bundled languages. Seven of the eight supported languages ship as separate packages in Phase 9 or later. |
+| Q7 | `run_tests` parameter type | **Resolved by interface inspection.** `run_tests(sandbox: SandboxHandle, test_path: str) -> TestResult`. |
+| Q2 | Bundled vs third-party discovery | **Open.** Recommendation: direct import for bundled, entry points for third-party. Both feed `PluginRegistry`. |
+| Q8 | Bundled tool plugin mechanism | **Open.** Recommendation: `ast_grep` as subprocess wrapper, `code_analysis` in-process using the existing tree-sitter parser. |
 
 ---
 
@@ -236,28 +190,61 @@ Only escalation 2 remains open.
 
 ## Known gaps carried forward
 
-These are gaps that were identified during Phases 1 through 5 and deliberately deferred to the phase that needs them. They are recorded here so they are not forgotten.
+These are gaps identified across Phases 1 through 8 and the multi-language phase that are still open. They are recorded here so they are not forgotten.
 
-| # | Gap | Phase it becomes relevant | Notes |
+| # | Gap | Becomes relevant | Notes |
 |---|---|---|---|
-| G-1 | Multi-process write contention on the SQLite database | Phase 13 | `busy_timeout` handles two writers. Three writers (orchestrator, cleanup thread, MCP server) will eventually time out. |
-| G-2 | No retention for metadata tables (`model_calls`, `mcp_tool_calls`, `phase_executions`, `verifier_verdicts`) | Phase 16 | These tables grow forever. The cleanup layer does not touch them. |
-| G-3 | No SQLite backup story | Before v1 ships | The database is not backed up. The audit log is safe. |
-| G-4 | Cache keys do not include a schema version | When a schema changes | A schema change without a commit change produces stale cache hits. |
-| G-5 | No model provenance on skill embeddings | When the caller switches embedding models | If two embedding models are used, vectors become incomparable. |
-| G-6 | CPG header has no compression flag | Optional | A 200 MB graph is 200 MB on disk. |
-| G-7 | Cleanup runs as a background thread, not a process | Optional | If the main process crashes, cleanup crashes with it. No `codeguardian cleanup` command exists. |
-| G-8 | The 64 KB cache threshold is a magic number | Optional | Not configurable. |
-| G-9 | The `@typed` decorator discipline is not enforced | Phase 16 | No lint rule, no codebase-walk test. The convention is enforced by memory. |
-| G-10 | The Rust `RpcServer` has not been exercised against real input | Phase 6 | It compiles. It has not been run. |
-| G-11 | `test_config_secrets.py` does not exist | Phase 1 backlog | Deferred by user decision. |
-| G-12 | The Rust error-to-Python mapping at the bridge boundary is not written | Phase 6 | When Rust errors cross the PyO3 or JSON-RPC boundary, they must be mapped to typed `CodeGuardianError` codes. |
-| G-13 | The CLI exit-code mapping is not written | Phase 14 | The design doc specifies the mapping. No code implements it. |
-| G-14 | Phase 0 B-004 through B-009 are deferred | End of build | 30 files: GitHub configs, workflows, dev container, docs, examples. No runtime impact. |
+| G-1 | Multi-process write contention on the SQLite database | Phase 13 | `busy_timeout` handles two writers; three will time out |
+| G-2 | No retention for metadata tables (`model_calls`, `mcp_tool_calls`, `phase_executions`, `verifier_verdicts`) | Phase 16 | These grow forever; cleanup does not touch them |
+| G-3 | No SQLite backup story | Before v1 ships | Database is not backed up; audit log is safe |
+| G-4 | Cache keys do not include a schema version | When a schema changes | A schema change without a commit change produces stale cache hits |
+| G-5 | No model provenance on skill embeddings | When the caller switches embedding models | Two embedding models make vectors incomparable |
+| G-6 | CPG header has no compression flag | Optional | A 200 MB graph is 200 MB on disk |
+| G-7 | Cleanup runs as a background thread, not a process | Optional | If the main process crashes, cleanup crashes with it |
+| G-8 | The 64 KB cache threshold is a magic number | Optional | Not configurable |
+| G-9 | The `@typed` decorator discipline is not enforced | Phase 16 | No lint rule, no codebase-walk test |
+| G-10 | Rust `RpcServer` has not been exercised against real input | Closed by Phase 7 | The rpcd daemon exercises it via JSON-RPC; Phase 8 integration proved it end-to-end |
+| G-11 | `test_config_secrets.py` does not exist | Phase 1 backlog | Deferred by user decision |
+| G-12 | Rust error-to-Python mapping at the bridge boundary | Partially addressed by Phase 7 | `pyo3/kernel.rs::map_core_kernel_error` handles the four variants. JSON-RPC bridge still maps all errors to `SYS_INTERNAL` |
+| G-13 | CLI exit-code mapping is not written | Phase 14 | Design specified, code does not exist |
+| G-14 | Phase 0 B-004 through B-009 are deferred | End of build | 30 files: GitHub configs, workflows, dev container, docs, examples. No runtime impact |
+| **G-15** | **C/C++ function names are not extracted** | Next kernel phase | `parser.rs::extract_name_id` does not walk declarator chains. Fixing it flips the 4 C/C++ xfails to pass and moves C/C++ from `best-effort` to `high` reliability |
+| **G-16** | **Cross-file call resolution is inconsistent** | Next kernel phase | Phase 8 §11.1. Some tests xfail, some xpass. Fixing the shared resolver and applying edge destination file offsets closes the gap |
+| **G-17** | **C# is not supported** | When a working grammar exists | `tree-sitter-c-sharp` 0.23.5 ABI incompatible with tree-sitter 0.24. Re-adding requires a compatible grammar release plus code restorations in four files |
+| **G-18** | **`ast.rs` comment on `Property` still mentions C#** | Cosmetic | The comment says "C# property and JavaScript accessor". C# no longer maps to it. One-word comment fix requires a Rule 1 escalation on `ast.rs` |
+| **G-19** | **No automated check that `test_kernel_multilang.py` matches the wired languages** | Phase 9 | Adding a language to `dispatch` without adding a test case to `LANGUAGES` would go unnoticed. A conftest check could compare the two sets |
+
+Gaps G-1 through G-14 are unchanged from the Phase 5 snapshot. G-10 and G-12 are marked partially addressed by later phases. G-15 through G-19 are new.
 
 ---
 
-## Git history relevant to Phases 0 through 5
+## Git history relevant to this snapshot
+
+The current HEAD is at the last commit before the multi-language work began. The multi-language work is uncommitted in the working tree:
+
+```
+ M Cargo.lock
+ M Cargo.toml
+ M rust/crates/codeguardian-kernel/Cargo.toml
+ M rust/crates/codeguardian-kernel/src/ast.rs
+ M rust/crates/codeguardian-kernel/src/call_graph.rs
+ M rust/crates/codeguardian-kernel/src/cfg.rs
+ M rust/crates/codeguardian-kernel/src/cpg.rs
+ M rust/crates/codeguardian-kernel/src/lib.rs
+ M rust/crates/codeguardian-kernel/src/parser.rs
+ M rust/crates/codeguardian-kernel/src/symbol_table.rs
+ M rust/crates/codeguardian-pyo3/src/kernel.rs
+ M pyproject.toml
+ M rust/crates/codeguardian-kernel/src/langs/mod.rs
+ M tests/unit/rust/test_kernel_multilang.py
+ M tests/unit/rust/test_blast_multilang.py
+?? rust/crates/codeguardian-kernel/src/langs/
+?? tests/e2e/fixtures/sample_multi_language_repo/
+```
+
+Additionally, `python/codeguardian/_native.so` was rebuilt and is not tracked by git (per `.gitignore`).
+
+The prior snapshot listed the following as the git history for Phases 0 through 5:
 
 ```
 <latest>  docs: add build history for phases 1 through 5
@@ -272,20 +259,16 @@ dc20e43   feat: complete Phase 1 foundation and Phase 2 schemas
 36de85d   Full Docs updated
 ```
 
-Full hashes are on `origin/main`. The working tree is clean at the time of this snapshot.
-
 ---
 
 ## Where the next phase starts
 
-Phase 6 — Rust Kernel. Five blocks:
+Phase 9 — Plugins. Six blocks, twenty-five files per `BUILD_ORDER.md`:
 
-- B-026: `parser.rs`, `ast.rs`, `symbol_table.rs`, `call_graph.rs`
-- B-027: `cfg.rs`, `pdg.rs`
-- B-028: `cpg.rs`, `incremental.rs`, `query.rs`
-- B-029: `codeguardian-pyo3/Cargo.toml` (already populated), `codeguardian-pyo3/src/lib.rs` (escalation 2), `codeguardian-pyo3/src/kernel.rs`
-- B-030: `tests/unit/rust/__init__.py`, `tests/unit/rust/test_kernel.py`
+- B-042: `core/plugins/manifest.py`, `registry.py`, `loader.py`, `fault_barrier.py`, `__init__.py`
+- B-043: `core/plugins/versioning.py`, `plugins_bundled/__init__.py`, `plugins_bundled/languages/__init__.py`, `plugins_bundled/languages/python/plugin.py`, `plugins_bundled/languages/python/pyproject.toml`
+- B-044: `plugins_bundled/languages/typescript/plugin.py`, `plugins_bundled/languages/typescript/pyproject.toml`, `plugins_bundled/tools/__init__.py`, `plugins_bundled/tools/ast_grep/plugin.py`, `plugins_bundled/tools/ast_grep/pyproject.toml`
+- B-045: `plugins_bundled/tools/code_analysis/plugin.py`, `plugins_bundled/tools/code_analysis/pyproject.toml`, `plugins_bundled/reporters/__init__.py`, `plugins_bundled/reporters/sarif_reporter/plugin.py`, `plugins_bundled/reporters/sarif_reporter/pyproject.toml`
+- B-046: `tests/contracts/test_language_contract.py`, `test_tool_contract.py`, `test_verifier_contract.py`, `test_reporter_contract.py`
+- B-047: `tests/integration/test_plugin_loading.py`
 
-This is the largest single phase in terms of Rust code. It is where the Code Property Graph is actually built, serialized to the binary format Phase 3 defined, and exposed to Python through PyO3.
-
-The next chat should treat Phase 6 as the point where the CPG header format stops being a promise and becomes a constraint that must be honored byte for byte.

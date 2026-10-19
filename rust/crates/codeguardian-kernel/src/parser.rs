@@ -1,18 +1,24 @@
 //! Tree-sitter wrapper. The only module that knows tree-sitter exists.
 //!
-//! `parse_file` takes a language and a source string, runs the
+//! `parse_file` takes a language and a source string, looks up the
+//! language's `LanguageModule` via `langs::dispatch`, runs the
 //! appropriate tree-sitter grammar, and converts the resulting tree
 //! into a flat `AstArena`. The conversion is a single preorder walk.
 //! Byte offsets, rows, columns, and the tree structure are copied
-//! across unchanged; the `NodeKind` is classified from the grammar's
-//! kind string, with `NodeKind::Other(raw_id)` as the fallback for any
-//! syntax the enum does not name.
+//! across unchanged; the `NodeKind` is classified by the language
+//! module, with `NodeKind::Other(raw_id)` as the fallback for any
+//! syntax the module does not name.
 //!
 //! A malformed source file is not an error. Tree-sitter inserts ERROR
 //! and MISSING nodes to repair the parse, and those nodes are preserved
 //! in the arena with the corresponding flags set. `ParseResult::had_errors`
 //! reports whether any repair happened, so the caller can decide how to
 //! treat the file. Only catastrophic failures return `Err`.
+//!
+//! The `Language` type lives in `langs` and is re-exported here so that
+//! `crate::parser::Language` continues to resolve for internal callers
+//! that import it from this module. The canonical path for external
+//! callers is `codeguardian_kernel::Language`.
 //!
 //! The invariant this module protects is that every byte offset in
 //! every `AstNode` is within the source length. A grammar that produces
@@ -21,11 +27,14 @@
 //! checked before use elsewhere.
 
 use thiserror::Error;
-use tree_sitter::{Language as TsLanguage, Node as TsNode, Parser};
+use tree_sitter::{Node as TsNode, Parser};
 
 use crate::ast::{
-    AstArena, AstNode, NodeKind, FLAG_ERROR, FLAG_EXTRA, FLAG_MISSING, FLAG_NAMED, NO_NODE,
+    AstArena, AstNode, FLAG_ERROR, FLAG_EXTRA, FLAG_MISSING, FLAG_NAMED, NO_NODE,
 };
+use crate::langs::{dispatch, LanguageModule};
+
+pub use crate::langs::Language;
 
 /// Maximum AST depth accepted by the parser.
 ///
@@ -63,46 +72,13 @@ pub enum KernelError {
     /// to recurse further so it cannot overflow the stack.
     #[error("AST depth {depth} exceeds the limit of {limit}")]
     TreeTooDeep { depth: u32, limit: u32 },
-}
 
-/// A source language supported by the kernel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
-    /// Python, parsed by tree-sitter-python.
-    Python,
-    /// TypeScript, parsed by tree-sitter-typescript (non-TSX grammar).
-    TypeScript,
-}
-
-impl Language {
-    /// Return the human-readable name of the language.
-    pub fn name(self) -> &'static str {
-        match self {
-            Language::Python => "python",
-            Language::TypeScript => "typescript",
-        }
-    }
-
-    /// Return the language for `name`, or `None` if it is not supported.
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "python" => Some(Language::Python),
-            "typescript" => Some(Language::TypeScript),
-            _ => None,
-        }
-    }
-
-    /// Return the tree-sitter grammar for this language.
-    ///
-    /// The grammar crates export their grammar as a `LanguageFn`
-    /// constant, not as a function. The `Into` conversion produces the
-    /// `tree_sitter::Language` the parser requires.
-    fn tree_sitter(self) -> TsLanguage {
-        match self {
-            Language::Python => tree_sitter_python::LANGUAGE.into(),
-            Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        }
-    }
+    /// The language is recognized by `Language::from_name` but no
+    /// `LanguageModule` is wired into `langs::dispatch` for it. This is
+    /// the state that holds for a language declared in the enum before
+    /// its module submodule has been written.
+    #[error("language {language} is recognized but its module is not yet implemented")]
+    LanguageNotImplemented { language: &'static str },
 }
 
 /// The result of parsing one file.
@@ -130,9 +106,13 @@ pub fn parse_file(language: Language, source: &str) -> Result<ParseResult, Kerne
         return Err(KernelError::SourceTooLarge { len: source.len() });
     }
 
+    let module = dispatch(language).ok_or(KernelError::LanguageNotImplemented {
+        language: language.name(),
+    })?;
+
     let mut parser = Parser::new();
     parser
-        .set_language(&language.tree_sitter())
+        .set_language(&module.grammar())
         .map_err(|_| KernelError::ParserInit {
             language: language.name(),
         })?;
@@ -148,7 +128,7 @@ pub fn parse_file(language: Language, source: &str) -> Result<ParseResult, Kerne
     let root = convert_node(
         tree.root_node(),
         source,
-        language,
+        module,
         &mut arena,
         NO_NODE,
         0,
@@ -183,7 +163,7 @@ pub fn parse_files(inputs: &[(Language, &str)]) -> Result<Vec<ParseResult>, Kern
 fn convert_node(
     ts_node: TsNode<'_>,
     source: &str,
-    language: Language,
+    module: &dyn LanguageModule,
     arena: &mut AstArena,
     parent: u32,
     depth: u32,
@@ -200,7 +180,7 @@ fn convert_node(
         *had_errors = true;
     }
 
-    let kind = classify(language, ts_node.kind(), ts_node.kind_id());
+    let kind = module.classify(ts_node.kind(), ts_node.kind_id());
     let name_id = extract_name_id(ts_node, source, arena);
     let start = ts_node.start_position();
 
@@ -227,7 +207,7 @@ fn convert_node(
         let child_id = convert_node(
             child_ts,
             source,
-            language,
+            module,
             arena,
             id,
             depth + 1,
@@ -291,133 +271,6 @@ fn extract_name_id(ts_node: TsNode<'_>, source: &str, arena: &mut AstArena) -> u
 fn is_name_leaf(kind: &str) -> bool {
     matches!(
         kind,
-        "identifier" | "type_identifier" | "property_identifier"
+        "identifier" | "type_identifier" | "property_identifier" | "field_identifier"
     )
-}
-
-/// Classify a tree-sitter kind string into a `NodeKind`.
-///
-/// Kinds shared across grammars are matched first. Language-specific
-/// kinds are matched in per-language helpers. Anything unmatched
-/// becomes `NodeKind::Other(raw_id)`.
-fn classify(language: Language, kind: &str, raw_id: u16) -> NodeKind {
-    match kind {
-        "identifier" | "type_identifier" | "property_identifier" => NodeKind::Identifier,
-        "comment" | "line_comment" | "block_comment" => NodeKind::Comment,
-        _ => match language {
-            Language::Python => classify_python(kind, raw_id),
-            Language::TypeScript => classify_typescript(kind, raw_id),
-        },
-    }
-}
-
-/// Classify a Python grammar kind string.
-fn classify_python(kind: &str, raw_id: u16) -> NodeKind {
-    match kind {
-        "module" => NodeKind::Module,
-        "block" => NodeKind::Block,
-        "function_definition" => NodeKind::FunctionDef,
-        "class_definition" => NodeKind::ClassDef,
-        "lambda" => NodeKind::Lambda,
-        "decorator" => NodeKind::Decorator,
-        "parameters" | "lambda_parameters" => NodeKind::Parameter,
-        "argument_list" => NodeKind::Argument,
-        "attribute" => NodeKind::Attribute,
-        "type" => NodeKind::TypeAnnotation,
-        "assignment" => NodeKind::Assignment,
-        "augmented_assignment" => NodeKind::AugmentedAssignment,
-        "return_statement" => NodeKind::Return,
-        "yield" => NodeKind::Yield,
-        "if_statement" => NodeKind::If,
-        "elif_clause" => NodeKind::Elif,
-        "else_clause" => NodeKind::Else,
-        "for_statement" => NodeKind::For,
-        "while_statement" => NodeKind::While,
-        "try_statement" => NodeKind::Try,
-        "except_clause" => NodeKind::Except,
-        "finally_clause" => NodeKind::Finally,
-        "with_statement" => NodeKind::With,
-        "raise_statement" => NodeKind::Raise,
-        "pass_statement" => NodeKind::Pass,
-        "break_statement" => NodeKind::Break,
-        "continue_statement" => NodeKind::Continue,
-        "global_statement" => NodeKind::Global,
-        "nonlocal_statement" => NodeKind::Nonlocal,
-        "assert_statement" => NodeKind::Assert,
-        "delete_statement" => NodeKind::Del,
-        "import_statement" => NodeKind::Import,
-        "import_from_statement" => NodeKind::ImportFrom,
-        "match_statement" => NodeKind::Match,
-        "case_clause" => NodeKind::Case,
-        "call" => NodeKind::Call,
-        "binary_operator" => NodeKind::BinaryOp,
-        "unary_operator" => NodeKind::UnaryOp,
-        "comparison_operator" => NodeKind::ComparisonOp,
-        "boolean_operator" => NodeKind::BoolOp,
-        "conditional_expression" => NodeKind::ConditionalExpression,
-        "integer" | "float" | "string" | "true" | "false" | "none" => NodeKind::Literal,
-        "list" => NodeKind::List,
-        "dictionary" => NodeKind::Dict,
-        "set" => NodeKind::Set,
-        "tuple" => NodeKind::Tuple,
-        "subscript" => NodeKind::Subscript,
-        "slice" => NodeKind::Slice,
-        "await" => NodeKind::AwaitExpression,
-        "ERROR" => NodeKind::Error,
-        "MISSING" => NodeKind::Missing,
-        _ => NodeKind::Other(raw_id),
-    }
-}
-
-/// Classify a TypeScript grammar kind string.
-fn classify_typescript(kind: &str, raw_id: u16) -> NodeKind {
-    match kind {
-        "program" => NodeKind::Module,
-        "statement_block" | "class_body" => NodeKind::Block,
-        "function_declaration" | "function" | "generator_function_declaration" => {
-            NodeKind::FunctionDef
-        }
-        "class_declaration" | "abstract_class_declaration" => NodeKind::ClassDef,
-        "method_definition" => NodeKind::MethodDef,
-        "arrow_function" => NodeKind::Lambda,
-        "decorator" => NodeKind::Decorator,
-        "required_parameter" | "optional_parameter" | "rest_pattern" => NodeKind::Parameter,
-        "arguments" => NodeKind::Argument,
-        "member_expression" => NodeKind::Attribute,
-        "type_annotation" => NodeKind::TypeAnnotation,
-        "variable_declaration"
-        | "lexical_declaration"
-        | "variable_declarator"
-        | "assignment_expression" => NodeKind::Assignment,
-        "augmented_assignment_expression" => NodeKind::AugmentedAssignment,
-        "return_statement" => NodeKind::Return,
-        "yield_expression" => NodeKind::Yield,
-        "if_statement" => NodeKind::If,
-        "else_clause" => NodeKind::Else,
-        "for_statement" | "for_in_statement" => NodeKind::For,
-        "while_statement" | "do_statement" => NodeKind::While,
-        "try_statement" => NodeKind::Try,
-        "catch_clause" => NodeKind::Except,
-        "finally_clause" => NodeKind::Finally,
-        "throw_statement" => NodeKind::Raise,
-        "break_statement" => NodeKind::Break,
-        "continue_statement" => NodeKind::Continue,
-        "import_statement" => NodeKind::Import,
-        "export_statement" => NodeKind::Import,
-        "switch_statement" | "switch_case" | "switch_default" => NodeKind::Match,
-        "call_expression" | "new_expression" => NodeKind::Call,
-        "binary_expression" => NodeKind::BinaryOp,
-        "unary_expression" | "update_expression" => NodeKind::UnaryOp,
-        "ternary_expression" => NodeKind::ConditionalExpression,
-        "number" | "string" | "true" | "false" | "null" | "undefined" | "regex" => {
-            NodeKind::Literal
-        }
-        "array" => NodeKind::List,
-        "object" => NodeKind::Dict,
-        "subscript_expression" => NodeKind::Subscript,
-        "await_expression" => NodeKind::AwaitExpression,
-        "ERROR" => NodeKind::Error,
-        "MISSING" => NodeKind::Missing,
-        _ => NodeKind::Other(raw_id),
-    }
 }

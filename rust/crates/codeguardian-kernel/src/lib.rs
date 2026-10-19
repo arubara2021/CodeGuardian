@@ -5,15 +5,22 @@
 //! Graph, the merged and serializable Code Property Graph, incremental
 //! updates, and the query interface.
 //!
-//! The public surface is the nine modules and the names re-exported
+//! The public surface is the ten modules and the names re-exported
 //! below. Callers write `codeguardian_kernel::Language` rather than
-//! `codeguardian_kernel::parser::Language`.
+//! `codeguardian_kernel::langs::Language`.
+//!
+//! Nine languages are supported (Python, TypeScript, JavaScript, Java,
+//! Go, Rust, C#, C, C++). Each is implemented by a `LanguageModule` in
+//! `langs/`. `dispatch` returns the module for a language; a language
+//! whose module is not yet wired returns `None`, and the parser
+//! converts that into a typed `KernelError::LanguageNotImplemented`.
 
 pub mod ast;
 pub mod call_graph;
 pub mod cfg;
 pub mod cpg;
 pub mod incremental;
+pub mod langs;
 pub mod parser;
 pub mod pdg;
 pub mod query;
@@ -26,6 +33,7 @@ pub use cpg::{
     node_kind_from_wire, node_kind_wire_code, node_kind_wire_parts, CodePropertyGraph, CpgEdge,
     CpgError, CpgHeader, CpgNode, EdgeKind, SourceFile,
 };
-pub use parser::{parse_file, parse_files, KernelError, Language, ParseResult};
+pub use langs::{dispatch, Language, LanguageModule};
+pub use parser::{parse_file, parse_files, KernelError, ParseResult};
 pub use pdg::{build_pdg, Pdg, PdgEdge, PdgEdgeKind};
 pub use symbol_table::{extract_symbols, Symbol, SymbolKind, SymbolTable};

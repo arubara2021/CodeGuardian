@@ -1,0 +1,16 @@
+# Normalize line endings to LF in the repository, regardless of
+# what the filesystem or editor produces. Prevents the WSL2/Windows
+# line-ending conflict that breaks pre-commit on every commit.
+* text=auto eol=lf
+
+# Binary files must never be line-ending normalized.
+*.so binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary

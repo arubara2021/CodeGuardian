@@ -38,6 +38,11 @@
 //! codes, not as Rust discriminants. The codes are listed once in this
 //! file and never change. Adding a new variant is a minor format
 //! version bump; renaming a code is a major one.
+//!
+//! Codes 0 through 54 predate the multi-language extension. Codes 55
+//! through 82 were added when the kernel grew from two languages to
+//! nine. Codes 0 through 54 keep their original meanings; nothing was
+//! renumbered.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -70,7 +75,9 @@ const KIND_OTHER_CODE: u16 = 0xFFFF;
 /// Split a `NodeKind` into its wire code and payload.
 ///
 /// The mapping is frozen. The code for a given variant never changes for
-/// as long as format version 1 is readable.
+/// as long as format version 1 is readable. Codes 55 through 82 were
+/// added when the kernel grew from two languages to nine; codes 0
+/// through 54 retain their original meanings.
 pub fn node_kind_wire_parts(kind: NodeKind) -> (u16, u16) {
     match kind {
         NodeKind::Module => (0, 0),
@@ -128,6 +135,34 @@ pub fn node_kind_wire_parts(kind: NodeKind) -> (u16, u16) {
         NodeKind::AwaitExpression => (52, 0),
         NodeKind::Error => (53, 0),
         NodeKind::Missing => (54, 0),
+        NodeKind::Struct => (55, 0),
+        NodeKind::Interface => (56, 0),
+        NodeKind::Trait => (57, 0),
+        NodeKind::Impl => (58, 0),
+        NodeKind::Enum => (59, 0),
+        NodeKind::Union => (60, 0),
+        NodeKind::Namespace => (61, 0),
+        NodeKind::Package => (62, 0),
+        NodeKind::TypeParameter => (63, 0),
+        NodeKind::TypeAlias => (64, 0),
+        NodeKind::WhereClause => (65, 0),
+        NodeKind::Lifetime => (66, 0),
+        NodeKind::Annotation => (67, 0),
+        NodeKind::Modifier => (68, 0),
+        NodeKind::GoStatement => (69, 0),
+        NodeKind::DeferStatement => (70, 0),
+        NodeKind::SelectStatement => (71, 0),
+        NodeKind::Loop => (72, 0),
+        NodeKind::MacroDefinition => (73, 0),
+        NodeKind::MacroCall => (74, 0),
+        NodeKind::Preprocessor => (75, 0),
+        NodeKind::TemplateDeclaration => (76, 0),
+        NodeKind::Synchronized => (77, 0),
+        NodeKind::Lock => (78, 0),
+        NodeKind::Goto => (79, 0),
+        NodeKind::TemplateLiteral => (80, 0),
+        NodeKind::Property => (81, 0),
+        NodeKind::TypeCast => (82, 0),
         NodeKind::Other(payload) => (KIND_OTHER_CODE, payload),
     }
 }
@@ -195,6 +230,34 @@ pub fn node_kind_from_wire(code: u16, payload: u16) -> Option<NodeKind> {
         52 => Some(NodeKind::AwaitExpression),
         53 => Some(NodeKind::Error),
         54 => Some(NodeKind::Missing),
+        55 => Some(NodeKind::Struct),
+        56 => Some(NodeKind::Interface),
+        57 => Some(NodeKind::Trait),
+        58 => Some(NodeKind::Impl),
+        59 => Some(NodeKind::Enum),
+        60 => Some(NodeKind::Union),
+        61 => Some(NodeKind::Namespace),
+        62 => Some(NodeKind::Package),
+        63 => Some(NodeKind::TypeParameter),
+        64 => Some(NodeKind::TypeAlias),
+        65 => Some(NodeKind::WhereClause),
+        66 => Some(NodeKind::Lifetime),
+        67 => Some(NodeKind::Annotation),
+        68 => Some(NodeKind::Modifier),
+        69 => Some(NodeKind::GoStatement),
+        70 => Some(NodeKind::DeferStatement),
+        71 => Some(NodeKind::SelectStatement),
+        72 => Some(NodeKind::Loop),
+        73 => Some(NodeKind::MacroDefinition),
+        74 => Some(NodeKind::MacroCall),
+        75 => Some(NodeKind::Preprocessor),
+        76 => Some(NodeKind::TemplateDeclaration),
+        77 => Some(NodeKind::Synchronized),
+        78 => Some(NodeKind::Lock),
+        79 => Some(NodeKind::Goto),
+        80 => Some(NodeKind::TemplateLiteral),
+        81 => Some(NodeKind::Property),
+        82 => Some(NodeKind::TypeCast),
         KIND_OTHER_CODE => Some(NodeKind::Other(payload)),
         _ => None,
     }

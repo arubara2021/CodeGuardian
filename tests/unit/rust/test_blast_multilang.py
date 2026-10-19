@@ -131,9 +131,7 @@ SAME_FILE_WORKING = [
     "language,suffix,source,target_qualified_name,expected_caller",
     SAME_FILE_WORKING,
 )
-def test_same_file_call_resolves(
-    language, suffix, source, target_qualified_name, expected_caller
-):
+def test_same_file_call_resolves(language, suffix, source, target_qualified_name, expected_caller):
     data = _build([(f"main{suffix}", language, source)])
     result = _native().compute_blast(data, f"main{suffix}", target_qualified_name)
     caller_names = {c["qualified_name"] for c in result["direct_callers"]}
@@ -285,9 +283,7 @@ CROSS_FILE_KNOWN_GAP = [
     "language,suffix,defs_source,use_source,target_qualified_name",
     CROSS_FILE_KNOWN_GAP,
 )
-def test_cross_file_call_resolves(
-    language, suffix, defs_source, use_source, target_qualified_name
-):
+def test_cross_file_call_resolves(language, suffix, defs_source, use_source, target_qualified_name):
     sources = [
         (f"defs{suffix}", language, defs_source),
         (f"use{suffix}", language, use_source),
@@ -296,8 +292,7 @@ def test_cross_file_call_resolves(
     result = _native().compute_blast(data, f"defs{suffix}", target_qualified_name)
     caller_names = {c["qualified_name"] for c in result["direct_callers"]}
     assert caller_names, (
-        f"{language}: cross-file call to {target_qualified_name!r} "
-        f"resolved to no callers"
+        f"{language}: cross-file call to {target_qualified_name!r} " f"resolved to no callers"
     )
 
 
@@ -353,9 +348,7 @@ LONE_FUNCTION_WORKING = [
     "language,suffix,source,target_qualified_name",
     LONE_FUNCTION_WORKING,
 )
-def test_lone_function_has_zero_callers(
-    language, suffix, source, target_qualified_name
-):
+def test_lone_function_has_zero_callers(language, suffix, source, target_qualified_name):
     data = _build([(f"main{suffix}", language, source)])
     result = _native().compute_blast(data, f"main{suffix}", target_qualified_name)
     assert result["direct_callers"] == []
@@ -393,9 +386,7 @@ LONE_FUNCTION_KNOWN_GAP = [
     "language,suffix,source,target_qualified_name",
     LONE_FUNCTION_KNOWN_GAP,
 )
-def test_lone_function_has_zero_callers_c_family(
-    language, suffix, source, target_qualified_name
-):
+def test_lone_function_has_zero_callers_c_family(language, suffix, source, target_qualified_name):
     data = _build([(f"main{suffix}", language, source)])
     result = _native().compute_blast(data, f"main{suffix}", target_qualified_name)
     assert result["direct_callers"] == []
@@ -419,7 +410,7 @@ def test_eight_languages_build_and_blast_independently():
     data = _build(sources)
     header = _native().graph_summary(data)
     assert header["file_count"] == 8
-    for language, suffix, target in [
+    for _language, suffix, target in [
         ("python", ".py", "target"),
         ("typescript", ".ts", "target"),
         ("javascript", ".js", "target"),

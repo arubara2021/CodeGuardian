@@ -271,4 +271,3 @@ Phase 9 — Plugins. Six blocks, twenty-five files per `BUILD_ORDER.md`:
 - B-045: `plugins_bundled/tools/code_analysis/plugin.py`, `plugins_bundled/tools/code_analysis/pyproject.toml`, `plugins_bundled/reporters/__init__.py`, `plugins_bundled/reporters/sarif_reporter/plugin.py`, `plugins_bundled/reporters/sarif_reporter/pyproject.toml`
 - B-046: `tests/contracts/test_language_contract.py`, `test_tool_contract.py`, `test_verifier_contract.py`, `test_reporter_contract.py`
 - B-047: `tests/integration/test_plugin_loading.py`
-

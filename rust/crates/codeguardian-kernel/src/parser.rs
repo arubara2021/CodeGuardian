@@ -1,13 +1,11 @@
 //! Tree-sitter wrapper. The only module that knows tree-sitter exists.
 //!
-//! `parse_file` takes a language and a source string, looks up the
-//! language's `LanguageModule` via `langs::dispatch`, runs the
-//! appropriate tree-sitter grammar, and converts the resulting tree
-//! into a flat `AstArena`. The conversion is a single preorder walk.
-//! Byte offsets, rows, columns, and the tree structure are copied
-//! across unchanged; the `NodeKind` is classified by the language
-//! module, with `NodeKind::Other(raw_id)` as the fallback for any
-//! syntax the module does not name.
+//! `parse_file` takes a `GrammarSource`, a source string, and produces
+//! a flat `AstArena`. The conversion is a single preorder walk. Byte
+//! offsets, rows, columns, and the tree structure are copied across
+//! unchanged; the `NodeKind` is classified by the grammar source, with
+//! `NodeKind::Other(raw_id)` as the fallback for any syntax the source
+//! does not name.
 //!
 //! A malformed source file is not an error. Tree-sitter inserts ERROR
 //! and MISSING nodes to repair the parse, and those nodes are preserved
@@ -18,13 +16,10 @@
 //! The `Language` type lives in `langs` and is re-exported here so that
 //! `crate::parser::Language` continues to resolve for internal callers
 //! that import it from this module. The canonical path for external
-//! callers is `codeguardian_kernel::Language`.
-//!
-//! The invariant this module protects is that every byte offset in
-//! every `AstNode` is within the source length. A grammar that produces
-//! a node past EOF is a bug in the grammar or in tree-sitter, and this
-//! module does not attempt to repair it; the resulting offsets are
-//! checked before use elsewhere.
+//! callers is `codeguardian_kernel::Language`. `parse_file` itself does
+//! not take `Language`; the caller resolves a `GrammarSource` from
+//! either `langs::dispatch` (built-ins) or `langs::dispatch_by_name`
+//! (built-ins plus runtime grammars) and passes that.
 
 use thiserror::Error;
 use tree_sitter::{Node as TsNode, Parser};
@@ -32,16 +27,16 @@ use tree_sitter::{Node as TsNode, Parser};
 use crate::ast::{
     AstArena, AstNode, FLAG_ERROR, FLAG_EXTRA, FLAG_MISSING, FLAG_NAMED, NO_NODE,
 };
-use crate::langs::{dispatch, LanguageModule};
+use crate::langs::GrammarSource;
 
 pub use crate::langs::Language;
 
 /// Maximum AST depth accepted by the parser.
 ///
-/// Real-world source is shallow. A Python file nested more than a
-/// hundred levels deep is malformed. The limit exists so that a
-/// pathological input cannot cause a stack overflow in the recursive
-/// conversion walk.
+/// Real-world source is shallow. A file nested more than a hundred
+/// levels deep is malformed. The limit exists so that a pathological
+/// input cannot cause a stack overflow in the recursive conversion
+/// walk.
 pub const MAX_DEPTH: u32 = 500;
 
 /// Every way parsing can fail catastrophically.
@@ -55,30 +50,45 @@ pub enum KernelError {
     /// This is a build error: the grammar crate was compiled against a
     /// tree-sitter version the parser rejects.
     #[error("tree-sitter parser initialization failed for {language}")]
-    ParserInit { language: &'static str },
+    ParserInit {
+        /// The language name the caller supplied.
+        language: String,
+    },
 
     /// Tree-sitter returned no tree. The current code path cannot
     /// trigger this, but the error exists so the call site does not
     /// need an unwrap.
     #[error("tree-sitter returned no tree for {language}")]
-    ParseFailed { language: &'static str },
+    ParseFailed {
+        /// The language name the caller supplied.
+        language: String,
+    },
 
     /// The source exceeds 4 GiB, which is the maximum byte offset the
     /// AST arena can represent in a u32.
     #[error("source length {len} exceeds the 4 GiB limit for u32 byte offsets")]
-    SourceTooLarge { len: usize },
+    SourceTooLarge {
+        /// The offending source length.
+        len: usize,
+    },
 
     /// The AST is deeper than `MAX_DEPTH`. The conversion walk refuses
     /// to recurse further so it cannot overflow the stack.
     #[error("AST depth {depth} exceeds the limit of {limit}")]
-    TreeTooDeep { depth: u32, limit: u32 },
+    TreeTooDeep {
+        /// The depth the walk reached.
+        depth: u32,
+        /// The configured limit.
+        limit: u32,
+    },
 
-    /// The language is recognized by `Language::from_name` but no
-    /// `LanguageModule` is wired into `langs::dispatch` for it. This is
-    /// the state that holds for a language declared in the enum before
-    /// its module submodule has been written.
-    #[error("language {language} is recognized but its module is not yet implemented")]
-    LanguageNotImplemented { language: &'static str },
+    /// The language name is not recognized by any built-in module and
+    /// no runtime grammar is registered for it.
+    #[error("unrecognized language: {language}")]
+    LanguageNotImplemented {
+        /// The language name.
+        language: String,
+    },
 }
 
 /// The result of parsing one file.
@@ -92,7 +102,7 @@ pub struct ParseResult {
     pub had_errors: bool,
 }
 
-/// Parse one source file with the given language.
+/// Parse one source file with the given grammar source.
 ///
 /// Returns a `ParseResult` whose arena contains every node of the file,
 /// including error-recovery nodes. The call fails only on catastrophic
@@ -101,26 +111,27 @@ pub struct ParseResult {
 /// The conversion walk is recursive with a depth cap. The cap is
 /// `MAX_DEPTH`; exceeding it returns `KernelError::TreeTooDeep` rather
 /// than overflowing the stack.
-pub fn parse_file(language: Language, source: &str) -> Result<ParseResult, KernelError> {
+pub fn parse_file(
+    source_module: &dyn GrammarSource,
+    source: &str,
+) -> Result<ParseResult, KernelError> {
     if source.len() > u32::MAX as usize {
         return Err(KernelError::SourceTooLarge { len: source.len() });
     }
 
-    let module = dispatch(language).ok_or(KernelError::LanguageNotImplemented {
-        language: language.name(),
-    })?;
+    let language_name = source_module.name().to_string();
 
     let mut parser = Parser::new();
     parser
-        .set_language(&module.grammar())
+        .set_language(&source_module.grammar())
         .map_err(|_| KernelError::ParserInit {
-            language: language.name(),
+            language: language_name.clone(),
         })?;
 
     let tree = parser
         .parse(source, None)
         .ok_or(KernelError::ParseFailed {
-            language: language.name(),
+            language: language_name,
         })?;
 
     let mut arena = AstArena::new();
@@ -128,7 +139,7 @@ pub fn parse_file(language: Language, source: &str) -> Result<ParseResult, Kerne
     let root = convert_node(
         tree.root_node(),
         source,
-        module,
+        source_module,
         &mut arena,
         NO_NODE,
         0,
@@ -142,15 +153,17 @@ pub fn parse_file(language: Language, source: &str) -> Result<ParseResult, Kerne
     })
 }
 
-/// Parse a batch of files.
+/// Parse a batch of files. Each entry is `(grammar_source, source)`.
 ///
 /// The batch succeeds only if every file parses. A single catastrophic
 /// failure short-circuits the batch and returns that error. A file with
 /// ERROR nodes still succeeds; the caller inspects `had_errors`.
-pub fn parse_files(inputs: &[(Language, &str)]) -> Result<Vec<ParseResult>, KernelError> {
+pub fn parse_files(
+    inputs: &[(&dyn GrammarSource, &str)],
+) -> Result<Vec<ParseResult>, KernelError> {
     inputs
         .iter()
-        .map(|(language, source)| parse_file(*language, source))
+        .map(|&(module, source)| parse_file(module, source))
         .collect()
 }
 
@@ -163,7 +176,7 @@ pub fn parse_files(inputs: &[(Language, &str)]) -> Result<Vec<ParseResult>, Kern
 fn convert_node(
     ts_node: TsNode<'_>,
     source: &str,
-    module: &dyn LanguageModule,
+    module: &dyn GrammarSource,
     arena: &mut AstArena,
     parent: u32,
     depth: u32,

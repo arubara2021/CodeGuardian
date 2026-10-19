@@ -96,7 +96,7 @@ fn callers_to_list<'py>(py: Python<'py>, callers: &[Caller]) -> PyResult<Bound<'
         let dict = PyDict::new(py);
         dict.set_item("node_id", caller.node_id)?;
         dict.set_item("qualified_name", &caller.qualified_name)?;
-        dict.set_item("file_path", &caller.file_path)?;
+        dict.set_item("path", &caller.file_path)?;
         dict.set_item("line", caller.line)?;
         dict.set_item("depth", caller.depth)?;
         dict.set_item(

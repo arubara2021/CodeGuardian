@@ -2,24 +2,17 @@
 //!
 //! The symbol table records the named declarations a caller needs to
 //! resolve a call site: functions, classes, methods, and parameters.
-//! It does not record imports, local variables, or references. A call
-//! to `foo.bar()` where `foo` is an imported module resolves to nothing
-//! in this file; cross-file resolution is a later concern.
+//! It does not record imports, local variables, or references.
 //!
-//! The invariant this module protects is that `lookup_by_simple_name`
-//! never fails to report ambiguity. A simple name that appears in more
-//! than one place returns all matches; the caller decides whether the
-//! ambiguity is resolvable. A qualified name that appears more than
-//! once is a definition error and the table records the shadowing by
-//! returning the last definition.
+//! Resolution is scoped. A call site can ask for a symbol by simple
+//! name, by qualified name, by class scope, or by file scope. The
+//! simple-name lookup reports every match so the caller decides
+//! whether the ambiguity is resolvable; the scoped lookups return at
+//! most one symbol because they narrow by enclosing class or file.
 //!
 //! The set of "class-like" scope kinds includes every construct that
-//! groups methods across the nine supported languages: Python and
-//! TypeScript classes, Rust structs, interfaces, and traits, Java
-//! classes and interfaces, Go structs, C# classes and structs, and C
-//! and C++ structs and unions. A method nested inside any of these
-//! receives a dotted qualified name that includes the containing
-//! type.
+//! groups methods across the supported languages: classes, structs,
+//! interfaces, traits, and enums.
 
 use std::collections::HashMap;
 
@@ -42,9 +35,7 @@ pub enum SymbolKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
     /// The dot-joined path from the outermost enclosing named scope to
-    /// this symbol. For a top-level function `parse_config`, this is
-    /// `parse_config`. For a method `parse` inside class `Parser`, this
-    /// is `Parser.parse`.
+    /// this symbol.
     pub qualified_name: String,
     /// The symbol's own name, without any enclosing scope.
     pub simple_name: String,
@@ -144,13 +135,46 @@ impl SymbolTable {
             })
             .unwrap_or_default()
     }
+
+    /// Return the number of symbols with the given simple name.
+    ///
+    /// Used by call-site resolution to decide whether a simple-name
+    /// lookup is unambiguous without materialising the full vector.
+    pub fn count_simple_name(&self, name: &str) -> usize {
+        self.by_simple.get(name).map(|ids| ids.len()).unwrap_or(0)
+    }
+
+    /// Return the method named `method_name` defined inside the
+    /// class-like scope whose simple name is `class_name`, or `None`.
+    ///
+    /// The lookup is by qualified name (`<class_name>.<method_name>`),
+    /// so it does not confuse a method on one class with a method of
+    /// the same name on another class. This is what makes
+    /// `self.foo()` resolvable inside class `Foo`.
+    pub fn lookup_in_class(&self, class_name: &str, method_name: &str) -> Option<&Symbol> {
+        let qualified = format!("{class_name}.{method_name}");
+        self.lookup_by_qualified_name(&qualified)
+    }
+
+    /// Return the symbol with `simple_name` defined in `file_id`, or
+    /// `None`.
+    ///
+    /// When more than one definition of `simple_name` exists in the
+    /// file, the last one wins, matching Python's shadowing semantics.
+    pub fn lookup_in_file(&self, file_id: u32, simple_name: &str) -> Option<&Symbol> {
+        let ids = self.by_file.get(&file_id)?;
+        let mut result: Option<&Symbol> = None;
+        for &idx in ids {
+            let symbol = self.symbols.get(idx)?;
+            if symbol.simple_name == simple_name {
+                result = Some(symbol);
+            }
+        }
+        result
+    }
 }
 
 /// Extract every symbol from the subtree rooted at `root`.
-///
-/// Walks the AST once in preorder. Each function, class-like declaration,
-/// method, or parameter node with a name produces one symbol. Anonymous
-/// lambdas and unnamed parameters are skipped.
 pub fn extract_symbols(arena: &AstArena, root: u32, file_id: u32) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     for node_id in arena.walk_preorder(root) {
@@ -180,15 +204,6 @@ pub fn extract_symbols(arena: &AstArena, root: u32, file_id: u32) -> Vec<Symbol>
     symbols
 }
 
-/// Map a syntax kind to a symbol kind, or `None` if the node does not
-/// declare a symbol.
-///
-/// A function nested inside a class-like scope is a method.
-/// `NodeKind::Impl` is intentionally not classified as a symbol: an
-/// `impl Foo` block names the type it implements, not a new symbol, so
-/// the impl node contributes a scope but no entry. Its methods are
-/// classified as `Method` because `is_inside_class` walks through
-/// `Impl` when computing the enclosing scope.
 fn classify_symbol(arena: &AstArena, node_id: u32, kind: NodeKind) -> Option<SymbolKind> {
     match kind {
         NodeKind::FunctionDef => {
@@ -210,13 +225,6 @@ fn classify_symbol(arena: &AstArena, node_id: u32, kind: NodeKind) -> Option<Sym
     }
 }
 
-/// Return whether `node_id` is lexically enclosed by a class-like body.
-///
-/// The walk stops at the first function or method boundary, so a
-/// function nested inside a method inside a class is a function, not a
-/// method. `Impl` blocks count as class-like for the purpose of this
-/// check so that Rust methods inside `impl Foo { ... }` are classified
-/// as methods rather than top-level functions.
 fn is_inside_class(arena: &AstArena, node_id: u32) -> bool {
     let mut current = arena.parent_of(node_id);
     while let Some(id) = current {
@@ -240,7 +248,6 @@ fn is_inside_class(arena: &AstArena, node_id: u32) -> bool {
     false
 }
 
-/// Build the qualified name by walking up the parent chain.
 fn qualified_name_of(arena: &AstArena, node_id: u32, simple_name: &str) -> String {
     let mut parts: Vec<&str> = vec![simple_name];
     let mut current = arena.parent_of(node_id);
@@ -260,13 +267,6 @@ fn qualified_name_of(arena: &AstArena, node_id: u32, simple_name: &str) -> Strin
     parts.join(".")
 }
 
-/// Return whether a syntax kind introduces a named lexical scope.
-///
-/// `NodeKind::Impl` is omitted because tree-sitter's Rust grammar does
-/// not expose a `name` field on `impl_item`. Its methods still qualify
-/// under `is_inside_class`, but the impl block itself contributes no
-/// name segment. A future refinement that extracts the impl's target
-/// type would add `Impl` here.
 fn is_named_scope(kind: NodeKind) -> bool {
     matches!(
         kind,

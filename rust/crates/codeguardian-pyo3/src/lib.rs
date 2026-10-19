@@ -8,6 +8,11 @@
 //! bindings that read the CPG do the same. Policy bindings that only
 //! validate integers do not need to release the GIL because their work
 //! is trivial.
+//!
+//! `load_grammar` and `list_languages` were added in Phase 9 to
+//! support runtime tree-sitter grammar loading. `load_grammar` opens a
+//! shared library and registers a grammar; `list_languages` reports
+//! every language the kernel can currently parse.
 
 use pyo3::prelude::*;
 
@@ -16,7 +21,9 @@ mod kernel;
 mod policy;
 
 use crate::blast::compute_blast;
-use crate::kernel::{build_graph, graph_summary, kernel_version};
+use crate::kernel::{
+    build_graph, graph_summary, kernel_version, list_languages, load_grammar,
+};
 use crate::policy::{check_plugin_permissions, check_sandbox_spec, detect_host_limits};
 
 pyo3::create_exception!(_native, KernelError, pyo3::exceptions::PyException);
@@ -41,6 +48,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(check_sandbox_spec, module)?)?;
     module.add_function(wrap_pyfunction!(check_plugin_permissions, module)?)?;
     module.add_function(wrap_pyfunction!(detect_host_limits, module)?)?;
+    module.add_function(wrap_pyfunction!(load_grammar, module)?)?;
+    module.add_function(wrap_pyfunction!(list_languages, module)?)?;
     module.add("KernelError", module.py().get_type::<KernelError>())?;
     Ok(())
 }

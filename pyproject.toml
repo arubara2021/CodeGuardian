@@ -113,7 +113,22 @@ select = [
 ignore = [
     # Line length is enforced by the formatter, not the linter.
     "E501",
+    # UP042: str, Enum -> StrEnum. Functionally identical on Python 3.12.
+    # Lives in Phase 1 accepted files; changing them is a Rule 1 escalation
+    # with no behavioral benefit. Deferred to a Phase 1 cleanup if ever.
+    "UP042",
+    # UP047: PEP 695 generic syntax. Python 3.12+ only. Same Phase 1
+    # Rule 1 concern as UP042.
+    "UP047",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Plugin manifests are intentional read-only class-level dicts consumed
+# by the discovery protocol via getattr(cls, "__manifest__"). Annotating
+# them as ClassVar would be technically correct but adds no safety, since
+# the dicts are never reassigned. Same pattern as __all__ in a module.
+"python/codeguardian/plugins_bundled/**/plugin.py" = ["RUF012"]
+"tests/integration/test_plugin_loading.py" = ["RUF012"]
 
 [tool.ruff.format]
 quote-style = "double"

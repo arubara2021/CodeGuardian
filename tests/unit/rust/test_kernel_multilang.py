@@ -227,7 +227,7 @@ def test_language_produces_required_kinds(language, suffix, source, required_kin
     present = {n["kind_code"] for n in graph["nodes"]}
     missing = [kind for kind in required_kinds if kind not in present]
     assert not missing, (
-        f"{language}: missing kind codes {missing}; " f"present codes are {sorted(present)}"
+        f"{language}: missing kind codes {missing}; present codes are {sorted(present)}"
     )
 
 

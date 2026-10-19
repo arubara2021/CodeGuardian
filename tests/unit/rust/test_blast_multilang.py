@@ -292,7 +292,7 @@ def test_cross_file_call_resolves(language, suffix, defs_source, use_source, tar
     result = _native().compute_blast(data, f"defs{suffix}", target_qualified_name)
     caller_names = {c["qualified_name"] for c in result["direct_callers"]}
     assert caller_names, (
-        f"{language}: cross-file call to {target_qualified_name!r} " f"resolved to no callers"
+        f"{language}: cross-file call to {target_qualified_name!r} resolved to no callers"
     )
 
 

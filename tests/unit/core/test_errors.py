@@ -91,9 +91,9 @@ def test_retry_policy_values_are_policies():
 def test_retry_policy_fields_agree():
     """retryable must be True if and only if max_retries is greater than zero."""
     for policy in taxonomy.RETRY_POLICY.values():
-        assert policy.retryable is (
-            policy.max_retries > 0
-        ), "RetryPolicy has inconsistent retryable and max_retries fields"
+        assert policy.retryable is (policy.max_retries > 0), (
+            "RetryPolicy has inconsistent retryable and max_retries fields"
+        )
 
 
 def test_overrides_replace_category_default():

@@ -53,7 +53,7 @@ _HAS_DOCKER = shutil.which("docker") is not None
 def bridge():
     """Yield a started ``JSONRPCBridge`` to the daemon."""
     if _BINARY is None:
-        pytest.skip("rpcd binary not built; run: " "cargo build --release -p codeguardian-rpcd")
+        pytest.skip("rpcd binary not built; run: cargo build --release -p codeguardian-rpcd")
     with JSONRPCBridge([_BINARY]) as b:
         yield b
 

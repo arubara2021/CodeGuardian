@@ -25,7 +25,8 @@ use crate::cpg::{
     cfg_edge_kind_to_edge_kind, collect_functions, intern_string_into, pdg_edge_kind_to_edge_kind,
     CodePropertyGraph, CpgEdge, CpgError, CpgNode, EdgeKind, SourceFile,
 };
-use crate::parser::parse_file;
+use crate::langs::dispatch_by_name;
+use crate::parser::{parse_file, KernelError};
 use crate::pdg::build_pdg;
 use crate::symbol_table::{extract_symbols, SymbolTable};
 
@@ -95,7 +96,12 @@ impl CodePropertyGraph {
         self.nodes = compacted;
         self.edges = kept;
 
-        let parsed = parse_file(changed.language, &changed.content)?;
+        let module = dispatch_by_name(&changed.language).ok_or_else(|| {
+            CpgError::Parse(KernelError::LanguageNotImplemented {
+                language: changed.language.clone(),
+            })
+        })?;
+        let parsed = parse_file(module, &changed.content)?;
         let offset = self.nodes.len() as u32;
 
         let raw_symbols = extract_symbols(&parsed.arena, parsed.root, file_id);
@@ -143,13 +149,9 @@ impl CodePropertyGraph {
                 continue;
             }
             let callee_id = if call.callee_node_id != NO_NODE {
-                Some(call.callee_node_id)
+                call.callee_node_id
             } else {
-                resolve_global(&call.callee_name, &global_index)
-            };
-            let callee_id = match callee_id {
-                Some(id) => id,
-                None => continue,
+                resolve_global(&call.callee_name, &global_index).unwrap_or(NO_NODE)
             };
             let label =
                 intern_string_into(&call.callee_name, &mut self.strings, &mut self.string_ids);
@@ -200,20 +202,17 @@ impl CodePropertyGraph {
                 Some(text) => text.clone(),
                 None => continue,
             };
-            let matches = match new_symbol_map.get(&label_text) {
-                Some(list) => list,
-                None => continue,
-            };
-            if matches.len() != 1 {
-                continue;
-            }
             let new_src = match remap.get(&external_src) {
                 Some(&id) => id,
                 None => continue,
             };
+            let dst = match new_symbol_map.get(&label_text) {
+                Some(list) if list.len() == 1 => list[0],
+                _ => NO_NODE,
+            };
             self.edges.push(CpgEdge {
                 src: new_src,
-                dst: matches[0],
+                dst,
                 kind,
                 label,
             });

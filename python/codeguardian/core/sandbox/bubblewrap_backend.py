@@ -99,8 +99,7 @@ class BubblewrapBackend:
             except UnicodeDecodeError as exc:
                 raise CodeGuardianError(
                     ErrorCode.SANDBOX_EXEC_FAILED,
-                    "stdin must be UTF-8; the v1 sandbox protocol carries "
-                    "stdin as a JSON string",
+                    "stdin must be UTF-8; the v1 sandbox protocol carries stdin as a JSON string",
                     details={"length": len(stdin)},
                 ) from exc
         try:

@@ -2,31 +2,21 @@
 //!
 //! Direct callers are the functions with a `Call` edge into the target.
 //! Transitive callers are every function reachable by walking reverse
-//! `Call` edges from the direct callers, up to a cap. The cap exists
-//! because a utility function called from every corner of a large
-//! repository can have tens of thousands of transitive callers, and
-//! the resulting report would be unusable at that size.
+//! `Call` edges from the direct callers, up to a cap.
 //!
-//! The walk uses a visited set so a cyclic call graph terminates. The
-//! target itself is never reported as its own caller, even if a mutual
-//! recursion exists.
-//!
-//! The invariant this module protects is that every returned `Caller`
-//! names a node that exists in the graph. A dangling edge is skipped,
-//! not reported.
+//! Unresolved call sites are calls that could not be attributed to a
+//! specific target because the kernel could not resolve the callee
+//! name. They carry `dst = NO_NODE` in the graph and are counted
+//! separately so a report never says "zero callers" when the truth is
+//! "zero resolved callers, N unresolved call sites".
 
 use std::collections::{HashSet, VecDeque};
 
-use codeguardian_kernel::{CodePropertyGraph, EdgeKind};
+use codeguardian_kernel::{CodePropertyGraph, EdgeKind, NO_NODE};
 
 use crate::qualified_name_of;
 
 /// The maximum number of transitive callers returned.
-///
-/// Chosen so a report on a large repository stays within a size that a
-/// CLI can render and a human can review. When the cap is reached, the
-/// returned vector holds exactly this many entries and the truncated
-/// flag is set.
 pub const MAX_TRANSITIVE_CALLERS: usize = 2000;
 
 /// Whether a caller was reached directly or through intermediate
@@ -52,16 +42,12 @@ pub struct Caller {
     /// One-based line number of the caller's definition.
     pub line: u32,
     /// How many call-graph steps separate the caller from the target.
-    /// Direct callers have depth 1.
     pub depth: u32,
     /// Whether the caller was reached directly or transitively.
     pub call_kind: CallKind,
 }
 
 /// Return every function with a direct `Call` edge into the target.
-///
-/// The result is sorted by node id so the output is deterministic. A
-/// caller that appears twice through a duplicate edge is reported once.
 pub fn compute_direct_callers(cpg: &CodePropertyGraph, target_node_id: u32) -> Vec<Caller> {
     let mut seen: HashSet<u32> = HashSet::new();
     let mut result: Vec<Caller> = Vec::new();
@@ -90,13 +76,6 @@ pub fn compute_direct_callers(cpg: &CodePropertyGraph, target_node_id: u32) -> V
 
 /// Return every function reachable from the target by walking reverse
 /// `Call` edges, up to `cap` entries.
-///
-/// The result is sorted by `(depth, node_id)` so the output is
-/// deterministic. The returned bool is true when the walk stopped
-/// because `cap` was reached and there were more callers to visit.
-///
-/// `cap` is not clamped. A caller that passes a cap of zero receives an
-/// empty vector and a truncated flag of false.
 pub fn compute_transitive_callers(
     cpg: &CodePropertyGraph,
     target_node_id: u32,
@@ -147,6 +126,47 @@ pub fn compute_transitive_callers(
 
     result.sort_by_key(|caller| (caller.depth, caller.node_id));
     (result, truncated)
+}
+
+/// Return the number of unresolved call sites whose callee name could
+/// be an alias for `target_node_id`.
+///
+/// An unresolved call site is a `Call` edge with `dst = NO_NODE`. The
+/// count is filtered by the target's simple name so a report on
+/// `Session.request` counts unresolved calls to `.request()` and not
+/// unrelated unresolved calls to other methods. The target's own
+/// definition is excluded: a function that calls itself recursively
+/// and cannot be resolved does not count as an external caller.
+///
+/// The count is a lower-bound estimate. A call site whose callee name
+/// happens to match a method of the target's class but is really a
+/// call to a different class's method of the same name is counted. The
+/// user reads this alongside the resolved direct caller list and makes
+/// the final call.
+pub fn count_unresolved_call_sites(
+    cpg: &CodePropertyGraph,
+    target_node_id: u32,
+) -> usize {
+    let target = match cpg.node(target_node_id) {
+        Some(n) => n,
+        None => return 0,
+    };
+    let simple_name = match cpg.string(target.name) {
+        Some(s) => s,
+        None => return 0,
+    };
+    cpg.edges_to(NO_NODE)
+        .iter()
+        .filter(|&&edge_id| {
+            let edge = match cpg.edge(edge_id) {
+                Some(e) => e,
+                None => return false,
+            };
+            edge.kind == EdgeKind::Call
+                && edge.src != target_node_id
+                && cpg.string(edge.label) == Some(simple_name)
+        })
+        .count()
 }
 
 /// Build a `Caller` from a node id. Returns `None` if the node does not

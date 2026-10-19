@@ -128,6 +128,12 @@ class ErrorCode(str, Enum):
     PLUGIN_MANIFEST_INVALID = codes.PLUGIN_MANIFEST_INVALID
     PLUGIN_PERMISSION_DENIED = codes.PLUGIN_PERMISSION_DENIED
     PLUGIN_DISABLED = codes.PLUGIN_DISABLED
+    PLUGIN_TIMEOUT = codes.PLUGIN_TIMEOUT
+
+    GRAMMAR_LIBRARY_NOT_FOUND = codes.GRAMMAR_LIBRARY_NOT_FOUND
+    GRAMMAR_SYMBOL_NOT_FOUND = codes.GRAMMAR_SYMBOL_NOT_FOUND
+    GRAMMAR_ABI_INCOMPATIBLE = codes.GRAMMAR_ABI_INCOMPATIBLE
+    GRAMMAR_ALREADY_LOADED = codes.GRAMMAR_ALREADY_LOADED
 
     NET_TIMEOUT = codes.NET_TIMEOUT
     NET_UNREACHABLE = codes.NET_UNREACHABLE
@@ -236,6 +242,11 @@ CATEGORY_MAP: Mapping[ErrorCode, ErrorCategory] = MappingProxyType(
         ErrorCode.PLUGIN_MANIFEST_INVALID: ErrorCategory.PLUGIN,
         ErrorCode.PLUGIN_PERMISSION_DENIED: ErrorCategory.PLUGIN,
         ErrorCode.PLUGIN_DISABLED: ErrorCategory.PLUGIN,
+        ErrorCode.PLUGIN_TIMEOUT: ErrorCategory.PLUGIN,
+        ErrorCode.GRAMMAR_LIBRARY_NOT_FOUND: ErrorCategory.PLUGIN,
+        ErrorCode.GRAMMAR_SYMBOL_NOT_FOUND: ErrorCategory.PLUGIN,
+        ErrorCode.GRAMMAR_ABI_INCOMPATIBLE: ErrorCategory.PLUGIN,
+        ErrorCode.GRAMMAR_ALREADY_LOADED: ErrorCategory.PLUGIN,
         ErrorCode.NET_TIMEOUT: ErrorCategory.NETWORK,
         ErrorCode.NET_UNREACHABLE: ErrorCategory.NETWORK,
         ErrorCode.NET_DNS_FAILED: ErrorCategory.NETWORK,
@@ -285,6 +296,12 @@ RETRY_POLICY_OVERRIDES: Mapping[ErrorCode, RetryPolicy] = MappingProxyType(
         ErrorCode.STORAGE_GRAPH_CORRUPTED: RetryPolicy(
             retryable=False, max_retries=0, backoff=Backoff.NONE
         ),
+        # PLUGIN_TIMEOUT is already covered by the PLUGIN category default,
+        # which is non-retryable. The explicit override pins that behavior:
+        # retrying a hung plugin burns another full timeout and disables
+        # the plugin anyway, so a retry never succeeds and only costs
+        # wall-clock time.
+        ErrorCode.PLUGIN_TIMEOUT: RetryPolicy(retryable=False, max_retries=0, backoff=Backoff.NONE),
     }
 )
 

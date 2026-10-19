@@ -1,35 +1,48 @@
 //! Kernel bindings for the CodeGuardian native extension.
 //!
-//! Three functions call into `codeguardian_kernel` and translate its
+//! Five functions call into `codeguardian_kernel` and translate its
 //! errors into `_native.KernelError` exceptions. Every failure the
 //! kernel can produce is classified into a string code that the Python
 //! side maps onto an existing `CodeGuardianError` code.
 //!
-//! `map_cpg_error` and `build_exception` are `pub(crate)` so other
-//! binding modules — blast and policy — can reuse the same error
-//! mapping and the same exception class. There is one exception type
-//! for every binding in this crate.
+//! `map_cpg_error`, `map_core_kernel_error`, `map_grammar_load_error`,
+//! and `build_exception` are `pub(crate)` so other binding modules —
+//! blast and policy — can reuse the same error mapping and the same
+//! exception class. There is one exception type for every binding in
+//! this crate.
 //!
 //! The binding surface is deliberately small. `build_graph` returns
 //! serialized bytes rather than an in-memory handle, and
 //! `graph_summary` reads bytes rather than a path, so the kernel never
 //! holds Python-visible state.
 //!
-//! Nine languages are recognized by name (with short aliases). A name
-//! that is not recognized raises `ValueError` from the pre-check in
-//! `build_graph`. A name that is recognized but whose `LanguageModule`
-//! is not yet wired into `langs::dispatch` also raises `ValueError`,
-//! with a message that distinguishes the two cases so the caller knows
-//! whether to correct their input or wait for the module.
+//! # Language resolution
+//!
+//! `build_graph` accepts any language name that resolves through
+//! `langs::dispatch_by_name`. That is the eight built-in languages
+//! (with their aliases) plus any runtime grammar registered by a
+//! previous `load_grammar` call. An unrecognized name raises
+//! `ValueError` so the caller sees a user mistake rather than a typed
+//! kernel error.
+//!
+//! # Runtime grammar loading
+//!
+//! `load_grammar` delegates to `codeguardian_kernel::load_and_register`
+//! and translates the four `GrammarLoadError` variants into
+//! `_native.KernelError` exceptions with stable string codes. The
+//! caller is responsible for keeping the loaded grammar's path stable
+//! for the life of the process; the kernel never unloads it.
 
 use std::io::Cursor;
+use std::path::PathBuf;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use codeguardian_kernel::{
-    dispatch, CodePropertyGraph, CpgError, KernelError as CoreKernelError, Language, SourceFile,
+    dispatch_by_name, list_runtime_languages, load_and_register, CodePropertyGraph, CpgError,
+    GrammarLoadError, KernelError as CoreKernelError, SourceFile,
 };
 
 use crate::KernelError;
@@ -44,15 +57,12 @@ pub fn kernel_version() -> String {
 /// serialized wire format.
 ///
 /// `sources` is a list of `(path, language, content)` tuples. The
-/// language must be one of the nine supported names or a recognized
-/// alias: `python`, `typescript`, `javascript`/`js`, `java`, `go`/`golang`,
-/// `rust`/`rs`, `csharp`/`c#`/`cs`, `c`, `cpp`/`c++`/`cxx`.
+/// language is resolved by `langs::dispatch_by_name`: the eight
+/// built-in languages (with aliases), or any runtime grammar registered
+/// by a previous `load_grammar` call.
 ///
-/// A name that is not recognized raises `ValueError` with the
-/// message `unrecognized language: <name>`. A name that is
-/// recognized but whose module is not yet wired raises `ValueError`
-/// with the message `language '<name>' is recognized but not yet
-/// implemented`.
+/// A name that resolves to no module raises `ValueError` with the
+/// message `unrecognized language: <name>`.
 ///
 /// Raises `KernelError` if any source fails to parse catastrophically
 /// or if serialization fails.
@@ -63,22 +73,14 @@ pub fn build_graph(
 ) -> PyResult<Vec<u8>> {
     let mut parsed: Vec<SourceFile> = Vec::with_capacity(sources.len());
     for (path, language_name, content) in sources {
-        let language = match Language::from_name(&language_name) {
-            Some(lang) => lang,
-            None => {
-                return Err(PyValueError::new_err(format!(
-                    "unrecognized language: {language_name}"
-                )));
-            }
-        };
-        if dispatch(language).is_none() {
+        if dispatch_by_name(&language_name).is_none() {
             return Err(PyValueError::new_err(format!(
-                "language '{language_name}' is recognized but not yet implemented"
+                "unrecognized language: {language_name}"
             )));
         }
         parsed.push(SourceFile {
             path,
-            language,
+            language: language_name,
             content,
         });
     }
@@ -130,17 +132,66 @@ pub fn graph_summary<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, P
     Ok(dict)
 }
 
+/// Load a runtime tree-sitter grammar from a shared library.
+///
+/// `language_name` is the canonical name the grammar registers under.
+/// It must not collide with a built-in language name (or alias) and
+/// must not be already registered by a previous call.
+///
+/// `library_path` is the platform-specific shared library:
+/// `libtree_sitter_<name>.so` on Linux, `.dylib` on macOS, and
+/// `tree_sitter_<name>.dll` on Windows.
+///
+/// Raises `KernelError` with a stable `code` attribute for each of the
+/// four failure modes: `GRAMMAR_LIBRARY_NOT_FOUND`,
+/// `GRAMMAR_SYMBOL_NOT_FOUND`, `GRAMMAR_ABI_INCOMPATIBLE`,
+/// `GRAMMAR_ALREADY_LOADED`.
+#[pyfunction]
+pub fn load_grammar(
+    py: Python<'_>,
+    language_name: String,
+    library_path: String,
+) -> PyResult<()> {
+    let path_buf = PathBuf::from(&library_path);
+    py.allow_threads(move || load_and_register(&language_name, &path_buf))
+        .map_err(|err| map_grammar_load_error(py, &err))
+}
+
+/// Return the sorted list of every language name the kernel can parse.
+///
+/// The result contains the eight built-in canonical names plus any
+/// runtime grammar name registered by a `load_grammar` call. Aliases
+/// such as `js`, `golang`, `rs`, `c++`, `cxx` are not listed because
+/// they resolve through the same built-in module.
+#[pyfunction]
+pub fn list_languages(_py: Python<'_>) -> PyResult<Vec<String>> {
+    let mut names: Vec<String> = vec![
+        "c".to_string(),
+        "cpp".to_string(),
+        "go".to_string(),
+        "java".to_string(),
+        "javascript".to_string(),
+        "python".to_string(),
+        "rust".to_string(),
+        "typescript".to_string(),
+    ];
+    names.extend(list_runtime_languages());
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 /// Convert a core kernel error into a `KernelError` exception.
 pub(crate) fn map_core_kernel_error(py: Python<'_>, err: &CoreKernelError) -> PyErr {
     match err {
         CoreKernelError::ParserInit { language } => {
             let details = PyDict::new(py);
-            let _ = details.set_item("language", *language);
+            let _ = details.set_item("language", language.as_str());
             build_exception(py, "PARSER_INIT", &err.to_string(), details.into_any())
         }
         CoreKernelError::ParseFailed { language } => {
             let details = PyDict::new(py);
-            let _ = details.set_item("language", *language);
+            let _ = details.set_item("language", language.as_str());
             build_exception(py, "PARSE_FAILED", &err.to_string(), details.into_any())
         }
         CoreKernelError::SourceTooLarge { len } => {
@@ -156,10 +207,60 @@ pub(crate) fn map_core_kernel_error(py: Python<'_>, err: &CoreKernelError) -> Py
         }
         CoreKernelError::LanguageNotImplemented { language } => {
             let details = PyDict::new(py);
-            let _ = details.set_item("language", *language);
+            let _ = details.set_item("language", language.as_str());
             build_exception(
                 py,
                 "LANGUAGE_NOT_IMPLEMENTED",
+                &err.to_string(),
+                details.into_any(),
+            )
+        }
+    }
+}
+
+/// Convert a grammar load error into a `KernelError` exception.
+pub(crate) fn map_grammar_load_error(py: Python<'_>, err: &GrammarLoadError) -> PyErr {
+    match err {
+        GrammarLoadError::LibraryNotFound { path } => {
+            let details = PyDict::new(py);
+            let _ = details.set_item("path", path.display().to_string());
+            build_exception(
+                py,
+                "GRAMMAR_LIBRARY_NOT_FOUND",
+                &err.to_string(),
+                details.into_any(),
+            )
+        }
+        GrammarLoadError::SymbolNotFound { symbol } => {
+            let details = PyDict::new(py);
+            let _ = details.set_item("symbol", symbol.as_str());
+            build_exception(
+                py,
+                "GRAMMAR_SYMBOL_NOT_FOUND",
+                &err.to_string(),
+                details.into_any(),
+            )
+        }
+        GrammarLoadError::AbiIncompatible {
+            plugin_abi,
+            kernel_abi,
+        } => {
+            let details = PyDict::new(py);
+            let _ = details.set_item("plugin_abi", *plugin_abi);
+            let _ = details.set_item("kernel_abi", *kernel_abi);
+            build_exception(
+                py,
+                "GRAMMAR_ABI_INCOMPATIBLE",
+                &err.to_string(),
+                details.into_any(),
+            )
+        }
+        GrammarLoadError::AlreadyLoaded { language } => {
+            let details = PyDict::new(py);
+            let _ = details.set_item("language", language.as_str());
+            build_exception(
+                py,
+                "GRAMMAR_ALREADY_LOADED",
                 &err.to_string(),
                 details.into_any(),
             )

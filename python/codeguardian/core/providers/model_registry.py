@@ -174,9 +174,7 @@ class AdapterRegistry:
         if cached is not None:
             return cached
         if adapter not in _ADAPTER_CLASSES:
-            _invalid(
-                f"unknown adapter {adapter!r}; known adapters are " f"{sorted(_ADAPTER_CLASSES)}"
-            )
+            _invalid(f"unknown adapter {adapter!r}; known adapters are {sorted(_ADAPTER_CLASSES)}")
         module_name, class_name = _ADAPTER_CLASSES[adapter]
         try:
             module = importlib.import_module(module_name)
@@ -575,9 +573,7 @@ def _resolve_api_key(provider: _ProviderEntry) -> str | None:
         if not provider.api_key_env:
             _invalid(f"provider {provider.name} uses env source but has no api_key_env")
         return os.environ.get(provider.api_key_env)
-    _invalid(
-        f"provider {provider.name} has unknown api_key_source: " f"{provider.api_key_source!r}"
-    )
+    _invalid(f"provider {provider.name} has unknown api_key_source: {provider.api_key_source!r}")
 
 
 def _parse_metadata(data: Any) -> dict[str, _ModelMetadata]:

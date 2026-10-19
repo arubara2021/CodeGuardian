@@ -21,6 +21,10 @@ __all__ = [
     "FILE_NOT_FOUND",
     "FILE_PERMISSION_DENIED",
     "FILE_TOO_LARGE",
+    "GRAMMAR_ABI_INCOMPATIBLE",
+    "GRAMMAR_ALREADY_LOADED",
+    "GRAMMAR_LIBRARY_NOT_FOUND",
+    "GRAMMAR_SYMBOL_NOT_FOUND",
     "MCP_PROTOCOL_ERROR",
     "MCP_SERVER_UNAVAILABLE",
     "MCP_TOOL_ERROR",
@@ -40,6 +44,7 @@ __all__ = [
     "PLUGIN_LOAD_FAILED",
     "PLUGIN_MANIFEST_INVALID",
     "PLUGIN_PERMISSION_DENIED",
+    "PLUGIN_TIMEOUT",
     "PROVIDER_UNAVAILABLE",
     "REPO_AUTH_FAILED",
     "REPO_CLONE_FAILED",
@@ -127,10 +132,36 @@ MCP_TOOL_ERROR = "MCP_TOOL_ERROR"
 # Plugin codes. A plugin failure is isolated by the fault barrier and
 # never propagates as an unhandled exception; it is converted into one of
 # these codes so the rest of the run continues.
+#
+# PLUGIN_TIMEOUT is distinct from PLUGIN_LOAD_FAILED because the fault
+# barrier treats them differently: a load failure is a configuration
+# problem the user can fix by removing the plugin, while a timeout is a
+# runtime defect that only shows up when a specific method is called.
+# Both disable the plugin for the rest of the process, but the message
+# and the remediation differ.
 PLUGIN_LOAD_FAILED = "PLUGIN_LOAD_FAILED"
 PLUGIN_MANIFEST_INVALID = "PLUGIN_MANIFEST_INVALID"
 PLUGIN_PERMISSION_DENIED = "PLUGIN_PERMISSION_DENIED"
 PLUGIN_DISABLED = "PLUGIN_DISABLED"
+PLUGIN_TIMEOUT = "PLUGIN_TIMEOUT"
+
+# Runtime grammar loading codes. These are raised by the kernel's
+# grammar loader when a plugin ships a tree-sitter grammar that the
+# kernel cannot load. They are classified as PLUGIN because the failure
+# is always traceable to what the plugin shipped: a missing file, a
+# missing exported symbol, a grammar compiled against an incompatible
+# tree-sitter ABI, or an attempt to overwrite an already-loaded language.
+#
+# GRAMMAR_ALREADY_LOADED is distinct from the other three because it is
+# the one case where the plugin is not defective: the kernel already has
+# that language (either built in or loaded by an earlier plugin) and the
+# second registration is rejected to prevent an ambiguous dispatch. The
+# plugin author resolves it by declaring a different language name or by
+# not shipping a grammar for a language the kernel already supports.
+GRAMMAR_LIBRARY_NOT_FOUND = "GRAMMAR_LIBRARY_NOT_FOUND"
+GRAMMAR_SYMBOL_NOT_FOUND = "GRAMMAR_SYMBOL_NOT_FOUND"
+GRAMMAR_ABI_INCOMPATIBLE = "GRAMMAR_ABI_INCOMPATIBLE"
+GRAMMAR_ALREADY_LOADED = "GRAMMAR_ALREADY_LOADED"
 
 # Network codes are raised by the HTTP client and the git subprocess
 # wrapper. They are the only category with a retry budget of five

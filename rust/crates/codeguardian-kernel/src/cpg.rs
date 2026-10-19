@@ -53,7 +53,8 @@ use thiserror::Error;
 use crate::ast::{AstArena, NodeKind, NO_NODE};
 use crate::call_graph::{extract_calls, CallEdge};
 use crate::cfg::build_cfg;
-use crate::parser::{parse_file, KernelError, Language};
+use crate::langs::dispatch_by_name;
+use crate::parser::{parse_file, KernelError};
 use crate::pdg::build_pdg;
 use crate::symbol_table::{extract_symbols, SymbolTable};
 
@@ -445,8 +446,10 @@ pub enum CpgError {
 pub struct SourceFile {
     /// The path recorded in the graph's file table.
     pub path: String,
-    /// The language the file is written in.
-    pub language: Language,
+    /// The language the file is written in. Either a built-in name
+    /// (`python`, `typescript`, `javascript`, `java`, `go`, `rust`,
+    /// `c`, `cpp`) or the name of a runtime-loaded grammar.
+    pub language: String,
     /// The file's full source text.
     pub content: String,
 }
@@ -493,7 +496,12 @@ impl CodePropertyGraph {
 
         let mut running: u32 = 0;
         for source in sources.iter() {
-            let parsed = parse_file(source.language, &source.content)?;
+            let module = dispatch_by_name(&source.language).ok_or_else(|| {
+                KernelError::LanguageNotImplemented {
+                    language: source.language.clone(),
+                }
+            })?;
+            let parsed = parse_file(module, &source.content)?;
             paths.push(source.path.clone());
             offsets.push(running);
             running = running.saturating_add(parsed.arena.len() as u32);
@@ -801,8 +809,14 @@ fn build_global_symbols(arenas: &[AstArena], roots: &[u32], offsets: &[u32]) -> 
     table
 }
 
-/// Push one resolved call edge into the edge vector, interning the
-/// callee name as the edge's label.
+/// Push one call edge into the edge vector, interning the callee name
+/// as the edge's label.
+///
+/// A call whose callee could not be resolved is emitted with
+/// `dst = NO_NODE`. This preserves the fact that a call happened even
+/// when the graph cannot point at a specific target. Blast uses
+/// `edges_to(NO_NODE)` plus a label match to report unresolved call
+/// sites per target.
 fn push_call_edge(
     call: &CallEdge,
     offset: u32,
@@ -810,7 +824,7 @@ fn push_call_edge(
     string_ids: &mut HashMap<String, u32>,
     edges: &mut Vec<CpgEdge>,
 ) {
-    if !call.resolved || call.callee_node_id == NO_NODE || call.caller_node_id == NO_NODE {
+    if call.caller_node_id == NO_NODE {
         return;
     }
     let label = intern_string_into(&call.callee_name, strings, string_ids);

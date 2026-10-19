@@ -22,3 +22,4 @@ tree-sitter-rust = { workspace = true }
 tree-sitter-c = { workspace = true }
 tree-sitter-cpp = { workspace = true }
 tracing = { workspace = true }
+libloading = "0.8"

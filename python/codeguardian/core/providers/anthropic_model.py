@@ -280,7 +280,7 @@ def _budget_exhausted(
         )
     return CodeGuardianError(
         ErrorCode.MODEL_CONTEXT_EXCEEDED,
-        f"{provider} consumed the token budget before producing any " "output; increase max_tokens",
+        f"{provider} consumed the token budget before producing any output; increase max_tokens",
         details=details,
     )
 

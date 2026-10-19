@@ -62,3 +62,8 @@ site/
 
 python/codeguardian/_native.so
 python/codeguardian/_native.dylib
+
+# Deep test and context scratch outputs
+sandtest/*.txt
+*_context.txt
+phase9_context.txt

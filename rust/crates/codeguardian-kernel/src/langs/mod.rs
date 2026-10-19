@@ -1,31 +1,38 @@
 //! Language module dispatch.
 //!
-//! Defines the `Language` enum, the `LanguageModule` trait, and the
-//! `dispatch` function that returns the module for a given language.
-//! Each supported language implements `LanguageModule` in its own
-//! submodule (`python.rs`, `typescript.rs`, and so on).
+//! Defines the `Language` enum, the `LanguageModule` trait, the
+//! `GrammarSource` trait, and the two dispatch functions. Each
+//! supported language implements `LanguageModule` in its own submodule
+//! (`python.rs`, `typescript.rs`, and so on).
 //!
-//! The trait has three required methods and two default methods. The
-//! defaults delegate to the language-agnostic code in `symbol_table`
-//! and `call_graph`. A language overrides a default only when its
-//! syntax genuinely differs — for example, a future Ruby module would
-//! override `extract_callee` to handle dynamic dispatch. No language
-//! in the current set needs to override a default.
+//! # Grammar sources
 //!
-//! `dispatch` returns `Option<&dyn LanguageModule>`. A language whose
-//! module is not yet wired returns `None`; the caller (ultimately
-//! `parser::parse_file`) converts `None` into a typed error. This
-//! makes the "language declared but not implemented" case explicit
-//! rather than a silent panic.
+//! The parser and graph builder work against `GrammarSource`, a
+//! narrower trait than `LanguageModule`. `GrammarSource` exposes only
+//! the three methods the parser actually needs — the tree-sitter
+//! grammar handle, the kind classifier, and a name accessor for error
+//! messages. Every `LanguageModule` is a `GrammarSource` by a blanket
+//! implementation. A runtime-loaded grammar is a `GrammarSource` that
+//! is not a `LanguageModule`, because it has no `Language` enum
+//! variant to return from `language()`.
 //!
-//! C# was removed from the enum after `tree-sitter-c-sharp` 0.23.5 was
-//! found to produce a grammar ABI that tree-sitter 0.24 refuses to
+//! Two dispatch functions exist. `dispatch(language)` resolves a
+//! `Language` enum value to a `LanguageModule` and is used by callers
+//! that need the extra `LanguageModule` methods. `dispatch_by_name`
+//! resolves a string to a `GrammarSource` and is used by the graph
+//! builder, which needs to support runtime-loaded languages. Built-in
+//! names take precedence in `dispatch_by_name`; a plugin cannot shadow
+//! a compiled-in language even by registering an alias.
+//!
+//! C# was removed from the enum after `tree-sitter-c-sharp` 0.23.5
+//! was found to produce a grammar ABI that tree-sitter 0.24 refuses to
 //! load. Re-adding it requires a compatible grammar release.
 
 use tree_sitter::Language as TsLanguage;
 
 use crate::ast::{AstArena, NodeKind};
 use crate::call_graph;
+use crate::grammar_loader;
 use crate::symbol_table::Symbol;
 
 pub mod c;
@@ -106,6 +113,42 @@ impl Language {
             "cpp" | "c++" | "cxx" => Some(Language::Cpp),
             _ => None,
         }
+    }
+}
+
+/// The minimum surface the parser and graph builder need from a
+/// language.
+///
+/// Both built-in modules (via a blanket implementation over
+/// `LanguageModule`) and runtime-loaded modules satisfy this trait. It
+/// exists so that `parse_file` can accept a runtime grammar without
+/// requiring that grammar to have a `Language` enum variant.
+pub trait GrammarSource: Send + Sync {
+    /// Return the tree-sitter grammar handle.
+    fn grammar(&self) -> TsLanguage;
+
+    /// Classify a tree-sitter kind string into a `NodeKind`.
+    ///
+    /// `raw_id` is the grammar-specific kind id, used as the payload
+    /// for `NodeKind::Other` when no typed variant matches.
+    fn classify(&self, kind: &str, raw_id: u16) -> NodeKind;
+
+    /// Return the canonical language name used in error messages and
+    /// in the runtime registry.
+    fn name(&self) -> &str;
+}
+
+impl<T: LanguageModule> GrammarSource for T {
+    fn grammar(&self) -> TsLanguage {
+        LanguageModule::grammar(self)
+    }
+
+    fn classify(&self, kind: &str, raw_id: u16) -> NodeKind {
+        LanguageModule::classify(self, kind, raw_id)
+    }
+
+    fn name(&self) -> &str {
+        LanguageModule::language(self).name()
     }
 }
 
@@ -200,5 +243,29 @@ pub fn dispatch(language: Language) -> Option<&'static dyn LanguageModule> {
         Language::Rust => Some(&RUST_MODULE),
         Language::C => Some(&C_MODULE),
         Language::Cpp => Some(&CPP_MODULE),
+    }
+}
+
+/// Resolve a language name to a `GrammarSource`.
+///
+/// Checks built-in languages first (Python, TypeScript, JavaScript,
+/// Java, Go, Rust, C, C++, with the aliases `js`, `golang`, `rs`,
+/// `c++`, `cxx`), then the runtime grammar registry. Returns `None`
+/// if the name is unknown.
+///
+/// Built-in names take precedence. A runtime grammar cannot shadow a
+/// compiled-in language even if the plugin declares it under an alias,
+/// because the alias resolves to the built-in first.
+pub fn dispatch_by_name(name: &str) -> Option<&'static dyn GrammarSource> {
+    match name {
+        "python" => Some(&PYTHON_MODULE),
+        "typescript" => Some(&TYPESCRIPT_MODULE),
+        "javascript" | "js" => Some(&JAVASCRIPT_MODULE),
+        "java" => Some(&JAVA_MODULE),
+        "go" | "golang" => Some(&GO_MODULE),
+        "rust" | "rs" => Some(&RUST_MODULE),
+        "c" => Some(&C_MODULE),
+        "cpp" | "c++" | "cxx" => Some(&CPP_MODULE),
+        _ => grammar_loader::get_runtime_language(name),
     }
 }

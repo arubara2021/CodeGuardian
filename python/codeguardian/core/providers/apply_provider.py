@@ -5,6 +5,13 @@ repository. It runs only after the user has approved the diff, and it
 records every attempt in the audit log before touching a single file.
 Non-local targets are rejected so that a v1 run cannot silently push
 to a remote.
+
+Both ``apply`` and ``rollback`` write an audit entry. The apply entry
+is written before ``git apply --check``; the rollback entry is written
+before ``git reset --hard``. The audit chain therefore records the
+attempt for both operations, not only the forward change. A run that
+applies and then rolls back produces two chained entries, and
+``audit.verify`` reports ``entries_checked == 2``.
 """
 
 from __future__ import annotations
@@ -110,6 +117,9 @@ class ApplyProvider:
         self._audit_bridge = audit_bridge
         self._audit_log_path = audit_log_path
         self._last_repo_path: Path | None = None
+        self._last_run_id: str | None = None
+        self._last_consent_id: str | None = None
+        self._last_diff_hash: str | None = None
 
     def apply(
         self,
@@ -141,6 +151,10 @@ class ApplyProvider:
         does not affect the modification case; it becomes a correctness
         concern when Phase 11's refactor introduces new files, and will
         be addressed there.
+
+        The run id, consent id, and diff hash of a successful apply are
+        retained on the instance so that a subsequent ``rollback`` can
+        write a chained audit entry that names the change being reverted.
         """
         if _is_remote_url(repo_url):
             raise CodeGuardianError(
@@ -199,6 +213,9 @@ class ApplyProvider:
         self._git_apply(repo_path, diff, check=False)
 
         self._last_repo_path = repo_path
+        self._last_run_id = consent.run_id
+        self._last_consent_id = consent.consent_id
+        self._last_diff_hash = diff_hash
         return ApplyResult(
             success=True,
             applied_files=applied,
@@ -221,6 +238,12 @@ class ApplyProvider:
         ``<ref> HEAD`` would return empty. Comparing the working tree
         to ``<ref>`` is the correct comparison for "what will reset
         change".
+
+        An audit entry is written before ``git reset --hard`` runs. The
+        entry carries the run id, consent id, and diff hash of the
+        original apply, so the log records which change is being
+        reverted. A rollback that fails at the git step leaves a log of
+        the attempt, matching the discipline of ``apply``.
 
         Calling ``rollback`` before any ``apply`` on this instance
         raises ``ROLLBACK_REF_NOT_FOUND``.
@@ -252,6 +275,24 @@ class ApplyProvider:
         if diff_result.returncode == 0:
             raw = diff_result.stdout.decode("utf-8", "replace")
             restored_files = tuple(sorted(name for name in raw.splitlines() if name))
+
+        self._audit_bridge.call(
+            "audit.write",
+            {
+                "path": str(self._audit_log_path),
+                "payload": {
+                    "event": "rollback",
+                    "phase": "apply",
+                    "agent": "orchestrator",
+                    "run_id": self._last_run_id,
+                    "consent_id": self._last_consent_id,
+                    "diff_hash": self._last_diff_hash,
+                    "rollback_ref": rollback_ref,
+                    "repo": str(repo_path),
+                    "restored_files": list(restored_files),
+                },
+            },
+        )
 
         reset = _run_git(["reset", "--hard", rollback_ref], cwd=repo_path)
         if reset.returncode != 0:

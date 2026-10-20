@@ -15,7 +15,7 @@ class GoPlugin:
     tree_sitter_grammar = "tree-sitter-go"
     test_runner = "go test"
     refactor_rules = ("extract_function", "extract_interface", "rename_symbol")
-    reliability_tier = "high"
+    reliability_tier = "best-effort"
     blast_scope = "same-file"
     kernel_extensible = False
 
@@ -35,7 +35,7 @@ class GoPlugin:
                 "extract_interface",
                 "rename_symbol",
             ],
-            "reliability_tier": "high",
+            "reliability_tier": "best-effort",
             "blast_scope": "same-file",
             "kernel_extensible": False,
         },

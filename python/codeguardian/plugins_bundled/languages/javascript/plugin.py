@@ -17,7 +17,7 @@ class JavaScriptPlugin:
     tree_sitter_grammar = "tree-sitter-javascript"
     test_runner = "vitest"
     refactor_rules = ("extract_function", "convert_to_arrow", "rename_symbol")
-    reliability_tier = "high"
+    reliability_tier = "best-effort"
     blast_scope = "same-file"
     kernel_extensible = False
 
@@ -37,7 +37,7 @@ class JavaScriptPlugin:
                 "convert_to_arrow",
                 "rename_symbol",
             ],
-            "reliability_tier": "high",
+            "reliability_tier": "best-effort",
             "blast_scope": "same-file",
             "kernel_extensible": False,
         },

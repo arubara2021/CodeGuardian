@@ -119,10 +119,13 @@ fn violations_to_list<'py>(
     let list = PyList::empty(py);
     for violation in violations {
         let dict = PyDict::new(py);
-        dict.set_item("caller_node_id", violation.caller_node_id)?;
-        dict.set_item("caller_qualified_name", &violation.caller_qualified_name)?;
-        dict.set_item("caller_file_path", &violation.caller_file_path)?;
-        dict.set_item("caller_line", violation.caller_line)?;
+        dict.set_item(
+            "caller",
+            format!(
+                "{}:{}",
+                violation.caller_file_path, violation.caller_qualified_name
+            ),
+        )?;
         dict.set_item("assumption", &violation.assumption)?;
         dict.set_item(
             "risk",
@@ -142,10 +145,10 @@ fn gaps_to_list<'py>(py: Python<'py>, gaps: &[CoverageGap]) -> PyResult<Bound<'p
     let list = PyList::empty(py);
     for gap in gaps {
         let dict = PyDict::new(py);
-        dict.set_item("caller_node_id", gap.caller_node_id)?;
-        dict.set_item("caller_qualified_name", &gap.caller_qualified_name)?;
-        dict.set_item("caller_file_path", &gap.caller_file_path)?;
-        dict.set_item("caller_line", gap.caller_line)?;
+        dict.set_item(
+            "caller",
+            format!("{}:{}", gap.caller_file_path, gap.caller_qualified_name),
+        )?;
         dict.set_item("reason", &gap.reason)?;
         list.append(dict)?;
     }

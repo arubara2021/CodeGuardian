@@ -379,8 +379,8 @@ CodeGuardian parses any language Tree-sitter supports, which is over one hundred
 
 | Tier | Languages | Reliability |
 |---|---|---|
-| **High** | Python, TypeScript, JavaScript | Production-ready. Full pipeline. |
-| **Best-effort** | Java, Go, Rust, C, C++, C#, Ruby, PHP, Kotlin, Swift, Elixir, and others | Supported. Lower success rate. The CLI warns before proceeding. |
+| **High** | Python, TypeScript | Production-ready. Full pipeline. |
+| **Best-effort** | JavaScript, Java, Go, Rust, C, C++, C#, Ruby, PHP, Kotlin, Swift, Elixir, and others | Supported. Lower success rate. The CLI warns before proceeding. |
 
 The CLI shows a warning when a user targets a best-effort language, so expectations are set at the point of action, not buried in documentation.
 

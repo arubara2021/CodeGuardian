@@ -15,7 +15,7 @@ class RustPlugin:
     tree_sitter_grammar = "tree-sitter-rust"
     test_runner = "cargo test"
     refactor_rules = ("extract_function", "extract_trait", "rename_symbol")
-    reliability_tier = "high"
+    reliability_tier = "best-effort"
     blast_scope = "same-file"
     kernel_extensible = False
 
@@ -35,7 +35,7 @@ class RustPlugin:
                 "extract_trait",
                 "rename_symbol",
             ],
-            "reliability_tier": "high",
+            "reliability_tier": "best-effort",
             "blast_scope": "same-file",
             "kernel_extensible": False,
         },

@@ -24,8 +24,8 @@ _SAMPLES: dict[str, tuple[str, str]] = {
     "cpp": (".cpp", "int f(int x) { return x + 1; }\n"),
 }
 
-_EXPECTED_HIGH_TIER = frozenset({"python", "typescript", "javascript", "java", "go", "rust"})
-_EXPECTED_BEST_EFFORT = frozenset({"c", "cpp"})
+_EXPECTED_HIGH_TIER = frozenset({"python", "typescript"})
+_EXPECTED_BEST_EFFORT = frozenset({"javascript", "java", "go", "rust", "c", "cpp"})
 
 _RUNNER_MARKERS = {
     "pytest": "def test_",

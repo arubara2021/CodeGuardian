@@ -15,7 +15,7 @@ class JavaPlugin:
     tree_sitter_grammar = "tree-sitter-java"
     test_runner = "junit"
     refactor_rules = ("extract_method", "extract_interface", "rename_symbol")
-    reliability_tier = "high"
+    reliability_tier = "best-effort"
     blast_scope = "same-file"
     kernel_extensible = False
 
@@ -35,7 +35,7 @@ class JavaPlugin:
                 "extract_interface",
                 "rename_symbol",
             ],
-            "reliability_tier": "high",
+            "reliability_tier": "best-effort",
             "blast_scope": "same-file",
             "kernel_extensible": False,
         },

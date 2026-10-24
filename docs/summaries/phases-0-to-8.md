@@ -562,6 +562,36 @@ The binary that hosts sandbox and audit. Seven handlers registered. Two-worker t
 
 ---
 
+### 11.6 Post-ship hardening — 2026-10-24
+
+Five bugs were found and fixed after Phase 7 shipped. Four were found by
+code review. One was found while writing the positive test that was
+missing.
+
+| Bug | File | Effect |
+|---|---|---|
+| Working directory check only rejected exact paths | `sandbox/src/backend.rs` | `/etc/systemd`, `/var/lib/dpkg`, `/usr/local/lib` were accepted as working directories. Now rejected. |
+| Docker timeout did not await `docker kill` | `sandbox/src/docker.rs` | Every timeout orphaned a container. Now awaited with a 5-second bound, escalating to `docker rm -f`. |
+| Sandbox errors too coarse | `sandbox/src/lib.rs`, `backend.rs`, `quotas.rs` | Added `QuotaOutOfRange`, `ForbiddenEnvKey`, `WorkingDirForbidden`, `WorkingDirInvalid`. Every `CreateFailed` reason now has a specific variant. |
+| `bound_variable_names` missed tuple unpacking | `blast/src/contracts.rs` | `a, b = get()` was not recognized as binding `a` and `b`. Now handled. |
+| `has_bare_return` treated the `return` keyword as a child | `blast/src/contracts.rs` | **Contract detection had been silently returning empty on every input since Phase 7 shipped.** tree-sitter always emits the `return` keyword as an anonymous child, so a "no children" check always returned false. Now filters to named children. |
+
+New tests added to `tests/unit/rust/test_blast.py`: five, bringing the file
+to 25 tests. Two prove contract detection fires on the pattern it was
+designed for and stays quiet when guarded or when the target has no bare
+return. Two prove coverage gaps are cleared by a reachable test file and
+reported when no test files exist.
+
+Phase 7 grade revised: **B+ → A-**. The "one pattern" narrowness remains,
+documented. The silent failure does not.
+
+**Remaining narrowness, deliberately not fixed:** `return None` is not
+treated as a bare return because the `None` literal is a named child. Most
+bare returns in real Python are `return`, not `return None`. Documented,
+deferred.
+
+---
+
 ## 12. Phase 8 — Providers
 
 **Status:** complete. 123 tests. Verified against real external systems. This is the phase that found the most bugs.

@@ -26,6 +26,7 @@
 
 use std::collections::HashSet;
 
+use codeguardian_kernel::ast::FLAG_NAMED;
 use codeguardian_kernel::{CodePropertyGraph, EdgeKind, NodeKind};
 
 use crate::{ast_children, first_ast_child, parent_of, walk_subtree, Caller};
@@ -99,8 +100,14 @@ pub fn detect_contract_violations(
     violations
 }
 
-/// Return whether the target contains a `Return` node with no child,
-/// which means the function can produce `None` on some path.
+/// Return whether the target contains a bare `return` — a `Return`
+/// node with no named children — which means the function can produce
+/// `None` on some path.
+///
+/// The check filters to named children. tree-sitter includes the
+/// anonymous `return` keyword as a child of every `return_statement`,
+/// so a naive "has no children" check returns false for the exact
+/// pattern it is meant to detect.
 fn has_bare_return(cpg: &CodePropertyGraph, target_node_id: u32) -> bool {
     for node_id in walk_subtree(cpg, target_node_id) {
         let node = match cpg.node(node_id) {
@@ -110,7 +117,28 @@ fn has_bare_return(cpg: &CodePropertyGraph, target_node_id: u32) -> bool {
         if node.kind != NodeKind::Return {
             continue;
         }
-        if first_ast_child(cpg, node_id).is_none() {
+        if !has_named_child(cpg, node_id) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Return whether a node has at least one named AST child.
+fn has_named_child(cpg: &CodePropertyGraph, node_id: u32) -> bool {
+    for &edge_id in cpg.edges_from(node_id) {
+        let edge = match cpg.edge(edge_id) {
+            Some(e) => e,
+            None => continue,
+        };
+        if edge.kind != EdgeKind::Ast {
+            continue;
+        }
+        let child = match cpg.node(edge.dst) {
+            Some(n) => n,
+            None => continue,
+        };
+        if child.flags & FLAG_NAMED != 0 {
             return true;
         }
     }
@@ -141,11 +169,14 @@ fn check_caller(
         if callee != target_simple_name {
             continue;
         }
-        let bound_name = match bound_variable_name(cpg, node_id) {
-            Some(name) => name,
-            None => continue,
-        };
-        if has_unguarded_dereference(cpg, &subtree, &bound_name) {
+        let bound_names = bound_variable_names(cpg, node_id);
+        if bound_names.is_empty() {
+            continue;
+        }
+        if bound_names
+            .iter()
+            .any(|name| has_unguarded_dereference(cpg, &subtree, name))
+        {
             return Some(ContractViolation {
                 caller_node_id: caller.node_id,
                 caller_qualified_name: caller.qualified_name.clone(),
@@ -182,21 +213,65 @@ fn last_identifier_in_subtree(cpg: &CodePropertyGraph, node_id: u32) -> Option<S
     last
 }
 
-/// Return the name of the variable a call site is bound to, if the
-/// call's parent is an `Assignment` whose first child is an identifier.
-fn bound_variable_name(cpg: &CodePropertyGraph, call_site: u32) -> Option<String> {
-    let parent = parent_of(cpg, call_site)?;
-    let parent_node = cpg.node(parent)?;
+/// Return every variable a call site is bound to, if the call's
+/// parent is an `Assignment`.
+///
+/// Handles two assignment shapes:
+///
+/// - Simple assignment: `x = get()` binds `x`.
+/// - Tuple unpacking: `a, b = get()` binds both `a` and `b`.
+///
+/// Attribute and subscript targets (`self.cache = get()`,
+/// `data[key] = get()`) are deliberately not handled here. Matching a
+/// dotted path would require extending `has_unguarded_dereference` to
+/// walk the full `Attribute`/`Subscript` chain rather than comparing
+/// simple identifier names, which is a separate change with its own
+/// false-positive profile. The narrow signature stays honest about
+/// what it covers.
+fn bound_variable_names(cpg: &CodePropertyGraph, call_site: u32) -> Vec<String> {
+    let parent = match parent_of(cpg, call_site) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let parent_node = match cpg.node(parent) {
+        Some(n) => n,
+        None => return Vec::new(),
+    };
     if parent_node.kind != NodeKind::Assignment {
-        return None;
+        return Vec::new();
     }
     for child in ast_children(cpg, parent) {
-        let child_node = cpg.node(child)?;
-        if child_node.kind == NodeKind::Identifier {
-            return cpg.string(child_node.name).map(|s| s.to_owned());
+        let child_node = match cpg.node(child) {
+            Some(n) => n,
+            None => continue,
+        };
+        match child_node.kind {
+            NodeKind::Identifier => {
+                if let Some(name) = cpg.string(child_node.name) {
+                    return vec![name.to_owned()];
+                }
+            }
+            NodeKind::Tuple => {
+                let mut names: Vec<String> = Vec::new();
+                for tuple_child in ast_children(cpg, child) {
+                    let tuple_node = match cpg.node(tuple_child) {
+                        Some(n) => n,
+                        None => continue,
+                    };
+                    if tuple_node.kind == NodeKind::Identifier {
+                        if let Some(name) = cpg.string(tuple_node.name) {
+                            names.push(name.to_owned());
+                        }
+                    }
+                }
+                if !names.is_empty() {
+                    return names;
+                }
+            }
+            _ => {}
         }
     }
-    None
+    Vec::new()
 }
 
 /// Return whether any identifier in the subtree that matches

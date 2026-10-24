@@ -1,6 +1,6 @@
 # CodeGuardian — Build State
 
-**Snapshot date:** 2026-10-19
+**Snapshot date:** 2026-10-24
 **Last phase completed:** Phase 8 — Providers, plus the multi-language kernel extension, plus the deep integration test
 **Next phase to start:** Phase 9 — Plugins (merged scope: 8 blocks, 36 files)
 **Phase 0 remaining work:** Deferred to the end of the build, per user decision
@@ -126,6 +126,35 @@ The two xfails are C/C++ same-file blast — the declarator-chain gap, expected 
 
 ---
 
+### Phase 7 hardening — 2026-10-24
+
+Five bugs found after Phase 7 shipped. Four by code review. One while
+writing the positive test that was missing.
+
+| Bug | File | Effect |
+|---|---|---|
+| Working directory check only rejected exact paths | `sandbox/src/backend.rs` | `/etc/systemd`, `/var/lib/dpkg`, `/usr/local/lib` were accepted as working directories. Now rejected. |
+| Docker timeout did not await `docker kill` | `sandbox/src/docker.rs` | Every timeout orphaned a container. Now awaited with a 5-second bound, escalating to `docker rm -f`. |
+| Sandbox errors too coarse | `sandbox/src/lib.rs`, `backend.rs`, `quotas.rs` | Added `QuotaOutOfRange`, `ForbiddenEnvKey`, `WorkingDirForbidden`, `WorkingDirInvalid`. Every `CreateFailed` reason now has a specific variant. |
+| `bound_variable_names` missed tuple unpacking | `blast/src/contracts.rs` | `a, b = get()` was not recognized as binding `a` and `b`. Now handled. |
+| `has_bare_return` treated the `return` keyword as a named child | `blast/src/contracts.rs` | **Contract detection had been silently returning empty on every input since Phase 7 shipped.** The `return` keyword is an anonymous child, so a "no children" check always returned false. Now filters to named children. |
+
+New tests added to `tests/unit/rust/test_blast.py`: five, bringing the
+file to 25 tests. Two prove contract detection fires on the pattern it
+was designed for and stays quiet when guarded or when the target has no
+bare return. Two prove coverage gaps are cleared by a reachable test file
+and reported when no test files exist.
+
+Phase 7 grade revised: **B+ → A-**. The "one pattern" narrowness remains,
+documented. The silent failure does not.
+
+**Remaining narrowness, deliberately not fixed:** `return None` is not
+treated as a bare return because the `None` literal is a named child.
+Most bare returns in real Python are `return`, not `return None`.
+Documented, deferred.
+
+---
+
 ## Phase 9 — designed, not yet started
 
 **Status:** Design settlement complete. No code written. Awaiting start of Block 9-1 (schema verification).
@@ -220,10 +249,10 @@ Every one of those limitations is documented in `docs/summaries/phase-9-design.m
 | Phase 7 | 364 | — | — | — | — |
 | Phase 8 | 487 | 2 | 0 | 0 | — |
 | Multi-language | 563 | 2 | 7 | 5 | — |
-| **Current** | **563** | **2** | **7** | **5** | **40 pass, 2 xfail** |
+| **Current** | **568** | **2** | **7** | **5** | **59 pass, 2 xfail** |
 
 **Pytest command:** `PYTHONPATH=python python3 -m pytest tests/ -q`
-**Current result:** `563 passed, 2 skipped, 7 xfailed, 5 xpassed`
+**Current result:** `568 passed, 2 skipped, 7 xfailed, 5 xpassed`
 
 **Deep test command:** `python sandtest/deep_test.py 2>&1 | tee sandtest_output.txt`
 **Last result:** `Passed: 40, Failed: 0, Skipped: 0, Xfailed: 2, Warnings: 0`
@@ -405,12 +434,12 @@ These are gaps identified across Phases 1 through 8, the multi-language extensio
 | G-13 | CLI exit-code mapping not written | Phase 14 | Design specified, code does not exist |
 | G-14 | Phase 0 B-004 through B-009 deferred | End of build | 30 files, no runtime impact |
 | **G-15** | **C/C++ function names not extracted** | Next kernel phase | `extract_name_id` does not walk declarator chains. Fix flips 4 xfails to pass and moves C/C++ to `high` reliability |
-| **G-16** | **Cross-file call resolution incomplete** | Next kernel phase | Phase 8 §11.1. Fix closes ~13 xfails. Currently every language plugin declares `blast_scope: "same-file"` as honest signal |
+| **G-16** | **Cross-file call resolution incomplete** | Next kernel phase | Narrowed by Phase 9: `self.foo()` and `Class.foo()` resolve. `mod.foo()` ambiguous does not. Also fixed `pyo3/blast.rs` emitting `file_path` where schema requires `path` — that key mismatch was masking all cross-file results until fixed. Deep test now shows 21 targets with cross-file callers on `psf/requests`. Under-counts remain for ambiguous names. |
 | **G-17** | **C# not supported** | When grammar ships | ABI incompatibility with tree-sitter 0.24. Re-adding requires a compatible grammar release plus four file changes |
 | **G-18** | **`ast.rs` comment on `Property` mentions C#** | Cosmetic | One-word fix, requires Rule 1 escalation on `ast.rs` |
 | **G-19** | **No automated test/language drift check** | Phase 9 | Adding a language to `dispatch` without adding a test case goes unnoticed. Consider a conftest comparison |
 | **G-20** | **`audit.verify` returns `entries_checked: 1` after apply + rollback** | Investigate | Real finding from the deep test. Should be at least 2 entries |
-| **G-21** | **`echo` returns 0 callers** | Next kernel phase | Same as G-16, confirmed on real library (`pallets/click`) |
+| **G-21** | **`echo` returns 0 callers on `pallets/click`** | Next kernel phase | Partly resolved by the pyo3 `path` key fix. On `psf/requests`, 21 targets now show cross-file callers. `echo` in click has not been re-tested since the fix. Ambiguous names (`echo` is defined in multiple modules across the click tree) may still under-count. |
 | **G-22** | **Maturin does not work with this workspace** | Cosmetic | `features = ["extension-module"]` removed from `pyproject.toml` because the feature is enabled on the `pyo3` dependency. Build path is `cargo build` + `cp`. Do not re-add |
 | **G-23** | **Phase 9 residuals: permission bypass via C extensions** | Phase 13+ | Audit hook is Python-level. Documented in design settlement §3.2 |
 | **G-24** | **Phase 9 residuals: plugin process crash isolation** | Phase 13 | Fault barrier catches `Exception`; segfaults need process pool. Documented in design settlement §3.3 |

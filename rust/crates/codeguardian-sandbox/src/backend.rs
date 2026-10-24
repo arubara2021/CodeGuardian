@@ -239,12 +239,7 @@ pub(crate) fn sanitize_env(env: &HashMap<String, String>) -> Result<(), SandboxE
     for key in env.keys() {
         let upper = key.to_ascii_uppercase();
         if FORBIDDEN_ENV_KEYS.iter().any(|k| k.to_ascii_uppercase() == upper) {
-            return Err(SandboxError::CreateFailed {
-                reason: format!(
-                    "environment variable '{key}' is a code-injection vector \
-                     and cannot be set inside the sandbox"
-                ),
-            });
+            return Err(SandboxError::ForbiddenEnvKey { key: key.clone() });
         }
     }
     Ok(())
@@ -260,27 +255,26 @@ pub(crate) fn validate_working_dir(path: &Path) -> Result<PathBuf, SandboxError>
         "/sbin", "/sys", "/usr", "/var",
     ];
 
-    let canonical = path.canonicalize().map_err(|err| SandboxError::CreateFailed {
-        reason: format!("working_dir cannot be resolved: {err}"),
+    let canonical = path.canonicalize().map_err(|err| SandboxError::WorkingDirInvalid {
+        path: path.display().to_string(),
+        reason: format!("cannot resolve: {err}"),
     })?;
 
     if !canonical.is_dir() {
-        return Err(SandboxError::CreateFailed {
-            reason: format!(
-                "working_dir is not a directory: {}",
-                canonical.display()
-            ),
+        return Err(SandboxError::WorkingDirInvalid {
+            path: canonical.display().to_string(),
+            reason: "not a directory".to_owned(),
         });
     }
 
     let text = canonical.to_string_lossy();
-    if FORBIDDEN.iter().any(|f| text == *f) {
-        return Err(SandboxError::CreateFailed {
-            reason: format!(
-                "working_dir is a top-level system directory and cannot be used: {}",
-                canonical.display()
-            ),
-        });
+    for f in FORBIDDEN {
+        let blocked = text.as_ref() == *f || text.starts_with(&format!("{f}/"));
+        if blocked {
+            return Err(SandboxError::WorkingDirForbidden {
+                path: canonical.display().to_string(),
+            });
+        }
     }
 
     Ok(canonical)

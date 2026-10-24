@@ -90,27 +90,27 @@ impl ResourceQuota {
     /// because the caller can act on the description string.
     pub fn validate(&self) -> Result<(), SandboxError> {
         if self.memory_mb < MIN_MEMORY_MB || self.memory_mb > MAX_MEMORY_MB {
-            return Err(SandboxError::CreateFailed {
-                reason: format!(
-                    "memory_mb {} is outside the accepted range [{}, {}]",
-                    self.memory_mb, MIN_MEMORY_MB, MAX_MEMORY_MB
-                ),
+            return Err(SandboxError::QuotaOutOfRange {
+                field: "memory_mb".to_owned(),
+                value: self.memory_mb,
+                min: MIN_MEMORY_MB,
+                max: MAX_MEMORY_MB,
             });
         }
         if self.cpu_cores < MIN_CPU_CORES || self.cpu_cores > MAX_CPU_CORES {
-            return Err(SandboxError::CreateFailed {
-                reason: format!(
-                    "cpu_cores {} is outside the accepted range [{}, {}]",
-                    self.cpu_cores, MIN_CPU_CORES, MAX_CPU_CORES
-                ),
+            return Err(SandboxError::QuotaOutOfRange {
+                field: "cpu_cores".to_owned(),
+                value: self.cpu_cores,
+                min: MIN_CPU_CORES,
+                max: MAX_CPU_CORES,
             });
         }
         if self.process_limit < MIN_PROCESS_LIMIT || self.process_limit > MAX_PROCESS_LIMIT {
-            return Err(SandboxError::CreateFailed {
-                reason: format!(
-                    "process_limit {} is outside the accepted range [{}, {}]",
-                    self.process_limit, MIN_PROCESS_LIMIT, MAX_PROCESS_LIMIT
-                ),
+            return Err(SandboxError::QuotaOutOfRange {
+                field: "process_limit".to_owned(),
+                value: self.process_limit,
+                min: MIN_PROCESS_LIMIT,
+                max: MAX_PROCESS_LIMIT,
             });
         }
         Ok(())

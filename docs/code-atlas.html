@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Code Atlas &mdash; Phases 0 through 9</title>
+            <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only],
+.vscode-high-contrast:not(.vscode-high-contrast-light) img[src$=\#gh-light-mode-only],
+.vscode-high-contrast-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex/dist/katex.min.css">
+<link href="https://cdn.jsdelivr.net/npm/katex-copytex@latest/dist/katex-copytex.min.css" rel="stylesheet" type="text/css">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+<style>
+:root {
+  --color-note: #0969da;
+  --color-tip: #1a7f37;
+  --color-warning: #9a6700;
+  --color-severe: #bc4c00;
+  --color-caution: #d1242f;
+  --color-important: #8250df;
+}
+
+</style>
+<style>
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-note: #2f81f7;
+    --color-tip: #3fb950;
+    --color-warning: #d29922;
+    --color-severe: #db6d28;
+    --color-caution: #f85149;
+    --color-important: #a371f7;
+  }
+}
+
+</style>
+<style>
+.markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 16px;
+  color: inherit;
+  border-left: .25em solid #888;
+}
+
+.markdown-alert>:first-child {
+  margin-top: 0
+}
+
+.markdown-alert>:last-child {
+  margin-bottom: 0
+}
+
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1
+}
+
+.markdown-alert .markdown-alert-title .octicon {
+  margin-right: 0.5rem;
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+.markdown-alert.markdown-alert-note {
+  border-left-color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-important {
+  border-left-color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-tip {
+  border-left-color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-caution {
+  border-left-color: var(--color-caution);
+}
+
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: var(--color-caution);
+}
+
+</style>
+
+        </head>
+        <body class="vscode-body vscode-light">
+            <span id="markdown-mermaid" aria-hidden="true" data-config="{&quot;darkModeTheme&quot;:&quot;vscode&quot;,&quot;lightModeTheme&quot;:&quot;vscode&quot;,&quot;maxTextSize&quot;:50000,&quot;clickDrag&quot;:&quot;alt&quot;,&quot;showControls&quot;:&quot;onHoverOrFocus&quot;,&quot;resizable&quot;:true,&quot;maxHeight&quot;:&quot;&quot;}"></span>
+				<h1 id="code-atlas--phases-0-through-9">Code Atlas — Phases 0 through 9</h1>
+<p><strong>Snapshot date:</strong> 2026-10-20
+<strong>Purpose:</strong> A plain-language map of what exists in CodeGuardian, what each subsystem does, what breaks if it disappears, and what is honestly missing. Not a tutorial. Not a design document. A navigation map.</p>
+<p><strong>How to read this file:</strong> Each section covers one subsystem. Provenance markers state whether the section was generated from code I have read in full ([READ]), from a mix of read and summarized sources ([PARTIAL]), or entirely from phase summaries and public API documentation ([SUMMARY]). Sections marked [SUMMARY] must be verified against the code before being trusted.</p>
+<p><strong>Verification procedure:</strong> For [SUMMARY] sections, open the primary file, run <code>pytest tests/</code> for the tests named in &quot;If I delete it,&quot; and confirm each claim in the &quot;What it does&quot; line. When a claim does not match, correct this file, not the code. Then investigate why the summary drifted.</p>
+<hr>
+<h2 id="1-interfaces-phase-4--read-for-four-partial-for-the-rest">1. Interfaces (Phase 4) — [READ for four, PARTIAL for the rest]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>python/codeguardian/interfaces/__init__.py</code> — dynamic re-export plus <code>TYPE_CHECKING</code> mirror</li>
+<li><code>python/codeguardian/interfaces/repository.py</code>, <code>apply.py</code>, <code>model.py</code>, <code>sandbox.py</code>, <code>orchestrator.py</code>, <code>agent.py</code>, <code>tool.py</code>, <code>verifier.py</code>, <code>reporter.py</code>, <code>language.py</code>, <code>mcp_client.py</code>, <code>mcp_server.py</code></li>
+</ul>
+<p><strong>What it does:</strong> Defines every cross-component boundary as a <code>typing.Protocol</code>. 12 Protocols, 43 exported symbols. No core module imports a concrete class across a boundary. Four Protocols (<code>ToolPlugin</code>, <code>VerifierPlugin</code>, <code>ReporterPlugin</code>, <code>LanguagePlugin</code>) are <code>@runtime_checkable</code> for plugin loading; the rest are static-only for mypy. The package <code>__init__.py</code> walks its own modules with <code>pkgutil.iter_modules</code> and re-exports every symbol declared in any submodule's <code>__all__</code>.</p>
+<p><strong>Public surface:</strong> All 43 symbols are re-exported from <code>codeguardian.interfaces</code>. <code>from codeguardian.interfaces import RepositoryProvider, ModelProvider, SandboxBackend, LanguagePlugin, ToolPlugin, ReporterPlugin, VerifierPlugin, Agent, Orchestrator, MCPClient, MCPServer</code> plus the DTOs (<code>FileChange</code>, <code>ConsentRecord</code>, <code>ModelOptions</code>, <code>SandboxSpec</code>, <code>VerifierContext</code>, <code>VerifierVerdict</code>, <code>Finding</code>, <code>TestResult</code>, <code>RunConfig</code>, <code>RunResult</code>, <code>RunState</code>, <code>ToolDescriptor</code>, <code>ToolResult</code>, <code>ContractAssertion</code>).</p>
+<p><strong>Depends on:</strong> nothing beyond the standard library and <code>typing</code>.</p>
+<p><strong>If I delete it:</strong> every provider, plugin, and agent that declares conformance to a Protocol loses its contract. The plugin registry's <code>isinstance(instance, ToolPlugin)</code> check fails. Mypy loses all cross-module verification. The <code>docs/public-api.md</code> contract becomes unbacked. Nothing imports it directly, so no import error — but the entire type system collapses to <code>Any</code> silently.</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li><code>interfaces/__init__.py</code> uses dynamic <code>pkgutil.iter_modules</code> discovery. If any submodule fails to import (syntax error, missing dependency), the entire package fails to import — one broken Protocol file breaks all 12.</li>
+<li>No versioning on individual Protocols. <code>NFR-MT5</code> promises &quot;interfaces must be semantically versioned.&quot; No file declares a version today.</li>
+</ul>
+<hr>
+<h2 id="2-errors-and-config-phase-1--read-for-the-taxonomy-summary-for-config-internals">2. Errors and Config (Phase 1) — [READ for the taxonomy, SUMMARY for config internals]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>python/codeguardian/core/errors/codes.py</code> — 51 string constants, grouped by subsystem</li>
+<li><code>python/codeguardian/core/errors/taxonomy.py</code> — <code>ErrorCode</code> enum (51 members), <code>ErrorCategory</code> (7 members), <code>Backoff</code> (3 members), <code>RetryPolicy</code>, <code>CodeGuardianError</code>, <code>UnknownCodeError</code>, <code>CATEGORY_MAP</code>, <code>RETRY_POLICY</code>, <code>RETRY_POLICY_OVERRIDES</code>, <code>category_of</code>, <code>retry_policy_of</code></li>
+<li><code>python/codeguardian/core/errors/__init__.py</code> — public surface re-export</li>
+<li><code>python/codeguardian/core/errors/translation.py</code> — <code>translate</code>, <code>typed</code></li>
+<li><code>python/codeguardian/core/errors/retry.py</code> — <code>compute_delay</code>, <code>retry_sync</code>, <code>retry_async</code></li>
+<li><code>python/codeguardian/core/errors/redaction.py</code> — <code>redact</code>, <code>DEFAULT_MARKER</code></li>
+<li><code>python/codeguardian/core/config/{schema,defaults,loader,secrets,__init__}.py</code></li>
+<li><code>python/codeguardian/version.py</code></li>
+</ul>
+<p><strong>What it does:</strong> Provides the complete error vocabulary every other subsystem uses. Every raise site in the codebase raises <code>CodeGuardianError</code> or a subclass. The enum-to-string bijection is enforced by tests — every code in <code>codes.py</code> is an <code>ErrorCode</code> member and vice versa. Retry behavior is derived from category, with per-code overrides for the three cases where the category default would retry a deterministic failure. <code>translation.py</code> converts stdlib exceptions (17 types) into typed errors at call boundaries. <code>redaction.py</code> strips secrets from structured data before it reaches the audit log.</p>
+<p><strong>Public surface:</strong> <code>from codeguardian.core.errors import CodeGuardianError, ErrorCode, ErrorCategory, Backoff, RetryPolicy, category_of, retry_policy_of, compute_delay, retry_sync, retry_async, translate, typed, redact, DEFAULT_MARKER, UnknownCodeError</code>. <code>from codeguardian.core.config import load_config, get_api_key, set_api_key, delete_api_key, Config, GeneralConfig, ModelsConfig, ProvidersConfig, StorageConfig, SandboxConfig, MCPConfig, ExclusionsConfig, validate</code>.</p>
+<p><strong>Depends on:</strong> standard library, <code>jsonschema</code>, <code>keyring</code>.</p>
+<p><strong>If I delete it:</strong> every raise site fails to import. <code>tests/unit/core/test_errors.py</code> (45 tests) fails. Retry policy is gone — a rate-limited model call raises immediately instead of backing off. Secrets leak into audit entries.</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li>Adding an error code requires editing two files (<code>codes.py</code> and <code>taxonomy.py</code>) in exact sync. Test <code>test_codes_module_matches_enum</code> catches drift, but the two-file edit is a Rule 1 escalation per code. Phase 9 added five codes, all via this route.</li>
+<li><code>translation.py</code> and <code>redaction.py</code> I have not read. Their behavior is known only from <code>public-api.md</code> and <code>test_errors.py</code> passing.</li>
+<li><code>retry.py</code> uses pre-PEP-695 generic syntax (<code>TypeVar</code>). <code>ruff</code> rule <code>UP047</code> flags this; it is deferred per <code>pyproject.toml</code> ignore list.</li>
+</ul>
+<hr>
+<h2 id="3-storage-phase-3--summary">3. Storage (Phase 3) — [SUMMARY]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>python/codeguardian/core/storage/sqlite_store.py</code> — WAL mode, six PRAGMAs applied per connection</li>
+<li><code>python/codeguardian/core/storage/filesystem_store.py</code> — artifact read/write with schema validation on write</li>
+<li><code>python/codeguardian/core/storage/graph_store.py</code> — CPG binary file metadata and path resolution</li>
+<li><code>python/codeguardian/core/storage/cache.py</code> — LRU memory tier (256 entries) + disk tier keyed by <code>(repo_id, commit_hash, cache_type)</code></li>
+<li><code>python/codeguardian/core/storage/migration_runner.py</code> — reads <code>.sql</code> files, tracks <code>_schema_migrations</code></li>
+<li><code>python/codeguardian/core/storage/cleanup.py</code> — retention sweep</li>
+<li><code>python/codeguardian/core/storage/skill_store.py</code> — Markdown + FTS5 + sqlite-vec</li>
+<li><code>python/codeguardian/core/storage/migrations/001_initial.sql</code> — 20 tables</li>
+</ul>
+<p><strong>What it does:</strong> Five separate storage backends, each for a different data shape. SQLite holds queryable metadata. Filesystem holds artifacts (JSON, JSONL, patches, test files). A binary memory-mapped file holds the CPG. An LRU cache sits above disk cache. Markdown is the source of truth for skills; SQLite FTS5 is a keyword index; sqlite-vec is a semantic index. Migrations are versioned and idempotent.</p>
+<p><strong>Public surface:</strong> <code>from codeguardian.core.storage import SQLiteStore, FilesystemStore, GraphStore, Cache, MigrationRunner, SkillStore, CPGHeader, MigrationResult, CleanupSummary, run_cleanup</code>.</p>
+<p><strong>Depends on:</strong> <code>sqlite3</code>, <code>sqlite-vec</code>, <code>jsonschema</code>, standard library.</p>
+<p><strong>If I delete it:</strong> every artifact write fails. <code>tests/unit/core/test_storage.py</code>, <code>test_sqlite_wal.py</code>, <code>test_skill_store.py</code> (62 tests total) fail. The apply provider cannot persist its audit log. Recon output has nowhere to land.</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li>Single-writer assumption. <code>busy_timeout = 5000ms</code> handles two writers; a third times out. <code>G-1</code> in BUILD_STATE.</li>
+<li>No schema version in cache keys. A schema bump without a commit change serves stale entries. <code>G-4</code>.</li>
+<li>No SQLite backup. <code>G-3</code>.</li>
+<li>I have not read any storage file. Every claim above is from <code>phases-1-to-5.md</code> and <code>public-api.md</code>. Verify against the code.</li>
+</ul>
+<hr>
+<h2 id="4-bridges-phase-5--summary-for-python-read-for-pyo3-libkernel">4. Bridges (Phase 5) — [SUMMARY for Python, READ for pyo3 lib/kernel]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>python/codeguardian/core/bridges/protocol.py</code> — RPC envelope dataclasses</li>
+<li><code>python/codeguardian/core/bridges/pyo3_bridge.py</code> — in-process FFI wrapper</li>
+<li><code>python/codeguardian/core/bridges/jsonrpc_bridge.py</code> — out-of-process line-delimited JSON</li>
+<li><code>rust/crates/codeguardian-rpc/src/{lib,protocol,server,client}.rs</code></li>
+<li><code>rust/crates/codeguardian-rpcd/src/{main,handlers}.rs</code></li>
+</ul>
+<p><strong>What it does:</strong> Two bridges, chosen by trust. PyO3 crosses the boundary in-process: no serialization, batchable, but a Rust panic crashes Python. JSON-RPC crosses out-of-process: line-delimited JSON over stdio, isolation guarantees, but slower. The choice per zone: kernel/blast/policy use PyO3; sandbox/audit use JSON-RPC.</p>
+<p><strong>Public surface:</strong> <code>from codeguardian.core.bridges import JSONRPCBridge, PyO3Bridge, is_native_available, RpcRequest, RpcResponse, RpcError, RpcNotification</code>. The Rust side exposes <code>RpcServer::register</code>, <code>RpcServer::serve</code>, <code>RpcClient::call</code>.</p>
+<p><strong>Depends on:</strong> <code>subprocess</code>, <code>codeguardian._native</code>, <code>serde_json</code>.</p>
+<p><strong>If I delete it:</strong> Python cannot reach any Rust subsystem. <code>tests/integration/test_pyo3_bridge.py</code> and <code>test_jsonrpc_bridge.py</code> (25 tests) fail. Sandbox execution and audit writes stop. The deep test's preflight fails at &quot;rpcd binary exists.&quot;</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li><code>G-12</code> (partial): JSON-RPC errors all map to <code>SYS_INTERNAL</code> on the Python side; the specific Rust error variant is lost at the boundary.</li>
+<li><code>G-22</code>: <code>maturin</code> does not work with this workspace; the build path is manual <code>cargo build</code> + <code>cp</code>. Documented in BUILD_STATE.</li>
+<li>The Rust <code>RpcServer</code> is exercised only through rpcd (Phase 7). No unit test calls it directly.</li>
+</ul>
+<hr>
+<h2 id="5-kernel-phase-6--read-for-grammar_loader-parser-langsmod-symbol_table-call_graph-cpg-incremental-ast-summary-for-cfg-pdg-query">5. Kernel (Phase 6) — [READ for grammar_loader, parser, langs/mod, symbol_table, call_graph, cpg, incremental, ast; SUMMARY for cfg, pdg, query]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>rust/crates/codeguardian-kernel/src/ast.rs</code> — flat arena, 36-byte <code>AstNode</code>, <code>NodeKind</code> (82 variants), <code>StringTable</code></li>
+<li><code>rust/crates/codeguardian-kernel/src/parser.rs</code> — tree-sitter wrapper; <code>parse_file(&amp;dyn GrammarSource, &amp;str) -&gt; ParseResult</code></li>
+<li><code>rust/crates/codeguardian-kernel/src/symbol_table.rs</code> — symbol extraction and scoped lookup</li>
+<li><code>rust/crates/codeguardian-kernel/src/call_graph.rs</code> — receiver-aware <code>resolve_callee</code> (simple, <code>self.foo</code>, <code>Class.foo</code>)</li>
+<li><code>rust/crates/codeguardian-kernel/src/cfg.rs</code> — per-function CFG, 7 edge kinds</li>
+<li><code>rust/crates/codeguardian-kernel/src/pdg.rs</code> — control + data dependence via post-dominator tree and reaching definitions</li>
+<li><code>rust/crates/codeguardian-kernel/src/cpg.rs</code> — merge into a graph, serialize to the 64-byte-header binary format</li>
+<li><code>rust/crates/codeguardian-kernel/src/incremental.rs</code> — file-level update</li>
+<li><code>rust/crates/codeguardian-kernel/src/query.rs</code> — eleven O(1) query methods</li>
+<li><code>rust/crates/codeguardian-kernel/src/grammar_loader.rs</code> — runtime <code>.so</code> grammar loading</li>
+<li><code>rust/crates/codeguardian-kernel/src/langs/{mod,python,typescript,javascript,java,go,rust,c,cpp}.rs</code></li>
+</ul>
+<p><strong>What it does:</strong> Parses source with tree-sitter into a flat arena. Extracts symbols, builds a call graph, builds a per-function CFG and PDG, merges all of it into one CPG, serializes to disk with a checksum. Answers O(1) queries over the graph. Supports incremental updates when a single file changes. Eight languages compiled in via <code>LanguageModule</code> trait; new languages can be loaded at runtime from a shared library.</p>
+<p><strong>Public surface:</strong> <code>from codeguardian_kernel import CodePropertyGraph, NodeKind, EdgeKind, Language, LanguageModule, GrammarSource, parse_file, build_cfg, build_pdg, extract_symbols, extract_calls, GrammarLoader, load_and_register, dispatch_by_name</code>. From Python: <code>codeguardian._native.build_graph(sources)</code>, <code>.graph_summary(bytes)</code>, <code>.load_grammar(name, path)</code>, <code>.list_languages()</code>.</p>
+<p><strong>Depends on:</strong> <code>tree-sitter</code> 0.24, eight grammar crates, <code>libloading</code>, <code>serde</code>, <code>thiserror</code>, <code>tracing</code>.</p>
+<p><strong>If I delete it:</strong> blast radius has no graph to query. Every plugin's <code>parse</code> fails. The deep test fails at &quot;kernel parse.&quot; <code>tests/unit/rust/test_kernel.py</code> and <code>test_kernel_multilang.py</code> (roughly 60 tests) fail.</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li><code>G-15</code>: C/C++ <code>function_definition</code> puts the name inside a nested declarator chain. <code>parser.rs::extract_name_id</code> does not walk it. C/C++ free functions produce no symbols and cannot be targets of resolved calls. Best-effort tier.</li>
+<li><code>G-16</code>: <code>mod.foo()</code> cross-file resolution for ambiguous names. <code>self.foo()</code> and <code>Class.foo()</code> resolve; module-qualified calls do not when the callee name is not unique. Under-reports caller counts on real code.</li>
+<li><code>G-17</code>: C# removed after <code>tree-sitter-c-sharp</code> 0.23.5 proved ABI-incompatible with tree-sitter 0.24.</li>
+<li><code>cfg.rs</code>, <code>pdg.rs</code>, <code>query.rs</code>, and the eight language modules are known from summaries, not full reads. Verify before touching.</li>
+</ul>
+<hr>
+<h2 id="6-blast-radius-phase-7--read-for-callersrs-summary-for-the-rest">6. Blast Radius (Phase 7) — [READ for <a href="http://callers.rs">callers.rs</a>, SUMMARY for the rest]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>rust/crates/codeguardian-blast/src/callers.rs</code> — direct and transitive caller resolution, <code>MAX_TRANSITIVE_CALLERS = 2000</code></li>
+<li><code>rust/crates/codeguardian-blast/src/contracts.rs</code> — narrow <code>None</code>-dereference detector</li>
+<li><code>rust/crates/codeguardian-blast/src/coverage.rs</code> — filename-pattern coverage gap detection</li>
+<li><code>rust/crates/codeguardian-blast/src/score.rs</code> — weighted score, cap 100</li>
+<li><code>rust/crates/codeguardian-blast/src/recommendation.rs</code> — proceed/review/block with critical overrides</li>
+<li><code>rust/crates/codeguardian-blast/src/lib.rs</code> — target resolution and report assembly</li>
+</ul>
+<p><strong>What it does:</strong> Given a CPG and a target symbol, produces a report with direct callers, transitive callers (BFS with visited-set cycle protection), contract violations (one specific shape), coverage gaps (filename heuristic), blast score (0-100), and recommendation (proceed/review/block).</p>
+<p><strong>Public surface:</strong> <code>_native.compute_blast(cpg_bytes, path, qualified_name) -&gt; dict</code> with keys <code>target_node_id</code>, <code>direct_callers</code>, <code>transitive_callers</code>, <code>transitive_truncated</code>, <code>contract_violations</code>, <code>coverage_gaps</code>, <code>blast_score</code>, <code>recommendation</code>. Each caller carries <code>node_id</code>, <code>qualified_name</code>, <code>path</code>, <code>line</code>, <code>depth</code>, <code>call_kind</code>.</p>
+<p><strong>Depends on:</strong> <code>codeguardian-kernel</code> CPG.</p>
+<p><strong>If I delete it:</strong> Phase 1 gate disappears. Deep test target ranking, contract verifier input, and the CLI blast view all break. <code>tests/unit/rust/test_blast.py</code> and <code>test_blast_multilang.py</code> fail.</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li>Contract detection is one narrow pattern. Detects <code>x = get(); x.attr</code> without a guard. Does not detect wrong type, wrong exception, wrong side-effect ordering, or wrong idempotency assumptions.</li>
+<li>Coverage is filename-based, not execution-based. <code>test_*.py</code> naming is not coverage. Wrong by 40-60% on real code.</li>
+<li>Score weights (2, 1, 8, 3) are heuristics, never calibrated against real data.</li>
+<li><code>count_unresolved_call_sites</code> exists in <code>callers.rs</code> but is not wired into the report. The dict returned to Python does not include unresolved sites. A report saying &quot;3 callers&quot; can hide 30 unresolved call sites.</li>
+<li>G-16 under-reports. Same root cause as §5.</li>
+</ul>
+<hr>
+<h2 id="7-sandbox-phase-7--summary">7. Sandbox (Phase 7) — [SUMMARY]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>rust/crates/codeguardian-sandbox/src/backend.rs</code> — <code>SandboxBackend</code> trait, environment sanitization, working_dir validation, quota validation</li>
+<li><code>rust/crates/codeguardian-sandbox/src/bubblewrap.rs</code> — Linux backend</li>
+<li><code>rust/crates/codeguardian-sandbox/src/docker.rs</code> — Docker fallback</li>
+<li><code>rust/crates/codeguardian-sandbox/src/seatbelt.rs</code> — stub</li>
+<li><code>rust/crates/codeguardian-sandbox/src/firecracker.rs</code> — stub</li>
+<li><code>rust/crates/codeguardian-sandbox/src/{network,pool,quotas}.rs</code></li>
+<li><code>python/codeguardian/core/sandbox/{bubblewrap,docker,seatbelt,firecracker}_backend.py</code>, <code>backend_selector.py</code></li>
+<li><code>rust/crates/codeguardian-rpcd/</code> — the daemon that hosts them</li>
+</ul>
+<p><strong>What it does:</strong> Isolates execution. Every <code>sandbox.execute</code> is a JSON-RPC call to <code>rpcd</code>, which sanitizes env, validates working_dir, checks quotas, spawns <code>bwrap</code> or <code>docker</code>, enforces a two-layer timeout, and returns the result. <code>working_dir</code> is bind-mounted with no path translation. Network is disabled except during dependency resolution. Python never spawns a process; only the daemon does.</p>
+<p><strong>Public surface:</strong> <code>from codeguardian.core.sandbox import BubblewrapBackend, DockerBackend, SeatbeltBackend, FirecrackerBackend, select_backend</code>. Each implements <code>SandboxBackend.create/execute/destroy/supports_language/get_resource_limits</code>.</p>
+<p><strong>Depends on:</strong> <code>bwrap</code> or <code>docker</code> binary, <code>codeguardian-rpcd</code>.</p>
+<p><strong>If I delete it:</strong> the pipeline cannot run tests, cannot run pytest, cannot run the Tester's characterization tests. <code>tests/unit/rust/test_sandbox.py</code> and <code>test_sandbox_enforcement.py</code> fail. The deep test's sandbox steps fail.</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li>Seatbelt and Firecracker are stubs. Every method raises <code>SANDBOX_CREATE_FAILED</code>.</li>
+<li>Docker tested only on CI, not on the dev environment (no WSL integration).</li>
+<li>cgroups v2 writing is not implemented; resource limits use simple <code>--die-with-parent</code> + outer timeout, not true memory caps.</li>
+<li>G-16 (unrelated) but visible here: the deep test's <code>pip install -e .</code> needs <code>--break-system-packages</code> on Python 3.12 systems.</li>
+<li>I have not read any sandbox file. All claims from summaries.</li>
+</ul>
+<hr>
+<h2 id="8-audit-phase-7--read-for-verify-writer-hash_chain">8. Audit (Phase 7) — [READ for verify, writer, hash_chain]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>rust/crates/codeguardian-audit/src/hash_chain.rs</code> — canonical JSON encoding, SHA-256, FNV-1a primitives</li>
+<li><code>rust/crates/codeguardian-audit/src/writer.rs</code> — append-only JSONL, head re-scan per append</li>
+<li><code>rust/crates/codeguardian-audit/src/verify.rs</code> — chain verification</li>
+<li><code>rust/crates/codeguardian-audit/src/export.rs</code> — JSONL and JSON-array formats</li>
+<li><code>rust/crates/codeguardian-audit/src/lib.rs</code> — <code>AuditEntry</code>, <code>GENESIS</code>, error types</li>
+</ul>
+<p><strong>What it does:</strong> Every entry carries a <code>payload_hash</code>, <code>prev_hash</code>, and <code>entry_hash</code>. The chain formula is <code>entry_hash = sha256(prev_hash + payload_hash)</code>, <code>prev_hash</code> = previous entry's <code>entry_hash</code>, and <code>GENESIS</code> for the first. Payload hashing uses canonical JSON — sorted keys, no whitespace — so map insertion order does not change the hash. The file is append-only JSONL, owned by the Rust process, never opened by Python.</p>
+<p><strong>Public surface:</strong> The <code>codeguardian-rpcd</code> methods <code>audit.write</code>, <code>audit.verify</code>, <code>audit.export</code>. Called from Python via <code>JSONRPCBridge.call(...)</code>.</p>
+<p><strong>Depends on:</strong> <code>tokio</code>, <code>serde_json</code>, <code>sha2</code>.</p>
+<p><strong>If I delete it:</strong> no audit trail exists. Every run's provenance is lost. <code>tests/unit/rust/test_audit.py</code> fails. The consent gate has nothing to append to.</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li>No file locking. Single-writer assumption. A second writer corrupts the chain silently.</li>
+<li><code>head_hash()</code> on every append reads the full file. O(n) per append. Fine up to ~10k entries.</li>
+<li>No cryptographic signing (deferred to v2 per <code>D-024</code>).</li>
+</ul>
+<hr>
+<h2 id="9-policy-rpc-rpcd-phase-7--summary">9. Policy, RPC, rpcd (Phase 7) — [SUMMARY]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>rust/crates/codeguardian-policy/src/{sandbox_policy,plugin_permissions,resource_limits,lib}.rs</code></li>
+<li><code>rust/crates/codeguardian-rpc/src/{protocol,server,client,lib}.rs</code></li>
+<li><code>rust/crates/codeguardian-rpcd/src/{main,handlers}.rs</code></li>
+</ul>
+<p><strong>What it does:</strong> Three pre-flight checks (sandbox spec against policy, plugin permissions against grant, quota against host) plus the JSON-RPC server that hosts the seven methods, plus the daemon binary. The policy crate exposes three PyO3 functions: <code>check_sandbox_spec</code>, <code>check_plugin_permissions</code>, <code>detect_host_limits</code>.</p>
+<p><strong>Public surface:</strong> <code>_native.check_sandbox_spec(...)</code>, <code>_native.check_plugin_permissions(...)</code>, <code>_native.detect_host_limits()</code>. The daemon binary <code>codeguardian-rpcd</code> at <code>$HOME/.cache/codeguardian-target/release/</code>.</p>
+<p><strong>Depends on:</strong> <code>tokio</code>, <code>serde_json</code>, <code>codeguardian-sandbox</code>, <code>codeguardian-audit</code>.</p>
+<p><strong>If I delete it:</strong> sandbox requests are not policy-checked. Plugin manifests are not validated against grants. Sandbox and audit calls have no transport. <code>tests/unit/rust/test_sandbox.py</code> fails.</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li>Policy checks are not wired into the current pipeline. They exist; Phase 13 will call them.</li>
+<li>I have not read any policy or rpc file. All claims from summaries.</li>
+</ul>
+<hr>
+<h2 id="10-providers-phase-8--partial">10. Providers (Phase 8) — [PARTIAL]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>python/codeguardian/core/providers/local_repository.py</code>, <code>github_repository.py</code>, <code>gitlab_repository.py</code></li>
+<li><code>python/codeguardian/core/providers/apply_provider.py</code> — [READ in full]</li>
+<li><code>python/codeguardian/core/providers/anthropic_model.py</code>, <code>openai_model.py</code>, <code>deepseek_model.py</code>, <code>openai_compatible.py</code></li>
+<li><code>python/codeguardian/core/providers/model_registry.py</code>, <code>fallback_router.py</code>, <code>metadata.json</code>, <code>registry.json</code></li>
+</ul>
+<p><strong>What it does:</strong> Three repository providers (all shell out to real <code>git</code>), one apply provider (four-step consent gate, audit entry before first <code>git apply</code>, rollback writes its own audit entry — G-20 closed), four model adapters, a discovery-driven model registry (calls <code>/models</code> per provider, merges with <code>metadata.json</code>, filters by role constraints, excludes families for verifier independence), and a fallback router that retries per error class.</p>
+<p><strong>Public surface:</strong> <code>from codeguardian.core.providers import LocalProvider, GitHubProvider, GitLabProvider, ApplyProvider, AnthropicProvider, OpenAIProvider, DeepSeekProvider, OpenAICompatibleProvider, ModelRegistry, FallbackModelProvider</code>.</p>
+<p><strong>Depends on:</strong> <code>git</code> binary, <code>httpx</code>, <code>anthropic</code>, <code>openai</code>, <code>codeguardian.interfaces</code>.</p>
+<p><strong>If I delete it:</strong> nothing can clone a repo or call a model. <code>tests/contracts/test_repository_contract.py</code>, <code>test_apply_contract.py</code>, <code>test_model_contract.py</code> (~62 tests) fail. The deep test fails at &quot;clone is real git repo.&quot;</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li><code>_ADAPTER_CLASSES</code> is a hardcoded dict in <code>model_registry.py</code>. Adding a new provider adapter is a Rule 1 escalation on that file. See <code>docs/modularity-audit.md §4.2</code>.</li>
+<li><code>G-16</code> (kernel) means blast results are under-reported for cross-file ambiguous names. This is the highest-impact gap on real repos.</li>
+<li><code>G-21</code> (closed): <code>pyo3/blast.rs</code> emitted <code>file_path</code> instead of schema-required <code>path</code>. Fixed.</li>
+<li><code>G-20</code> (closed): <code>apply_provider.rollback</code> did not write an audit entry. Fixed. Chain now shows 4 entries after apply + rollback.</li>
+</ul>
+<hr>
+<h2 id="11-plugins-phase-9--read-in-full">11. Plugins (Phase 9) — [READ in full]</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li><code>python/codeguardian/core/plugins/{__init__,manifest,versioning,loader,fault_barrier,permissions,registry}.py</code></li>
+<li><code>python/codeguardian/plugins_bundled/languages/{python,typescript,javascript,java,go,rust,c,cpp}/plugin.py</code></li>
+<li><code>python/codeguardian/plugins_bundled/tools/ast_grep/plugin.py</code>, <code>tools/code_analysis/plugin.py</code></li>
+<li><code>python/codeguardian/plugins_bundled/reporters/sarif_reporter/plugin.py</code></li>
+<li><code>rust/crates/codeguardian-kernel/src/grammar_loader.rs</code></li>
+</ul>
+<p><strong>What it does:</strong> Discovery, validation, loading, permission enforcement, timeout enforcement, and dispatch for 11 bundled plugins (8 languages, 2 tools, 1 reporter). Two discovery sources (<code>BundledSource</code> walks directories, <code>EntryPointSource</code> uses <code>importlib.metadata</code>). Manifests validated against <code>schemas/plugin-manifest.json</code> v1.2. Interface version negotiated N/N-1 with clear rejection on <code>2.x+</code> and <code>0.x</code>. Audit hook installed at package import. Fault barrier with sync <code>call</code> and async <code>call_async</code> paths. Runtime grammar loading for third-party languages.</p>
+<p><strong>Public surface:</strong> <code>from codeguardian.core.plugins import PluginRegistry, PluginSpec, PluginSource, BundledSource, EntryPointSource, RegisteredPlugin, FaultBarrier, PluginManifest, PluginPermissions, check_interface_version, validate, install_audit_hook, is_installed, plugin_active, sandbox_scope, set_schema_path, shutdown_executor</code>. 22 public symbols.</p>
+<p><strong>Depends on:</strong> <code>jsonschema</code>, <code>importlib.metadata</code>, <code>concurrent.futures</code>, <code>contextvars</code>, <code>sys.addaudithook</code>, <code>_native.load_grammar</code> / <code>list_languages</code>.</p>
+<p><strong>If I delete it:</strong> every language, tool, and reporter plugin disappears. <code>tests/contracts/test_language_contract.py</code> (72 tests), <code>test_tool_contract.py</code> (14 tests), <code>test_reporter_contract.py</code> (4 tests), <code>tests/integration/test_plugin_loading.py</code> (17 tests), <code>test_dynamic_grammar_loading.py</code> (6 tests) all fail. The kernel's grammar loader has no caller.</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li>Audit hook bypassed by C extensions. <code>sys.addaudithook</code> is Python-level only.</li>
+<li><code>FaultBarrier</code> cannot time out a pure-Python busy loop holding the GIL. Documented in the docstring.</li>
+<li><code>_TYPE_DIRS</code>, <code>_PROTOCOLS</code>, <code>_ENTRY_POINT_GROUPS</code>, <code>_EXPECTED_HIGH_TIER</code> are four separate tables that must agree. See <code>docs/modularity-audit.md §4.4, §4.5</code>.</li>
+<li>Dynamic grammar loading is proven only against a <code>.so</code> that was not available in the dev environment (4 tests skipped). <code>tests/integration/test_dynamic_grammar_loading.py</code> skips cleanly when <code>libtree_sitter_ruby</code> is absent.</li>
+</ul>
+<hr>
+<h2 id="12-deep-test-cross-cutting--read-in-full">12. Deep Test (cross-cutting) — [READ in full]</h2>
+<p><strong>Files:</strong> <code>sandtest/deep_test.py</code></p>
+<p><strong>What it does:</strong> Clones a real repository, parses it, discovers candidate functions structurally via AST, ranks by blast fan-in, runs each candidate twice inside a sandbox to classify determinism, generates a characterization test from the recorded output, refactors the picked target with a real model, applies the diff, verifies behavior via characterization test + three verifiers, rolls back, and proves the moat by injecting AST behavioral drift and asserting the value check catches it. Every step reports <code>[PASS]</code>, <code>[FAIL]</code>, <code>[SKIP]</code>, <code>[XFAIL]</code>, or <code>[WARN]</code>.</p>
+<p><strong>Public surface:</strong> <code>python sandtest/deep_test.py</code>. Reads env vars <code>CODEGUARDIAN_DEEP_REPO</code> (default <code>psf/requests</code>), <code>CODEGUARDIAN_DEEP_DEPTH</code> (default 20), <code>CODEGUARDIAN_DEEP_SEED</code> (default 42). Requires <code>bwrap</code>, <code>codeguardian-rpcd</code>, <code>_native</code>, and <code>GROQ_API_KEY</code>.</p>
+<p><strong>Depends on:</strong> every subsystem in §1 through §11.</p>
+<p><strong>If I delete it:</strong> nothing in <code>pytest tests/</code> fails. This is the only end-to-end proof of the system. Deleting it means no proof that the pipeline works, no proof that the moat catches a bad refactor, no proof of real-repo behavior.</p>
+<p><strong>Last run result:</strong> 59 passed, 2 xfailed (C/C++ declarators), 0 warnings. Real Groq writer (openai/gpt-oss-120b), real verifier (qwen/qwen3.8-27b), byte-identical rollback, 4 audit entries verified, AST drift caught as <code>semantic-drift</code>.</p>
+<p><strong>Honest gaps:</strong></p>
+<ul>
+<li>Only one real repository proven: <code>psf/requests</code>. TypeScript, JavaScript, Java, Go, Rust refactor flows have never been run end-to-end.</li>
+<li>Target discovery uses Python <code>ast</code>. Non-Python deep tests require new discovery functions.</li>
+<li>Fault injection is AST-based, not model-based. The Writer's attempt to break behavior is combined with AST drift on top, so the value check fires even if the model did not comply. This is correct for proving the moat but does not test whether the model can be relied on to produce bad refactors on command.</li>
+<li>Flask fails at generator imports because transitive deps (<code>werkzeug</code>, <code>jinja2</code>, <code>click</code>) do not install with <code>-e .</code>. Flask is not a usable fixture until this is resolved.</li>
+</ul>
+<hr>
+<h2 id="13-what-does-not-exist-yet-phases-10-through-16">13. What Does Not Exist Yet (Phases 10 through 16)</h2>
+<p>For completeness — not written, no files to read:</p>
+<table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>Purpose</th>
+<th>Files (planned)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>10</strong></td>
+<td>Prompts for seven agents</td>
+<td><code>prompts/{analyst,tester,writer,correctness_verifier,security_verifier,contract_verifier,skill_curator}/v1.0.0.md</code></td>
+</tr>
+<tr>
+<td><strong>11</strong></td>
+<td>Agent implementations</td>
+<td><code>core/agents/{recon,blast,analyst,tester,writer,correctness_verifier,security_verifier,contract_verifier,skill_curator}.py</code></td>
+</tr>
+<tr>
+<td><strong>12</strong></td>
+<td>Skill library operations</td>
+<td><code>core/skills/{library,indexer,retriever,embeddings}.py</code></td>
+</tr>
+<tr>
+<td><strong>13</strong></td>
+<td>LangGraph orchestrator</td>
+<td><code>core/orchestrator/{phase_gates,consent,verification_prompt,checkpointing,langgraph_orchestrator}.py</code></td>
+</tr>
+<tr>
+<td><strong>14</strong></td>
+<td>CLI commands and TUI</td>
+<td><code>cli/main.py</code>, <code>cli/commands/*.py</code>, <code>cli/views/*.py</code>, <code>cli/ui/*.py</code>, <code>cli/output/*.py</code></td>
+</tr>
+<tr>
+<td><strong>15</strong></td>
+<td>MCP client/server + reporters</td>
+<td><code>core/mcp/*.py</code>, <code>core/reporting/*.py</code></td>
+</tr>
+<tr>
+<td><strong>16</strong></td>
+<td>Full assembly</td>
+<td><code>scripts/integration_phase.py</code>, <code>scripts/validate_schemas.py</code>, <code>tests/e2e/*.py</code>, <code>tests/fixtures/*.py</code></td>
+</tr>
+</tbody>
+</table>
+<p>Every file in these phases is currently a stub or does not exist. The pipeline has never run end-to-end without the deep test's manual orchestration. <code>codeguardian refactor</code> does not work today.</p>
+<hr>
+<h2 id="14-how-to-verify-this-file">14. How to verify this file</h2>
+<p>For each [SUMMARY] section, in order:</p>
+<ol>
+<li>Open the primary file.</li>
+<li>Read the top-of-file module docstring and the type signatures of the public functions.</li>
+<li>Run <code>pytest tests/ -k &quot;&lt;subsystem_name&gt;&quot;</code> and read the test names.</li>
+<li>Confirm the &quot;What it does&quot; line matches what you now know.</li>
+</ol>
+<p>For each [PARTIAL] section, do the same for the files marked as unread.</p>
+<p>For each [READ] section, spot-check one claim per subsection against the actual file. The claim I am most likely to have wrong is a <code>depends on</code> entry (I named dependencies from memory).</p>
+<p>For the <code>If I delete it</code> claims, run one test named in the section and confirm it fails when the subsystem is disabled. If it does not fail, the claim is wrong.</p>
+<p>When a claim is wrong, correct this file. Do not correct the code. The code is what it is; this file is a map, and maps drift. Fixing the map is cheaper than fixing the code, and it is what makes the map trustworthy next time.</p>
+<hr>
+<h2 id="15-related-documents">15. Related Documents</h2>
+<ul>
+<li><code>docs/modularity-audit.md</code> — modular vs non-modular analysis through Phase 9</li>
+<li><code>BUILD_STATE.md</code> — current gaps (G-1 through G-25)</li>
+<li><code>BUILD_ORDER.md</code> — phase plan</li>
+<li><code>docs/04-architecture.md</code> — full system design</li>
+<li><code>docs/05-data-model.md</code> — schemas and storage</li>
+<li><code>docs/public-api.md</code> — public surface reference (Phase 5 snapshot)</li>
+<li><code>sandtest/README.md</code> — deep test documentation</li>
+</ul>
+
+            <script async src="https://cdn.jsdelivr.net/npm/katex-copytex@latest/dist/katex-copytex.min.js"></script>
+
+        </body>
+        </html>

@@ -334,13 +334,9 @@ impl SandboxBackend for DockerBackend {
                 })
             }
             Err(_) => {
-                let _ = Command::new(&self.binary)
-                    .args(["kill", &container_name])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                let _ = stop_container(&self.binary, &container_name).await;
                 Err(SandboxError::Timeout { timeout_ms })
             }
         }
@@ -370,6 +366,36 @@ async fn collect(task: Option<tokio::task::JoinHandle<(Vec<u8>, bool)>>) -> (Vec
     match task {
         Some(handle) => handle.await.unwrap_or_default(),
         None => (Vec::new(), false),
+    }
+}
+
+/// Stop a running container, awaiting the kill and escalating to
+/// `docker rm -f` if the kill does not complete in five seconds.
+///
+/// The previous implementation spawned `docker kill` and moved on
+/// without waiting for it. If the kill subprocess failed to start, or
+/// if the Docker daemon did not act on it quickly enough, the
+/// container kept running with `--rm` unable to help because the
+/// container was still alive. Awaiting the kill with a bounded
+/// timeout, then falling back to a forced remove, is the only way to
+/// guarantee that a timed-out container is actually stopped.
+async fn stop_container(binary: &PathBuf, name: &str) -> std::io::Result<()> {
+    let kill = Command::new(binary)
+        .args(["kill", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match tokio::time::timeout(Duration::from_secs(5), kill).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        _ => {
+            let _ = Command::new(binary)
+                .args(["rm", "-f", name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+            Ok(())
+        }
     }
 }
 

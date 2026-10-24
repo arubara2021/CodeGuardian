@@ -112,6 +112,48 @@ pub enum SandboxError {
         reason: String,
     },
 
+    /// A quota field is outside the range the backend accepts.
+    #[error("quota field '{field}' value {value} is outside the range [{min}, {max}]")]
+    QuotaOutOfRange {
+        /// The field name, e.g. `"memory_mb"`.
+        field: String,
+        /// The value that was rejected.
+        value: u32,
+        /// The minimum accepted value.
+        min: u32,
+        /// The maximum accepted value.
+        max: u32,
+    },
+
+    /// An environment variable name is a code-injection vector and
+    /// cannot be set inside the sandbox.
+    #[error(
+        "environment variable '{key}' is a code-injection vector and \
+         cannot be set inside the sandbox"
+    )]
+    ForbiddenEnvKey {
+        /// The key that was rejected.
+        key: String,
+    },
+
+    /// The working directory resolves to a protected system path or
+    /// one of its subdirectories.
+    #[error("working directory '{path}' is a protected system path and cannot be used")]
+    WorkingDirForbidden {
+        /// The path that was rejected.
+        path: String,
+    },
+
+    /// The working directory does not exist, is not a directory, or
+    /// cannot be resolved.
+    #[error("working directory '{path}' is not usable: {reason}")]
+    WorkingDirInvalid {
+        /// The path that was rejected.
+        path: String,
+        /// A description of why it is not usable.
+        reason: String,
+    },
+
     /// The handle names a sandbox that does not exist.
     #[error("sandbox not found: {id}")]
     NotFound {

@@ -3,11 +3,14 @@
 The tests exercise the compiled native extension end to end. They are
 skipped entirely when the extension is not built.
 
-The suite is split into two sections. The blast section builds a CPG
-from source files, calls `compute_blast`, and asserts structural facts
-about the returned dictionary. The policy section calls the three
-policy bindings with primitive arguments and asserts that valid inputs
-pass and invalid inputs raise `KernelError` with the expected code.
+The suite has four sections. The blast section builds a CPG from
+source files, calls `compute_blast`, and asserts structural facts
+about the returned dictionary. The contract section exercises the
+narrow contract-detection pattern with a positive case and two
+negative cases. The coverage section exercises the test-file
+reachability heuristic. The policy section calls the three policy
+bindings with primitive arguments and asserts that valid inputs pass
+and invalid inputs raise `KernelError` with the expected code.
 """
 
 from __future__ import annotations
@@ -27,6 +30,10 @@ def _native():
     import codeguardian._native as native
 
     return native
+
+
+def _build(sources):
+    return _native().build_graph(sources)
 
 
 # -- Blast section ------------------------------------------------------
@@ -61,10 +68,6 @@ _MULTIPLE_CALLERS = (
     "def second():\n"
     "    return target()\n"
 )
-
-
-def _build(sources):
-    return _native().build_graph(sources)
 
 
 def test_compute_blast_empty_graph_file_not_found():
@@ -140,6 +143,80 @@ def test_compute_blast_rejects_truncated_cpg():
     with pytest.raises(_native().KernelError) as exc_info:
         _native().compute_blast(data[:50], "main.py", "greet")
     assert exc_info.value.code in ("GRAPH_IO", "GRAPH_TRUNCATED")
+
+
+# -- Contract detection section -----------------------------------------
+
+
+_BARE_RETURN_UNGURADED = (
+    "def get():\n    return\n\n\ndef use():\n    x = get()\n    return x.attr\n"
+)
+
+_BARE_RETURN_GUARDED = (
+    "def get():\n"
+    "    return\n"
+    "\n"
+    "\n"
+    "def use():\n"
+    "    x = get()\n"
+    "    if x is not None:\n"
+    "        return x.attr\n"
+    "    return None\n"
+)
+
+_NON_BARE_RETURN = "def get():\n    return 1\n\n\ndef use():\n    x = get()\n    return x.attr\n"
+
+
+def test_contract_violation_detected_for_bare_return():
+    data = _build([("main.py", "python", _BARE_RETURN_UNGURADED)])
+    result = _native().compute_blast(data, "main.py", "get")
+    assert len(result["contract_violations"]) == 1
+    violation = result["contract_violations"][0]
+    assert violation["risk"] == "warning"
+    assert "caller" in violation
+    assert "assumption" in violation
+    assert "use" in violation["caller"]
+    assert "get" in violation["assumption"]
+
+
+def test_contract_violation_suppressed_by_guard():
+    data = _build([("main.py", "python", _BARE_RETURN_GUARDED)])
+    result = _native().compute_blast(data, "main.py", "get")
+    assert result["contract_violations"] == []
+
+
+def test_contract_violation_skipped_when_target_has_no_bare_return():
+    data = _build([("main.py", "python", _NON_BARE_RETURN)])
+    result = _native().compute_blast(data, "main.py", "get")
+    assert result["contract_violations"] == []
+
+
+# -- Coverage detection section -----------------------------------------
+
+
+_CALLER_ONLY = "def target():\n    return 1\n\n\ndef caller():\n    return target()\n"
+
+_CALLER_AND_TEST = "from main import caller\n\n\ndef test_caller():\n    return caller()\n"
+
+
+def test_coverage_gap_cleared_by_reachable_test_file():
+    data = _build(
+        [
+            ("main.py", "python", _CALLER_ONLY),
+            ("test_main.py", "python", _CALLER_AND_TEST),
+        ]
+    )
+    result = _native().compute_blast(data, "main.py", "target")
+    caller_names = {gap["caller"] for gap in result["coverage_gaps"]}
+    assert "main.py:caller" not in caller_names
+
+
+def test_coverage_gap_reported_when_no_test_files_present():
+    data = _build([("main.py", "python", _CALLER_ONLY)])
+    result = _native().compute_blast(data, "main.py", "target")
+    assert len(result["coverage_gaps"]) >= 1
+    caller_names = {gap["caller"] for gap in result["coverage_gaps"]}
+    assert "main.py:caller" in caller_names
 
 
 # -- Policy section -----------------------------------------------------

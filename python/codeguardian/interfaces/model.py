@@ -7,6 +7,17 @@ OpenAI-compatible local runtimes are treated the same way. The
 pipeline issues model calls concurrently; ``count_tokens`` and
 ``get_available_models`` are synchronous because they do not perform
 network I/O in the common case.
+
+# Reasoning models
+
+Some models (``gpt-oss-120b``, ``o1``, ``o3``) spend tokens on internal
+reasoning before emitting visible text. When ``max_tokens`` is small,
+the entire budget can be consumed by reasoning, producing an empty
+response with ``finish_reason="length"``. The ``max_reasoning_tokens``
+field lets the caller bound how much of the budget may be spent on
+reasoning, keeping the remainder for visible output. Adapters that do
+not distinguish reasoning tokens from output tokens ignore this field.
+A value of zero means no explicit cap; the adapter's default applies.
 """
 
 from __future__ import annotations
@@ -34,11 +45,15 @@ class ModelOptions:
             verdicts to be reproducible.
         max_tokens: Maximum tokens to generate.
         top_p: Nucleus sampling threshold.
+        max_reasoning_tokens: Upper bound on tokens a reasoning model
+            may spend on internal reasoning before producing visible
+            output. Zero means no explicit cap.
     """
 
     temperature: float = 0.0
     max_tokens: int = 4096
     top_p: float = 1.0
+    max_reasoning_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)

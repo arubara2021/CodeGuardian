@@ -1,8 +1,8 @@
 //! PyO3 bindings for the CodeGuardian native extension.
 //!
 //! Imported from Python as `codeguardian._native`. The module exposes
-//! the kernel, blast, and policy functions and the shared
-//! `KernelError` exception class.
+//! the kernel, blast, and policy functions, the shared `KernelError`
+//! exception class, and the `PyCPG` handle.
 //!
 //! Kernel functions release the GIL while they work. Blast and policy
 //! bindings that read the CPG do the same. Policy bindings that only
@@ -10,9 +10,9 @@
 //! is trivial.
 //!
 //! `load_grammar` and `list_languages` were added in Phase 9 to
-//! support runtime tree-sitter grammar loading. `load_grammar` opens a
-//! shared library and registers a grammar; `list_languages` reports
-//! every language the kernel can currently parse.
+//! support runtime tree-sitter grammar loading. `PyCPG` was added in
+//! Phase 10 to support multi-query access to a deserialized graph
+//! without paying the deserialization cost on every call.
 
 use pyo3::prelude::*;
 
@@ -22,7 +22,7 @@ mod policy;
 
 use crate::blast::compute_blast;
 use crate::kernel::{
-    build_graph, graph_summary, kernel_version, list_languages, load_grammar,
+    build_graph, graph_summary, kernel_version, list_languages, load_grammar, PyCPG,
 };
 use crate::policy::{check_plugin_permissions, check_sandbox_spec, detect_host_limits};
 
@@ -50,6 +50,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(detect_host_limits, module)?)?;
     module.add_function(wrap_pyfunction!(load_grammar, module)?)?;
     module.add_function(wrap_pyfunction!(list_languages, module)?)?;
+    module.add_class::<PyCPG>()?;
     module.add("KernelError", module.py().get_type::<KernelError>())?;
     Ok(())
 }

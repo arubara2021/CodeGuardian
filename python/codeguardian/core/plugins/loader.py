@@ -37,6 +37,7 @@ _TYPE_DIRS: tuple[tuple[str, str], ...] = (
     ("languages", "language"),
     ("tools", "tool"),
     ("reporters", "reporter"),
+    ("context_providers", "context_provider"),
 )
 
 _ENTRY_POINT_GROUPS: tuple[str, ...] = (
@@ -44,6 +45,7 @@ _ENTRY_POINT_GROUPS: tuple[str, ...] = (
     "codeguardian.tool",
     "codeguardian.reporter",
     "codeguardian.verifier",
+    "codeguardian.context_provider",
 )
 
 

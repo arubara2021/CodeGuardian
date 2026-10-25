@@ -8,16 +8,13 @@ wraps it in a ``FaultBarrier``. Any plugin that fails a step is logged
 and skipped; discovery never aborts on a single bad plugin.
 
 The typed getters (``get_language``, ``get_tool``, ``get_reporter``,
-``get_verifier``) return the ``FaultBarrier``. Callers use
-``barrier.call("method", *args)`` for every method invocation, so
-timeouts and exception isolation are enforced uniformly. Non-callable
-metadata such as ``barrier.plugin.name`` is reachable directly through
-``barrier.plugin``.
+``get_verifier``, ``get_context_provider``) return the ``FaultBarrier``.
+Callers use ``barrier.call("method", *args)`` for every method
+invocation, so timeouts and exception isolation are enforced uniformly.
 
 SQLite persistence is optional. When a ``SQLiteStore`` is provided, each
 successfully loaded plugin is upserted into ``plugin_registry``. Failures
-to write are logged and do not abort discovery, because the store may
-not have migrations applied yet.
+to write are logged and do not abort discovery.
 """
 
 from __future__ import annotations
@@ -33,6 +30,7 @@ from typing import Any
 from codeguardian.core.errors import CodeGuardianError, ErrorCode
 from codeguardian.core.storage.sqlite_store import SQLiteStore
 from codeguardian.interfaces import (
+    ContextProvider,
     LanguagePlugin,
     ReporterPlugin,
     ToolPlugin,
@@ -59,7 +57,16 @@ _PROTOCOLS: dict[str, type] = {
     "tool": ToolPlugin,
     "reporter": ReporterPlugin,
     "verifier": VerifierPlugin,
+    "context_provider": ContextProvider,
 }
+
+_ALL_TYPES: tuple[str, ...] = (
+    "language",
+    "tool",
+    "reporter",
+    "verifier",
+    "context_provider",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,10 +87,7 @@ class PluginRegistry:
 
     def __init__(self) -> None:
         self._by_type: dict[str, dict[str, RegisteredPlugin]] = {
-            "language": {},
-            "tool": {},
-            "reporter": {},
-            "verifier": {},
+            type_name: {} for type_name in _ALL_TYPES
         }
 
     # -- construction --------------------------------------------------
@@ -96,24 +100,7 @@ class PluginRegistry:
         sqlite_store: SQLiteStore | None = None,
         schemas_dir: Path | None = None,
     ) -> PluginRegistry:
-        """Discover and register every plugin the sources yield.
-
-        Args:
-            sources: Discovery sources, in order. Duplicates by
-                ``(type, name)`` keep the first registration; later
-                sources are ignored with a warning.
-            sqlite_store: Optional persistence target. When present,
-                each successfully loaded plugin is upserted into
-                ``plugin_registry``.
-            schemas_dir: Optional directory containing
-                ``plugin-manifest.json``. When present, overrides the
-                manifest module's default schema lookup.
-
-        Returns:
-            A populated ``PluginRegistry``. Plugins that failed
-            validation, version check, grammar load, or protocol
-            conformance are absent; the failure was logged.
-        """
+        """Discover and register every plugin the sources yield."""
         if schemas_dir is not None:
             set_schema_path(Path(schemas_dir) / "plugin-manifest.json")
         registry = cls()
@@ -167,10 +154,14 @@ class PluginRegistry:
         """Return the barrier for a verifier plugin, or raise."""
         return self._get("verifier", name)
 
+    def get_context_provider(self, name: str) -> FaultBarrier:
+        """Return the barrier for a context provider plugin, or raise."""
+        return self._get("context_provider", name)
+
     def list_plugins(self) -> list[RegisteredPlugin]:
         """Return every registered plugin, grouped by type then name."""
         result: list[RegisteredPlugin] = []
-        for type_name in ("language", "tool", "reporter", "verifier"):
+        for type_name in _ALL_TYPES:
             result.extend(self._by_type[type_name].values())
         return result
 
@@ -284,7 +275,12 @@ class PluginRegistry:
             source=spec.source,
         )
         self._by_type[manifest.type][manifest.name] = record
-        _LOGGER.info("registered %s plugin %s from %s", manifest.type, manifest.name, spec.source)
+        _LOGGER.info(
+            "registered %s plugin %s from %s",
+            manifest.type,
+            manifest.name,
+            spec.source,
+        )
 
         if sqlite_store is not None:
             self._write_sqlite(sqlite_store, record)

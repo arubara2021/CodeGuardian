@@ -22,6 +22,9 @@ class _StubTool:
 
     name = "stub-tool"
     description = "stub tool for tests"
+    action_kind = "read"
+    sensitivity = "low"
+    is_read_only = True
     input_schema = {"type": "object", "properties": {}}
     output_schema = {"type": "object", "properties": {}}
 
@@ -100,7 +103,7 @@ def test_bundled_discovery_finds_every_plugin() -> None:
 
 def test_bundled_source_yields_matching_specs() -> None:
     specs = discover_all([BundledSource()])
-    assert len(specs) == 11
+    assert len(specs) == 15
     names = {spec.manifest_raw["name"] for spec in specs}
     assert names == {
         "python",
@@ -114,6 +117,10 @@ def test_bundled_source_yields_matching_specs() -> None:
         "ast-grep",
         "code-analysis",
         "sarif",
+        "code-skeleton",
+        "function-body",
+        "call-graph-slice",
+        "list-symbols",
     }
 
 
@@ -223,12 +230,18 @@ async def test_failed_call_disables_plugin() -> None:
 def test_list_plugins_returns_registered_records() -> None:
     registry = PluginRegistry.discover_bundled()
     records = registry.list_plugins()
-    assert len(records) == 11
+    assert len(records) == 15
     assert all(isinstance(record, RegisteredPlugin) for record in records)
     for record in records:
         assert record.name
         assert record.version == "1.0.0"
-        assert record.type in {"language", "tool", "reporter", "verifier"}
+        assert record.type in {
+            "language",
+            "tool",
+            "reporter",
+            "verifier",
+            "context_provider",
+        }
         assert record.manifest.name == record.name
 
 

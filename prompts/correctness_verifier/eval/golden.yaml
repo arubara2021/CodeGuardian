@@ -1,0 +1,162 @@
+# Golden cases for the correctness verifier.
+#
+# Each case is a small realistic diff with an expected verdict. The
+# eval harness renders the prompt with the case's variables, calls the
+# model, validates the output against the schema, and compares the
+# verdict. A model that agrees with the expected verdict on all ten
+# cases passes the case suite.
+#
+# These cases are curated, not exhaustive. They exercise the failure
+# modes the verifier must detect: return-type drift, exception-path
+# removal, side-effect reordering, boundary behavior, and truncation.
+# They do not exercise every shape a diff can take.
+#
+# The diffs are intentionally small. The verifier is meant to reach a
+# verdict from the diff alone. A case that needs surrounding context is
+# a case that should be refused, not guessed.
+
+cases:
+  - id: pass-rename-variable
+    description: Local variable renamed, no behavior change.
+    change_kind: syntactic
+    blast_score: 8
+    expected_verdict: pass
+    diff: |
+      --- a/src/util.py
+      +++ b/src/util.py
+      @@ -1,4 +1,4 @@
+       def normalize(data):
+      -    result = data.strip()
+      -    return result
+      +    cleaned = data.strip()
+      +    return cleaned
+
+  - id: pass-add-type-hints
+    description: Type hints added, implementation unchanged.
+    change_kind: syntactic
+    blast_score: 12
+    expected_verdict: pass
+    diff: |
+      --- a/src/util.py
+      +++ b/src/util.py
+      @@ -1,2 +1,2 @@
+      -def add(a, b):
+      +def add(a: int, b: int) -> int:
+           return a + b
+
+  - id: fail-return-type-change
+    description: Return type changed from int to string.
+    change_kind: semantic
+    blast_score: 45
+    expected_verdict: fail
+    diff: |
+      --- a/src/util.py
+      +++ b/src/util.py
+      @@ -1,3 +1,3 @@
+       def get_id(user):
+      -    return user["id"]
+      +    return str(user["id"])
+
+  - id: fail-remove-exception-handling
+    description: Exception handling removed, error case no longer caught.
+    change_kind: semantic
+    blast_score: 62
+    expected_verdict: fail
+    diff: |
+      --- a/src/io.py
+      +++ b/src/io.py
+      @@ -3,6 +3,4 @@
+       def load(path):
+      -    try:
+      -        return open(path).read()
+      -    except FileNotFoundError:
+      -        return ""
+      +    return open(path).read()
+
+  - id: pass-loop-to-comprehension
+    description: Loop replaced with comprehension, same output.
+    change_kind: syntactic
+    blast_score: 18
+    expected_verdict: pass
+    diff: |
+      --- a/src/util.py
+      +++ b/src/util.py
+      @@ -1,5 +1,3 @@
+       def double_all(items):
+      -    result = []
+      -    for item in items:
+      -        result.append(item * 2)
+      -    return result
+      +    return [item * 2 for item in items]
+
+  - id: fail-reorder-side-effects
+    description: Side effects reordered, observable behavior changes.
+    change_kind: semantic
+    blast_score: 55
+    expected_verdict: fail
+    diff: |
+      --- a/src/io.py
+      +++ b/src/io.py
+      @@ -1,5 +1,5 @@
+       def save_and_notify(record, log, bus):
+      -    bus.publish(record)
+           log.write(record.id)
+      +    bus.publish(record)
+
+  - id: pass-extract-helper
+    description: Function body extracted into helper, behavior preserved.
+    change_kind: semantic
+    blast_score: 25
+    expected_verdict: pass
+    diff: |
+      --- a/src/parse.py
+      +++ b/src/parse.py
+      @@ -1,4 +1,7 @@
+      +def _strip(value):
+      +    return value.strip() if value else value
+      +
+      +
+       def parse(raw):
+      -    return raw.strip() if raw else raw
+      +    return _strip(raw)
+
+  - id: fail-off-by-one
+    description: Range bound changed, one fewer item processed.
+    change_kind: semantic
+    blast_score: 48
+    expected_verdict: fail
+    diff: |
+      --- a/src/util.py
+      +++ b/src/util.py
+      @@ -1,4 +1,4 @@
+       def process_n(items, n):
+      -    for i in range(n):
+      +    for i in range(n - 1):
+               handle(items[i])
+
+  - id: fail-add-none-check
+    description: Added None check changes behavior for None input.
+    change_kind: semantic
+    blast_score: 40
+    expected_verdict: fail
+    diff: |
+      --- a/src/util.py
+      +++ b/src/util.py
+      @@ -1,3 +1,5 @@
+       def greet(name):
+      +    if name is None:
+      +        return ""
+           return f"Hello, {name}"
+
+  - id: refused-truncated-diff
+    description: Diff removes a line but does not show its replacement.
+    change_kind: semantic
+    blast_score: 50
+    expected_verdict: refused
+    diff: |
+      --- a/src/util.py
+      +++ b/src/util.py
+      @@ -1,4 +1,2 @@
+       def compute(a, b):
+      -    return a + b
+      +    # (replacement omitted from diff)

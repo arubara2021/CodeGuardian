@@ -1,8 +1,8 @@
 # CodeGuardian — Build State
 
-**Snapshot date:** 2026-10-24
-**Last phase completed:** Phase 8 — Providers, plus the multi-language kernel extension, plus the deep integration test
-**Next phase to start:** Phase 9 — Plugins (merged scope: 8 blocks, 36 files)
+**Snapshot date:** 2026-10-25
+**Last phase completed:** Phase 10 — Prompts (24 files, plus pre-work: PyCPG handle, three kernel query methods, ToolPlugin action_kind fields, ModelOptions.max_reasoning_tokens, context_provider plugin type, four context provider plugins, BudgetTracker)
+**Next phase to start:** Phase 11 — Agents
 **Phase 0 remaining work:** Deferred to the end of the build, per user decision
 
 ---
@@ -155,9 +155,9 @@ Documented, deferred.
 
 ---
 
-## Phase 9 — designed, not yet started
+## Phase 9 — Plugins (complete)
 
-**Status:** Design settlement complete. No code written. Awaiting start of Block 9-1 (schema verification).
+**Status:** Complete. 36 files. Full write-up in `docs/summaries/phase-9-design.md`. Post-ship findings recorded in `docs/summaries/phases-0-to-8.md` §11.6.
 
 **Scope:** Merged phase. Replaces what was originally planned as Phase 9 (plugin metadata and discovery) plus Phase 9.5 (runtime grammar loading). Total: 8 blocks, 36 files.
 
@@ -235,6 +235,43 @@ Every one of those limitations is documented in `docs/summaries/phase-9-design.m
 
 ---
 
+## Phase 10 — Prompts (complete)
+
+**Status:** Complete. 24 files. Full write-up in `docs/summaries/phase-10.md`.
+
+**Scope expanded from the BUILD_ORDER plan.** The plan said seven prompt files. The phase delivered 24: 4 infrastructure files, 1 base prompt, 7 role prompts, 3 golden-case YAML files, 1 eval harness, 8 test files. The gap is the infrastructure the prompts need to be testable and measurable.
+
+**Delivered:**
+
+| Area | What shipped |
+|---|---|
+| Renderer | Strict `{{var}}` substitution with missing-variable detection and injection guard |
+| Schema | Per-role output validators for verdict, source, context-pack, and skill outputs |
+| Versioning | `(role, version)` pairs with `_base/v<version>.md` resolution and frontmatter parsing |
+| Base prompt | `prompts/_base/v1.0.0.md` holding rules every role inherits |
+| Role prompts | Analyst, tester, writer, skill_curator, correctness_verifier, security_verifier, contract_verifier — each at `v1.0.0.md` |
+| Golden cases | 10 cases per verifier role, 30 total |
+| Eval harness | `run_golden` and `load_golden` for measuring prompt changes against curated cases |
+| Tests | ~178 new tests across renderer, per-role prompts, and eval harness |
+
+**Pre-work completed in the same session (not counted as Phase 10 files):**
+
+| Item | Purpose |
+|---|---|
+| `_native.PyCPG` class | Python handle wrapping a deserialized CPG, avoids re-deserialization per call |
+| Three kernel query methods | `find_declaration`, `qualified_name_of`, `declaration_info` |
+| `ToolPlugin.action_kind` / `sensitivity` / `is_read_only` | Agent approval layer needs action classification |
+| `ModelOptions.max_reasoning_tokens` | Reasoning-model budget cap |
+| `context_provider` plugin type | Registration for the four context providers |
+| Four context provider plugins | `code-skeleton`, `function-body`, `call-graph-slice`, `list-symbols` |
+| `BudgetTracker` | Per-phase tool call and output byte caps |
+
+**Deviations from BUILD_ORDER:** ten, all additive, recorded in `docs/summaries/phase-10.md` §9.
+
+**What Phase 10 hands forward to Phase 11:** seven tested prompts, per-role output schemas, a version-aware loader, a golden-case harness, the `PyCPG` handle, the `cpg_available` context manager, the `BudgetTracker`, and the action-kind model on every tool plugin.
+
+---
+
 ## Test counts
 
 | Phase boundary | Passing | Skipped | Xfailed | Xpassed | Deep test |
@@ -249,10 +286,11 @@ Every one of those limitations is documented in `docs/summaries/phase-9-design.m
 | Phase 7 | 364 | — | — | — | — |
 | Phase 8 | 487 | 2 | 0 | 0 | — |
 | Multi-language | 563 | 2 | 7 | 5 | — |
-| **Current** | **568** | **2** | **7** | **5** | **59 pass, 2 xfail** |
+| Phase 8 hardening + Phase 9 | 704 | 10 | 7 | 5 | 59 pass, 2 xfail |
+| **Phase 10 complete** | **884** | **10** | **7** | **5** | **59 pass, 2 xfail** |
 
 **Pytest command:** `PYTHONPATH=python python3 -m pytest tests/ -q`
-**Current result:** `568 passed, 2 skipped, 7 xfailed, 5 xpassed`
+**Current result:** `884 passed, 10 skipped, 7 xfailed, 5 xpassed`
 
 **Deep test command:** `python sandtest/deep_test.py 2>&1 | tee sandtest_output.txt`
 **Last result:** `Passed: 40, Failed: 0, Skipped: 0, Xfailed: 2, Warnings: 0`
@@ -384,7 +422,7 @@ Every rewrite is additive. No existing variant, arm, function, or field is remov
 3. Do not attempt to re-verify Phases 1 through 8 or the multi-language work or the deep test. They are green. Trust the state.
 4. Ask the user to `source .venv/bin/activate` before any Python command.
 5. Confirm `cargo --version` works inside the venv. If it fails, the venv activate script no longer appends `$HOME/.cargo/bin`.
-6. Start Phase 9 — Plugins. **Use `docs/summaries/phase-9-design.md` as the authoritative spec.**
+6. Start Phase 11 — Agents. **Read `BUILD_ORDER.md` §16, `docs/04-architecture.md` §6, and `docs/summaries/phase-10.md` for the spec.** The prompt infrastructure, output schemas, and `PyCPG` handle are all ready.
 7. Create the branch first: `git checkout -b phase-9-plugins`. All Phase 9 work happens on that branch. `main` stays untouched until the PR is merged.
 8. Write blocks in this order: B-042 (schema verification), B-043 (Rust kernel), B-044 (Python infrastructure), B-045 (language plugins), B-046 (tool plugins), B-047 (reporter plugin), B-048 (contract tests), B-049 (integration tests).
 9. After each block, run the affected tests. The design settlement §10 defines the block-boundary testing pattern.
@@ -503,7 +541,31 @@ Eight commits on `phase-9-plugins`. The exact commit messages will be determined
 
 ## Where the next phase starts
 
-Phase 9 — Plugins. 8 blocks, 36 files. Reference `docs/summaries/phase-9-design.md` for the complete specification.
+Phase 11 — Agents. Reference `BUILD_ORDER.md` §16 and `docs/04-architecture.md` §6 for the specification.
+
+**Blocks:**
+
+1. **B-051** — Deterministic and non-verifier agents: `recon.py`, `blast.py`, `analyst.py`, `tester.py`
+2. **B-052** — Writer and verifiers: `writer.py`, `correctness_verifier.py`, `security_verifier.py`, `contract_verifier.py`, `skill_curator.py`
+3. **B-053** — Agent tests
+
+**What "done" means for Phase 11:**
+
+1. Each agent loads its prompt via `render_prompt(role, version, variables)` from `codeguardian.core.prompts`.
+2. Each agent validates its model output via `validate_output(role, data)`.
+3. Verifier agents return a `VerdictOutput` with a valid verdict or a refusal.
+4. Source-producing agents (Tester, Writer) return a `SourceOutput`, which the pipeline parses or detects as a refusal.
+5. Every agent gets a `PyCPG` handle and clone root through `cpg_available(cpg, clone_root)` before any tool call.
+6. Every agent constructs a `BudgetTracker` per phase and passes it to the `FaultBarrier`.
+7. Every tool call is gated by the agent's mode via the `action_kind` check on `FaultBarrier`.
+8. Integration test: run recon against a fixture repo, then blast, then analyst, then tester against a target, and validate each stage's output against its schema.
+
+**What Phase 11 does NOT deliver:**
+
+1. Orchestration across phases — Phase 13.
+2. Real model call wiring in a running pipeline — the agents are individually callable, not yet wired into a pipeline.
+3. The per-run verification prompt or consent gate — Phase 13.
+4. End-to-end diff application via the Writer — Phase 13.
 
 **Block order:**
 

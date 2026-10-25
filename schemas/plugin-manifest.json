@@ -28,7 +28,8 @@
                 "tool",
                 "verifier",
                 "reporter",
-                "sandbox"
+                "sandbox",
+                "context_provider"
             ]
         },
         "interface_version": {

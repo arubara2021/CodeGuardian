@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from .apply import (
         RollbackResult as RollbackResult,
     )
+    from .context_provider import ContextProvider as ContextProvider
     from .language import (
         LanguagePlugin as LanguagePlugin,
     )
@@ -113,6 +114,12 @@ if TYPE_CHECKING:
     )
     from .sandbox import (
         SandboxSpec as SandboxSpec,
+    )
+    from .tool import (
+        ActionKind as ActionKind,
+    )
+    from .tool import (
+        Sensitivity as Sensitivity,
     )
     from .tool import (
         ToolDescriptor as ToolDescriptor,

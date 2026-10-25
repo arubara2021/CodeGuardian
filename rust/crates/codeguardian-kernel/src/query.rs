@@ -5,9 +5,83 @@
 //! The methods that return `&[u32]` hand back a slice that borrows from
 //! an existing index; the methods that return `Vec<u32>` allocate
 //! because they filter by edge kind.
+//!
+//! # Declaration resolution
+//!
+//! Three methods answer questions about named declarations:
+//!
+//! - `qualified_name_of` walks the AST parent chain and joins the names
+//!   of enclosing declarations with dots. A method `parse` inside
+//!   `Parser` returns `Parser.parse`.
+//! - `find_declaration` returns the node id of the declaration whose
+//!   qualified name matches, or `None` if there is no match.
+//! - `declaration_info` returns a `DeclarationInfo` record with every
+//!   field a caller typically needs, or `None` if the node is not a
+//!   declaration.
+//!
+//! The set of declaration kinds is broader than the blast crate's. The
+//! blast crate recognizes `FunctionDef`, `MethodDef`, and `ClassDef`
+//! only; this module also recognizes `Struct`, `Interface`, `Trait`,
+//! `Enum`, and `Union`. That broader set means a Rust struct or a Java
+//! interface has a qualified name in this module even though blast
+//! cannot resolve it as a target. The two modules disagree on which
+//! kinds count as declarations; the difference is documented so that a
+//! future pass can align them deliberately rather than by accident.
 
 use crate::ast::{NodeKind, NO_NODE};
 use crate::cpg::{node_kind_wire_code, CodePropertyGraph, CpgEdge, CpgNode, EdgeKind};
+
+/// A named declaration with the fields a caller typically needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclarationInfo {
+    /// The CPG node id of the declaration.
+    pub node_id: u32,
+    /// The dot-joined qualified name, e.g. `Parser.parse`.
+    pub qualified_name: String,
+    /// The declaration's own name, without enclosing scopes.
+    pub simple_name: String,
+    /// The kind of declaration.
+    pub kind: NodeKind,
+    /// The path of the file the declaration lives in.
+    pub file_path: String,
+    /// One-based line number of the declaration's start.
+    pub line: u32,
+    /// Byte offset where the declaration begins.
+    pub start_byte: u32,
+    /// Byte offset one past the declaration's end.
+    pub end_byte: u32,
+}
+
+/// Return whether a syntax kind declares a named symbol.
+///
+/// Broader than the blast crate's equivalent: includes class-like
+/// constructs in every supported language, so that a Rust struct or a
+/// Java interface has a qualified name.
+pub fn is_declaration_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::FunctionDef
+            | NodeKind::MethodDef
+            | NodeKind::ClassDef
+            | NodeKind::Struct
+            | NodeKind::Interface
+            | NodeKind::Trait
+            | NodeKind::Enum
+            | NodeKind::Union
+    )
+}
+
+/// Return the AST parent of a node, or `None` if it is the root.
+fn ast_parent(cpg: &CodePropertyGraph, node_id: u32) -> Option<u32> {
+    for &edge_id in cpg.edges_to(node_id) {
+        if let Some(edge) = cpg.edge(edge_id) {
+            if edge.kind == EdgeKind::Ast {
+                return Some(edge.src);
+            }
+        }
+    }
+    None
+}
 
 impl CodePropertyGraph {
     /// Return the number of nodes in the graph.
@@ -133,5 +207,75 @@ impl CodePropertyGraph {
     /// Return the id of the file the node belongs to, or `None`.
     pub fn file_of(&self, node_id: u32) -> Option<u32> {
         self.node(node_id).map(|node| node.file_id)
+    }
+
+    /// Reconstruct a node's qualified name by walking the AST parent
+    /// chain.
+    ///
+    /// A top-level function `parse_config` returns `parse_config`. A
+    /// method `parse` inside class `Parser` returns `Parser.parse`.
+    /// Only declaration nodes contribute to the name; blocks,
+    /// expressions, and other syntax nodes are skipped.
+    pub fn qualified_name_of(&self, node_id: u32) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut current = Some(node_id);
+        while let Some(id) = current {
+            let node = match self.node(id) {
+                Some(n) => n,
+                None => break,
+            };
+            if is_declaration_kind(node.kind) {
+                if let Some(name) = self.string(node.name) {
+                    parts.push(name.to_owned());
+                }
+            }
+            current = ast_parent(self, id);
+        }
+        parts.reverse();
+        parts.join(".")
+    }
+
+    /// Return the id of the declaration in `file_id` whose qualified
+    /// name matches, or `None` if no declaration matches.
+    ///
+    /// When more than one declaration shares the qualified name (a
+    /// rare situation that requires duplicate definitions in one file),
+    /// the first match by node id is returned.
+    pub fn find_declaration(&self, file_id: u32, qualified_name: &str) -> Option<u32> {
+        for &node_id in self.nodes_in_file(file_id) {
+            let node = match self.node(node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            if !is_declaration_kind(node.kind) {
+                continue;
+            }
+            if self.qualified_name_of(node_id) == qualified_name {
+                return Some(node_id);
+            }
+        }
+        None
+    }
+
+    /// Return the fields of a declaration as a `DeclarationInfo`
+    /// record, or `None` if the node is not a declaration.
+    pub fn declaration_info(&self, node_id: u32) -> Option<DeclarationInfo> {
+        let node = self.node(node_id)?;
+        if !is_declaration_kind(node.kind) {
+            return None;
+        }
+        let simple_name = self.string(node.name)?.to_owned();
+        let file_path = self.file_path(node.file_id)?.to_owned();
+        let qualified_name = self.qualified_name_of(node_id);
+        Some(DeclarationInfo {
+            node_id,
+            qualified_name,
+            simple_name,
+            kind: node.kind,
+            file_path,
+            line: node.start_row + 1,
+            start_byte: node.start_byte,
+            end_byte: node.end_byte,
+        })
     }
 }

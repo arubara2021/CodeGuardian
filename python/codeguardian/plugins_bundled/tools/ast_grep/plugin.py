@@ -26,6 +26,9 @@ class AstGrepPlugin:
 
     name = "ast-grep"
     description = "Structural code search via ast-grep CLI."
+    action_kind = "execute"
+    sensitivity = "medium"
+    is_read_only = True
     input_schema = {
         "type": "object",
         "required": ["pattern", "path"],

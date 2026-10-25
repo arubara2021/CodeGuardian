@@ -6,6 +6,20 @@ operation the process performs while a plugin's context is active is
 checked against that plugin's permissions. A violation raises
 ``PermissionError`` and the operation fails.
 
+# Agent mode
+
+A plugin's declared permissions are one side of the check. The other
+side is the calling agent's mode. ``plan`` agents may call read-only
+tools. ``auto-edit`` agents may call read and write tools. ``workspace``
+and ``yolo`` agents may call tools of any action kind.
+
+The ``check_action_allowed`` function performs the mode check. It is
+called by the fault barrier before dispatching a tool call. A tool whose
+``action_kind`` is not permitted by the current agent mode is refused
+with ``PLUGIN_PERMISSION_DENIED``.
+
+# Limitations
+
 Three limitations are documented, not hidden.
 
 1. Env reads are not auditable. CPython fires audit events for
@@ -17,14 +31,12 @@ Three limitations are documented, not hidden.
 2. C extensions bypass the hook. ``sys.addaudithook`` is a Python-level
    facility. A plugin that ships a compiled extension calling ``socket``
    or ``open`` directly reaches the OS without the hook observing the
-   call. Real enforcement against compiled code requires a WASM sandbox
-   or an OS-level capability model, both deferred to Phase 13+.
+   call.
 
 3. Threads spawned by the plugin do not inherit the contextvars.
    ``_ACTIVE`` is thread-local. A plugin that starts its own thread and
    performs an audited operation there does so without an active
-   context, and the hook permits it. Callers who care about this must
-   audit the plugin's source.
+   context.
 
 The hook is installed once per process. It cannot be uninstalled; CPython
 does not expose a removal API. The fast path is a single ``ContextVar``
@@ -44,9 +56,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from codeguardian.core.errors import CodeGuardianError, ErrorCode
+
 __all__ = [
+    "AgentMode",
     "FilesystemLevel",
     "PluginPermissions",
+    "agent_mode_active",
+    "check_action_allowed",
+    "current_agent_mode",
     "install_audit_hook",
     "is_installed",
     "plugin_active",
@@ -54,16 +72,19 @@ __all__ = [
 ]
 
 FilesystemLevel = Literal["none", "sandbox_only", "read_only", "full"]
+AgentMode = Literal["plan", "auto-edit", "workspace", "yolo"]
+
+_AGENT_MODE_ALLOWED: dict[AgentMode, frozenset[str]] = {
+    "plan": frozenset({"read"}),
+    "auto-edit": frozenset({"read", "write"}),
+    "workspace": frozenset({"read", "write", "execute", "network"}),
+    "yolo": frozenset({"read", "write", "execute", "network"}),
+}
 
 
 @dataclass(frozen=True, slots=True)
 class PluginPermissions:
-    """The permissions a plugin declared in its manifest.
-
-    The fields mirror ``schemas/plugin-manifest.json``. All are required
-    at the manifest level except ``process_spawn`` and ``env_read``,
-    which default to ``False`` and ``()`` when absent.
-    """
+    """The permissions a plugin declared in its manifest."""
 
     filesystem: FilesystemLevel
     network: bool
@@ -73,6 +94,7 @@ class PluginPermissions:
 
 _ACTIVE: ContextVar[PluginPermissions | None] = ContextVar("_cg_active_plugin_perms", default=None)
 _ACTIVE_NAME: ContextVar[str | None] = ContextVar("_cg_active_plugin_name", default=None)
+_AGENT_MODE: ContextVar[AgentMode | None] = ContextVar("_cg_agent_mode", default=None)
 _SANDBOX_ROOT: ContextVar[Path | None] = ContextVar("_cg_sandbox_root", default=None)
 
 _INSTALL_LOCK = threading.Lock()
@@ -139,8 +161,6 @@ def _check_open(args: tuple) -> None:
     level = perms.filesystem
 
     if isinstance(path, int):
-        # File-descriptor open. The path is not available, so the only
-        # safe check is the strictest one.
         if level in ("none", "read_only"):
             _deny("filesystem", "open (fd)")
         return
@@ -235,12 +255,7 @@ def _audit_hook(event: str, args: tuple) -> None:
 
 
 def install_audit_hook() -> None:
-    """Install the process-wide audit hook exactly once.
-
-    Called by ``codeguardian.core.plugins.__init__`` at package import,
-    before any plugin module is loaded. Idempotent: a second call is a
-    no-op. The hook cannot be uninstalled.
-    """
+    """Install the process-wide audit hook exactly once."""
     global _INSTALLED
     with _INSTALL_LOCK:
         if _INSTALLED:
@@ -254,15 +269,58 @@ def is_installed() -> bool:
     return _INSTALLED
 
 
-@contextmanager
-def plugin_active(plugin_name: str, permissions: PluginPermissions) -> Iterator[None]:
-    """Activate a plugin's permission context for the current thread.
+def current_agent_mode() -> AgentMode | None:
+    """Return the current agent mode, or ``None`` when no agent is active."""
+    return _AGENT_MODE.get()
 
-    Every audited operation performed inside this context is checked
-    against ``permissions``. Violations raise ``PermissionError``. The
-    context is thread-local and does not propagate to threads the plugin
-    spawns itself.
+
+def check_action_allowed(
+    plugin_name: str,
+    mode: AgentMode,
+    action_kind: str,
+) -> None:
+    """Verify that a plugin action is permitted by the agent mode.
+
+    Raises:
+        CodeGuardianError: ``PLUGIN_PERMISSION_DENIED`` when the action
+            kind is not in the allowed set for the mode.
     """
+    allowed = _AGENT_MODE_ALLOWED.get(mode)
+    if allowed is None:
+        raise CodeGuardianError(
+            ErrorCode.PLUGIN_PERMISSION_DENIED,
+            f"unknown agent mode: {mode!r}",
+            details={"plugin": plugin_name, "mode": mode},
+        )
+    if action_kind not in allowed:
+        raise CodeGuardianError(
+            ErrorCode.PLUGIN_PERMISSION_DENIED,
+            f"action {action_kind!r} is not allowed in agent mode {mode!r}",
+            details={
+                "plugin": plugin_name,
+                "mode": mode,
+                "action_kind": action_kind,
+                "allowed": sorted(allowed),
+            },
+        )
+
+
+@contextmanager
+def agent_mode_active(mode: AgentMode) -> Iterator[None]:
+    """Set the current agent mode for the duration of the block."""
+    token = _AGENT_MODE.set(mode)
+    try:
+        yield
+    finally:
+        _AGENT_MODE.reset(token)
+
+
+@contextmanager
+def plugin_active(
+    plugin_name: str,
+    permissions: PluginPermissions,
+) -> Iterator[None]:
+    """Activate a plugin's permission context for the current thread."""
     name_token = _ACTIVE_NAME.set(plugin_name)
     perms_token = _ACTIVE.set(permissions)
     try:
@@ -274,13 +332,7 @@ def plugin_active(plugin_name: str, permissions: PluginPermissions) -> Iterator[
 
 @contextmanager
 def sandbox_scope(root: Path) -> Iterator[None]:
-    """Set the sandbox root for the current thread.
-
-    Plugins that declare ``filesystem: "sandbox_only"`` may only open
-    paths that resolve under this root. Must be entered before calling
-    into such a plugin. If it is not entered and the plugin attempts any
-    open, the hook denies with "no sandbox scope".
-    """
+    """Set the sandbox root for the current thread."""
     token = _SANDBOX_ROOT.set(Path(root))
     try:
         yield

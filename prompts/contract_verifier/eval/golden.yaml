@@ -1,0 +1,192 @@
+# Golden cases for the contract verifier.
+#
+# Each case pairs a diff with a list of contract assertions. The
+# expected verdict is what a contract reviewer would reach: does the
+# diff preserve every assertion the callers depend on?
+#
+# Cases cover the four assertion outcomes: preserved (pass), broken
+# (fail), undecidable from the diff (uncertain), and contradicted by
+# the assertion list itself (refused).
+
+cases:
+  - id: fail-returns-none
+    description: Assertion says never None; new code returns None on empty.
+    change_kind: contract
+    blast_score: 55
+    expected_verdict: fail
+    contract_assertions: |
+      - caller: src/api.py:handler
+        assumption: get_config() returns a dict, never None
+        severity: critical
+    diff: |
+      --- a/src/config.py
+      +++ b/src/config.py
+      @@ -1,4 +1,6 @@
+       def get_config():
+           data = load()
+      +    if not data:
+      +        return None
+           return data
+
+  - id: pass-add-default-parameter
+    description: Optional parameter added with default, existing callers unaffected.
+    change_kind: signature
+    blast_score: 20
+    expected_verdict: pass
+    contract_assertions: |
+      - caller: src/api.py:fetch
+        assumption: fetch(url) returns a Response
+        severity: warning
+    diff: |
+      --- a/src/client.py
+      +++ b/src/client.py
+      @@ -1,3 +1,3 @@
+      -def fetch(url):
+      +def fetch(url, timeout=30):
+           return _get(url)
+
+  - id: fail-remove-parameter
+    description: Parameter removed that a caller still passes.
+    change_kind: signature
+    blast_score: 70
+    expected_verdict: fail
+    contract_assertions: |
+      - caller: src/api.py:fetch_with_timeout
+        assumption: fetch(url, timeout) accepts a timeout argument
+        severity: critical
+    diff: |
+      --- a/src/client.py
+      +++ b/src/client.py
+      @@ -1,3 +1,3 @@
+      -def fetch(url, timeout):
+      +def fetch(url):
+           return _get(url)
+
+  - id: pass-add-attribute
+    description: Returned dict gains a field; existing assertions unaffected.
+    change_kind: semantic
+    blast_score: 15
+    expected_verdict: pass
+    contract_assertions: |
+      - caller: src/api.py:display
+        assumption: get_user() returns a dict with 'id' and 'name' keys
+        severity: warning
+    diff: |
+      --- a/src/user.py
+      +++ b/src/user.py
+      @@ -1,3 +1,3 @@
+       def get_user(uid):
+      -    return {"id": uid, "name": lookup(uid)}
+      +    return {"id": uid, "name": lookup(uid), "created_at": now()}
+
+  - id: fail-change-exception
+    description: Exception type changed from ValueError to TypeError.
+    change_kind: contract
+    blast_score: 60
+    expected_verdict: fail
+    contract_assertions: |
+      - caller: src/api.py:parse_or_default
+        assumption: parse(s) raises ValueError on malformed input
+        severity: critical
+    diff: |
+      --- a/src/parse.py
+      +++ b/src/parse.py
+      @@ -1,3 +1,3 @@
+       def parse(s):
+      -    raise ValueError("bad input")
+      +    raise TypeError("bad input")
+
+  - id: pass-rename-all-callers
+    description: Parameter renamed and every caller updated in the same diff.
+    change_kind: signature
+    blast_score: 40
+    expected_verdict: pass
+    contract_assertions: |
+      - caller: src/api.py:call_fetch
+        assumption: fetch accepts a positional URL argument
+        severity: warning
+    diff: |
+      --- a/src/client.py
+      +++ b/src/client.py
+      @@ -1,3 +1,3 @@
+      -def fetch(url):
+      +def fetch(target_url):
+           return _get(url)
+      --- a/src/api.py
+      +++ b/src/api.py
+      @@ -2,3 +2,3 @@
+       def call_fetch():
+      -    return fetch("https://example.com")
+      +    return fetch("https://example.com")
+
+  - id: fail-return-type-change
+    description: Return type changed from int to float; assertion depends on int.
+    change_kind: contract
+    blast_score: 50
+    expected_verdict: fail
+    contract_assertions: |
+      - caller: src/api.py:index
+        assumption: count() returns an int usable as a list index
+        severity: critical
+    diff: |
+      --- a/src/count.py
+      +++ b/src/count.py
+      @@ -1,3 +1,3 @@
+       def count(items):
+      -    return len(items)
+      +    return float(len(items))
+
+  - id: pass-add-optional-param
+    description: Keyword-only optional parameter added.
+    change_kind: signature
+    blast_score: 18
+    expected_verdict: pass
+    contract_assertions: |
+      - caller: src/api.py:run
+        assumption: run(task) executes the task and returns None
+        severity: info
+    diff: |
+      --- a/src/runner.py
+      +++ b/src/runner.py
+      @@ -1,3 +1,3 @@
+      -def run(task):
+      +def run(task, *, debug=False):
+           execute(task)
+
+  - id: fail-reorder-side-effects
+    description: Side effect order changed; caller assumes log first.
+    change_kind: contract
+    blast_score: 45
+    expected_verdict: fail
+    contract_assertions: |
+      - caller: src/api.py:process
+        assumption: process(record, log, bus) writes to log before publishing
+        severity: critical
+    diff: |
+      --- a/src/io.py
+      +++ b/src/io.py
+      @@ -1,4 +1,4 @@
+       def process(record, log, bus):
+      -    log.write(record.id)
+           bus.publish(record)
+      +    log.write(record.id)
+
+  - id: refused-contradictory-assertions
+    description: Assertion list contradicts itself; verifier cannot decide.
+    change_kind: contract
+    blast_score: 30
+    expected_verdict: refused
+    contract_assertions: |
+      - caller: src/api.py:first
+        assumption: get() returns a non-empty dict
+        severity: critical
+      - caller: src/api.py:second
+        assumption: get() returns an empty dict when no data exists
+        severity: critical
+    diff: |
+      --- a/src/config.py
+      +++ b/src/config.py
+      @@ -1,3 +1,3 @@
+       def get():
+      -    return {"loaded": True}
+      +    return {}

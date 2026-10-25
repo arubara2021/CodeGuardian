@@ -1,0 +1,147 @@
+# Golden cases for the security verifier.
+#
+# Each case is a small diff that either introduces or does not introduce
+# a security vulnerability. The expected verdict is what a competent
+# security reviewer would reach from the diff alone.
+#
+# Cases cover the patterns the prompt explicitly names: injection,
+# path traversal, credential exposure, unsafe deserialization, crypto
+# downgrade, and shell injection. Plus one truncated case that must be
+# refused and one diff too short to assess.
+
+cases:
+  - id: pass-parameterize-sql
+    description: F-string SQL replaced with parameterized query.
+    change_kind: semantic
+    blast_score: 30
+    expected_verdict: pass
+    diff: |
+      --- a/src/db.py
+      +++ b/src/db.py
+      @@ -1,4 +1,4 @@
+       def find_user(cursor, username):
+      -    cursor.execute(f"SELECT * FROM users WHERE name = '{username}'")
+      +    cursor.execute("SELECT * FROM users WHERE name = ?", (username,))
+
+  - id: fail-f-string-sql
+    description: Parameterized query changed to f-string SQL injection.
+    change_kind: semantic
+    blast_score: 60
+    expected_verdict: fail
+    diff: |
+      --- a/src/db.py
+      +++ b/src/db.py
+      @@ -1,4 +1,4 @@
+       def find_user(cursor, username):
+      -    cursor.execute("SELECT * FROM users WHERE name = ?", (username,))
+      +    cursor.execute(f"SELECT * FROM users WHERE name = '{username}'")
+
+  - id: fail-eval-introduced
+    description: eval() introduced on caller-supplied input.
+    change_kind: semantic
+    blast_score: 70
+    expected_verdict: fail
+    diff: |
+      --- a/src/parse.py
+      +++ b/src/parse.py
+      @@ -1,3 +1,4 @@
+       def parse_expression(expr):
+      -    raise NotImplementedError
+      +    return eval(expr)
+
+  - id: pass-input-validation
+    description: Input length validation added before processing.
+    change_kind: semantic
+    blast_score: 25
+    expected_verdict: pass
+    diff: |
+      --- a/src/handler.py
+      +++ b/src/handler.py
+      @@ -1,3 +1,5 @@
+       def handle(data):
+      +    if len(data) > 10000:
+      +        raise ValueError("input too long")
+           return process(data)
+
+  - id: fail-log-password
+    description: Password written to log line.
+    change_kind: semantic
+    blast_score: 45
+    expected_verdict: fail
+    diff: |
+      --- a/src/auth.py
+      +++ b/src/auth.py
+      @@ -3,3 +3,4 @@
+       def login(username, password):
+           user = load_user(username)
+      +    logger.info("login attempt: user=%s pw=%s", username, password)
+           return check_password(user, password)
+
+  - id: pass-path-sanitization
+    description: Path traversal check added before file open.
+    change_kind: semantic
+    blast_score: 35
+    expected_verdict: pass
+    diff: |
+      --- a/src/files.py
+      +++ b/src/files.py
+      @@ -2,3 +2,7 @@
+       def read_user_file(root, name):
+      +    target = (root / name).resolve()
+      +    if not target.is_relative_to(root.resolve()):
+      +        raise ValueError("path escapes root")
+      -    return (root / name).read_text()
+      +    return target.read_text()
+
+  - id: fail-shell-true
+    description: subprocess with shell=True and caller input introduced.
+    change_kind: semantic
+    blast_score: 75
+    expected_verdict: fail
+    diff: |
+      --- a/src/exec.py
+      +++ b/src/exec.py
+      @@ -1,3 +1,4 @@
+       def run_command(cmd):
+      -    return subprocess.run(["echo", cmd], capture_output=True)
+      +    return subprocess.run(f"echo {cmd}", shell=True, capture_output=True)
+
+  - id: pass-csrf-check
+    description: CSRF token validation added to a form handler.
+    change_kind: semantic
+    blast_score: 20
+    expected_verdict: pass
+    diff: |
+      --- a/src/web.py
+      +++ b/src/web.py
+      @@ -1,3 +1,5 @@
+       def handle_post(request):
+      +    if request.form.get("csrf_token") != request.session.get("csrf_token"):
+      +        raise PermissionError("csrf")
+           return save(request.form)
+
+  - id: pass-upgrade-crypto
+    description: MD5 replaced with SHA-256.
+    change_kind: semantic
+    blast_score: 15
+    expected_verdict: pass
+    diff: |
+      --- a/src/hash.py
+      +++ b/src/hash.py
+      @@ -1,3 +1,3 @@
+       def digest(data):
+      -    return hashlib.md5(data).hexdigest()
+      +    return hashlib.sha256(data).hexdigest()
+
+  - id: uncertain-too-short
+    description: Diff too short to assess security impact.
+    change_kind: semantic
+    blast_score: 30
+    expected_verdict: uncertain
+    diff: |
+      --- a/src/util.py
+      +++ b/src/util.py
+      @@ -1,2 +1,2 @@
+       def do_thing(x):
+      -    return helper(x)
+      +    return helper(x, strict=True)

@@ -63,6 +63,9 @@ class CodeAnalysisPlugin:
 
     name = "code-analysis"
     description = "Structural analysis: dead code detection and complexity."
+    action_kind = "read"
+    sensitivity = "low"
+    is_read_only = True
     input_schema = {
         "type": "object",
         "required": ["path"],

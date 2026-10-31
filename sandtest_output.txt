@@ -1,0 +1,217 @@
+CodeGuardian deep integration test
+repo: https://github.com/psf/requests
+run_id: deep-test-run
+max_targets: 20
+seed: 42
+n_candidates: 1
+timestamp: 2026-10-31T16:46:42.508992+00:00
+
+========================================================================
+[Preflight — check environment]
+========================================================================
+        repo: https://github.com/psf/requests
+        rpcd binary: /home/arba/.cache/codeguardian-target/release/codeguardian-rpcd
+[PASS]  rpcd binary exists
+        bwrap: /usr/bin/bwrap
+[PASS]  bwrap installed
+        GROQ_API_KEY: gsk_Zln2...Qhrk
+[PASS]  GROQ_API_KEY present
+[PASS]  _native extension importable
+
+========================================================================
+[Setup work directory]
+========================================================================
+        work dir: /mnt/c/Users/arun0/Videos/CodeGuardian/sandtest/work
+[PASS]  work dir ready
+
+========================================================================
+[Open telemetry store]
+========================================================================
+        db: /mnt/c/Users/arun0/Videos/CodeGuardian/sandtest/work/deep_test.db
+[PASS]  telemetry store open
+
+========================================================================
+[Clone https://github.com/psf/requests]
+========================================================================
+        clone: /mnt/c/Users/arun0/Videos/CodeGuardian/sandtest/work/clone
+        HEAD: 3c7baaa05ab4 branch: main
+        files: 130
+[PASS]  clone is real git repo
+[PASS]  clone contains Python
+
+========================================================================
+[Kernel parse]
+========================================================================
+        Python files: 37
+        CPG: 4450210 bytes
+[PASS]  kernel parse — 37 files, 4450210 bytes
+
+========================================================================
+[Graph summary]
+========================================================================
+        summary: {'node_count': 87924, 'edge_count': 100134, 'file_count': 37, 'incremental': False}
+[PASS]  graph has nodes — 87924 nodes
+[PASS]  graph has edges — 100134 edges
+
+========================================================================
+[Discover candidate targets]
+========================================================================
+        functions considered: 25
+[PASS]  discovered functions — 25
+        ranked (has callers): 21
+[PASS]  ranked targets — 21
+
+========================================================================
+[Blast radius — invariants on discovered targets]
+========================================================================
+[PASS]  blast ran on discovered targets — 21 targets
+[PASS]  blast found cross-file callers — 21 targets have cross-file callers
+[PASS]  blast invariants checked — 20 targets
+
+========================================================================
+[Write generator and manifest]
+========================================================================
+        manifest entries: 21
+[PASS]  generator and manifest written
+
+========================================================================
+[Write multi-language repo — 8 files]
+========================================================================
+[PASS]  multi-lang files written — 8 files
+
+========================================================================
+[Kernel parse — multi-language]
+========================================================================
+        CPG: 19028 bytes for 8 files
+[PASS]  multi-lang parse — 8 languages
+
+========================================================================
+[Blast radius — per language]
+========================================================================
+[PASS]  blast python:py_add — caller=call_py_add
+[PASS]  blast typescript:ts_add — caller=call_ts_add
+[PASS]  blast javascript:js_add — caller=call_js_add
+[PASS]  blast java:JavaAdd.add — caller=JavaAdd.call_add
+[PASS]  blast go:go_add — caller=call_go_add
+[PASS]  blast rust:rust_add — caller=call_rust_add
+[XFAIL] blast c:c_add — known gap: C/C++ declarator not walked
+[XFAIL] blast cpp:cpp_add — known gap: C/C++ declarator not walked
+
+========================================================================
+[C# rejection guard]
+========================================================================
+[PASS]  c# rejected — ValueError: unrecognized language: csharp
+
+========================================================================
+[Sandbox #1 — network ON, pip install]
+========================================================================
+[PASS]  sandbox #1 created — bwrap-1
+[PASS]  working_dir bind mounted — host=/mnt/c/Users/arun0/Videos/CodeGuardian/sandtest/work/clone sandbox=/mnt/c/Users/arun0/Videos/CodeGuardian/sandtest/work/clone
+[PASS]  python3 in sandbox
+[PASS]  pip install pytest
+[PASS]  pip install -e .
+
+========================================================================
+[Sandbox #2 — network OFF]
+========================================================================
+[PASS]  sandbox #2 created — bwrap-1
+[PASS]  network disabled
+
+========================================================================
+[Run generator in sandbox]
+========================================================================
+        exit: 0
+[PASS]  generator ran in sandbox — exit=0
+
+========================================================================
+[Read generator results]
+========================================================================
+        results: 21, ok: 19, deterministic: 17
+[PASS]  generator produced results — 19/21 callable
+[PASS]  at least one deterministic target — 17
+        picked target: requests.utils.is_ipv4_address (direct=3, transitive=36, deterministic=True)
+[PASS]  tool characterization test generated — deep_test_characterization_is_ipv4_address.py
+
+========================================================================
+[Phase 11 — Recon agent]
+========================================================================
+[PASS]  recon agent completed — 4584698 bytes CPG
+[PASS]  recon artifact has all required fields — 11/11
+[PASS]  recon report_statuses complete — 8 statuses
+[PASS]  recon detected languages — 1 languages
+[PASS]  recon dependency graph has nodes and edges — 40 nodes, 2 edges
+
+========================================================================
+[Phase 11 — Blast agent on requests.utils.is_ipv4_address]
+========================================================================
+[PASS]  blast agent completed — score=100, raw=block, adjusted=block
+[PASS]  blast ranked_callers populated — 72 ranked
+[PASS]  blast caller_search_complete flag set — complete=True
+
+========================================================================
+[Phase 11 — Analyst agent]
+========================================================================
+[PASS]  analyst agent completed — ok
+[PASS]  analyst spec has changes — 1 changes
+[PASS]  analyst spec includes apply_directive — kinds=['apply_directive']
+[PASS]  analyst context_pack_artifact present — yes
+[PASS]  analyst context pack has files — 2 files
+[PASS]  analyst refactor_spec carried in extensions — present
+[NOTE]  rate-limit pause: 53s
+
+========================================================================
+[Phase 11 — Tester agent]
+========================================================================
+[FAIL]  tester agent completed — MODEL_RATE_LIMITED: openai_compatible rate limited the request: {"error":{"message":"Rate limit reached for model `qwen/qwen3.8-27b` in organization `org_01k8zcrcq7ew4svcxz4fmsarca` service tier `on_demand` on input tokens per minute (ITPM): Limit 7000, Used 2917, Requested 4510. Please try again in 3.66s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens","code":"rate_limit_exceeded"}}
+
+
+========================================================================
+[Pytest OLD — tool test and tester agent test]
+========================================================================
+[PASS]  tool value-based test green on old code — deep_test_characterization_is_ipv4_address.py exit=0
+[NOTE]  rate-limit pause: 48s
+
+========================================================================
+[Phase 11 — Writer agent (N=1)]
+========================================================================
+[FAIL]  writer produced candidates — 0 survivors of 1 attempts | all 1 candidates failed: model=0, schema=0, refusal=1, pre_check=0
+[SKIP]  three verifiers completed — writer agent failed
+[SKIP]  skill curator (success) completed — writer agent failed
+[SKIP]  apply — writer agent failed
+[SKIP]  characterization on new code — writer agent failed
+[SKIP]  rollback — writer agent failed
+[SKIP]  telemetry rows written — writer agent failed
+
+========================================================================
+[Audit chain verification]
+========================================================================
+[PASS]  audit chain has expected entries — 0 entries (>= 0), head=GENESIS...
+[PASS]  audit chain not broken
+
+========================================================================
+DEEP TEST SUMMARY
+========================================================================
+Passed: 54
+Failed: 2
+Skipped: 6
+Xfailed: 2
+Warnings: 0
+
+FAILURES:
+  - tester agent completed (MODEL_RATE_LIMITED: openai_compatible rate limited the request: {"error":{"message":"Rate limit reached for model `qwen/qwen3.8-27b` in organization `org_01k8zcrcq7ew4svcxz4fmsarca` service tier `on_demand` on input tokens per minute (ITPM): Limit 7000, Used 2917, Requested 4510. Please try again in 3.66s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens","code":"rate_limit_exceeded"}}
+)
+  - writer produced candidates (0 survivors of 1 attempts | all 1 candidates failed: model=0, schema=0, refusal=1, pre_check=0)
+
+SKIPPED:
+  - three verifiers completed — writer agent failed
+  - skill curator (success) completed — writer agent failed
+  - apply — writer agent failed
+  - characterization on new code — writer agent failed
+  - rollback — writer agent failed
+  - telemetry rows written — writer agent failed
+
+XFAILED (known gaps):
+  - blast c:c_add — known gap: C/C++ declarator not walked
+  - blast cpp:cpp_add — known gap: C/C++ declarator not walked
+
+work/ size: 37.1 MB

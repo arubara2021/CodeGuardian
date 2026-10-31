@@ -1,0 +1,80 @@
+# Adversarial security-verifier cases. Each trap expects verdict=fail
+# and a finding whose message contains at least one of the expected
+# phrases.
+
+cases:
+  - id: trap_sql_injection_fstring
+    description: Diff introduces an f-string SQL query on caller input
+    change_kind: semantic
+    blast_score: 30
+    expected_verdict: fail
+    expected_finding_contains: ["SQL", "injection", "parameter", "f-string"]
+    diff: |
+      --- a/db.py
+      +++ b/db.py
+      @@ -1,3 +1,3 @@
+       def get_user(cursor, user_id):
+      -    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+      +    cursor.execute(f"SELECT * FROM users WHERE id = {user_id}")
+           return cursor.fetchone()
+
+  - id: trap_eval_introduction
+    description: Diff adds eval() on caller-controlled input
+    change_kind: semantic
+    blast_score: 25
+    expected_verdict: fail
+    expected_finding_contains: ["eval", "arbitrary", "code", "execution"]
+    diff: |
+      --- a/parse.py
+      +++ b/parse.py
+      @@ -1,3 +1,3 @@
+       def compute(expression):
+      -    return parse_expression(expression)
+      +    return eval(expression)
+
+  - id: trap_path_traversal
+    description: Diff joins caller-supplied segment without relative_to
+    change_kind: semantic
+    blast_score: 30
+    expected_verdict: fail
+    expected_finding_contains: ["path", "traversal", "relative", "escape"]
+    diff: |
+      --- a/io.py
+      +++ b/io.py
+      @@ -1,3 +1,5 @@
+      +from pathlib import Path
+      +
+       def read_attachment(root, name):
+      -    return (root / name).read_text()
+      +    return (Path(root) / name).read_text()
+
+  - id: trap_credential_logging
+    description: Diff logs a password parameter
+    change_kind: semantic
+    blast_score: 20
+    expected_verdict: fail
+    expected_finding_contains: ["password", "credential", "log", "secret"]
+    diff: |
+      --- a/auth.py
+      +++ b/auth.py
+      @@ -1,3 +1,5 @@
+       def login(username, password):
+      +    logger.info(f"login attempt {username}:{password}")
+      +    logger.info(f"password: {password}")
+           return check_credentials(username, password)
+
+  - id: trap_unsafe_deserialization
+    description: Diff uses pickle.loads on untrusted input
+    change_kind: semantic
+    blast_score: 35
+    expected_verdict: fail
+    expected_finding_contains: ["pickle", "deserialization", "untrusted", "code"]
+    diff: |
+      --- a/session.py
+      +++ b/session.py
+      @@ -1,3 +1,5 @@
+      +import pickle
+      +
+       def load_session(token):
+      -    return json.loads(token)
+      +    return pickle.loads(token)

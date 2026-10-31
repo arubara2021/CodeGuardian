@@ -1,0 +1,131 @@
+# Blast fixtures for test_agent_golden.py. The test builds a CPG from
+# each case's source, calls the blast agent, and validates the
+# expected_* fields. All cases pass clone_root=None, so
+# caller_search_complete is false and the adjusted recommendation
+# shifts one band toward caution. expected_recommendation refers to
+# recommendation_raw from the kernel.
+
+cases:
+  - id: blast_python_helper
+    description: Python helper called from one caller
+    source: |
+      def helper(x):
+          return x * 2
+
+      def caller():
+          return helper(5)
+    target_path: main.py
+    target_qualified_name: helper
+    expected_direct_callers_min: 1
+    expected_recommendation: proceed
+    expected_caller_search_complete: false
+
+  - id: blast_python_orphan
+    description: Python function with no callers
+    source: |
+      def orphan_fn():
+          return 42
+    target_path: main.py
+    target_qualified_name: orphan_fn
+    expected_direct_callers_min: 0
+    expected_recommendation: proceed
+    expected_caller_search_complete: false
+
+  - id: blast_typescript_helper
+    description: TypeScript helper called from one caller
+    source: |
+      function helper(x: number): number {
+          return x * 2;
+      }
+
+      function caller(): number {
+          return helper(5);
+      }
+    target_path: main.ts
+    target_qualified_name: helper
+    expected_direct_callers_min: 1
+    expected_recommendation: proceed
+    expected_caller_search_complete: false
+
+  - id: blast_javascript_helper
+    description: JavaScript helper called from one caller
+    source: |
+      function helper(x) {
+          return x * 2;
+      }
+
+      function caller() {
+          return helper(5);
+      }
+    target_path: main.js
+    target_qualified_name: helper
+    expected_direct_callers_min: 1
+    expected_recommendation: proceed
+    expected_caller_search_complete: false
+
+  - id: blast_java_helper
+    description: Java static method called from another
+    source: |
+      public class Main {
+          public static int helper(int x) {
+              return x * 2;
+          }
+          public static int caller() {
+              return helper(5);
+          }
+      }
+    target_path: Main.java
+    target_qualified_name: Main.helper
+    expected_direct_callers_min: 1
+    expected_recommendation: proceed
+    expected_caller_search_complete: false
+
+  - id: blast_go_helper
+    description: Go function called from another
+    source: |
+      package main
+
+      func helper(x int) int {
+          return x * 2
+      }
+
+      func caller() int {
+          return helper(5)
+      }
+    target_path: main.go
+    target_qualified_name: helper
+    expected_direct_callers_min: 1
+    expected_recommendation: proceed
+    expected_caller_search_complete: false
+
+  - id: blast_rust_helper
+    description: Rust function called from another
+    source: |
+      fn helper(x: i32) -> i32 {
+          x * 2
+      }
+
+      fn caller() -> i32 {
+          helper(5)
+      }
+    target_path: main.rs
+    target_qualified_name: helper
+    expected_direct_callers_min: 1
+    expected_recommendation: proceed
+    expected_caller_search_complete: false
+
+  - id: blast_cpp_helper
+    description: C++ function called from another; best-effort tier
+    source: |
+      int helper(int x) {
+          return x * 2;
+      }
+
+      int caller() {
+          return helper(5);
+      }
+    target_path: main.cpp
+    target_qualified_name: helper
+    expected_direct_callers_min: 0
+    expected_recommendation: proceed
+    expected_caller_search_complete: false

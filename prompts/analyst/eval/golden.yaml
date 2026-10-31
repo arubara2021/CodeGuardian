@@ -1,0 +1,233 @@
+# Analyst golden cases. Consumed by agent_eval.run_golden("analyst", ...)
+# in CI with a deterministic fake, and by Phase 14's real-model
+# evaluation. Each case exercises a different analyst scenario.
+#
+# Expected fields:
+#   expects_refusal: bool, default False
+#   expected_files_min / expected_files_max: file-count bounds
+#   expected_spec_changes_min: informational, not enforced by
+#     agent_eval; used by Phase 14's evaluation
+
+cases:
+  - id: pass_basic_type_hints
+    description: Simple Python function, add type hints
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      directive: add type hints
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0,
+         "recommendation": "proceed"}
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+    expected:
+      expects_refusal: false
+      expected_files_min: 1
+      expected_files_max: 2
+      expected_spec_changes_min: 2
+
+  - id: pass_rename_variable
+    description: Simple rename directive
+    variables:
+      target_symbol: normalize
+      target_path: a.py
+      directive: rename result to cleaned
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0,
+         "recommendation": "proceed"}
+      skeleton: |
+        a.py:
+        5: def normalize(data):
+    expected:
+      expects_refusal: false
+      expected_files_min: 1
+      expected_files_max: 2
+      expected_spec_changes_min: 1
+
+  - id: pass_extract_function
+    description: Extract helper from long function
+    variables:
+      target_symbol: process_all
+      target_path: b.py
+      directive: extract the inner loop into a helper
+      blast_report: |
+        {"direct_callers": [{"qualified_name": "run", "path": "b.py", "line": 40}],
+         "contract_violations": [], "blast_score": 2, "recommendation": "proceed"}
+      skeleton: |
+        b.py:
+        10: def process_all(items):
+        40: def run():
+    expected:
+      expects_refusal: false
+      expected_files_min: 1
+      expected_files_max: 3
+      expected_spec_changes_min: 1
+
+  - id: pass_with_callers
+    description: Type hints with three direct callers
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      directive: add type hints
+      blast_report: |
+        {"direct_callers": [
+           {"qualified_name": "run", "path": "b.py", "line": 5},
+           {"qualified_name": "process", "path": "c.py", "line": 10},
+           {"qualified_name": "main", "path": "d.py", "line": 20}],
+         "contract_violations": [], "blast_score": 6, "recommendation": "proceed"}
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+    expected:
+      expects_refusal: false
+      expected_files_min: 2
+      expected_files_max: 5
+      expected_spec_changes_min: 2
+
+  - id: pass_with_contract_violation
+    description: Contract violation flagged in blast report
+    variables:
+      target_symbol: load_config
+      target_path: config.py
+      directive: add type hints
+      blast_report: |
+        {"direct_callers": [{"qualified_name": "setup", "path": "app.py", "line": 5}],
+         "contract_violations": [
+           {"caller": "setup", "assumption": "returns non-None dict",
+            "risk": "warning"}],
+         "blast_score": 10, "recommendation": "review"}
+      skeleton: |
+        config.py:
+        3: def load_config(path):
+    expected:
+      expects_refusal: false
+      expected_files_min: 2
+      expected_files_max: 6
+      expected_spec_changes_min: 2
+
+  - id: refuse_empty_skeleton
+    description: Empty skeleton means no usable target
+    variables:
+      target_symbol: missing
+      target_path: a.py
+      directive: add type hints
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0,
+         "recommendation": "proceed"}
+      skeleton: ""
+    expected:
+      expects_refusal: true
+      expected_files_min: 0
+      expected_files_max: 0
+
+  - id: pass_class_method
+    description: Type hints on a class method
+    variables:
+      target_symbol: Session.send
+      target_path: sessions.py
+      directive: add type hints to this method
+      blast_report: |
+        {"direct_callers": [{"qualified_name": "Session.request", "path": "sessions.py", "line": 500}],
+         "contract_violations": [], "blast_score": 2, "recommendation": "proceed"}
+      skeleton: |
+        sessions.py:
+        420: class Session:
+        500: def send(self, request):
+    expected:
+      expects_refusal: false
+      expected_files_min: 1
+      expected_files_max: 3
+      expected_spec_changes_min: 2
+
+  - id: pass_high_blast
+    description: High blast score implies broader context
+    variables:
+      target_symbol: echo
+      target_path: utils.py
+      directive: add type hints
+      blast_report: |
+        {"direct_callers": [
+           {"qualified_name": "a", "path": "a.py", "line": 1},
+           {"qualified_name": "b", "path": "b.py", "line": 2},
+           {"qualified_name": "c", "path": "c.py", "line": 3}],
+         "contract_violations": [], "blast_score": 72, "recommendation": "block"}
+      skeleton: |
+        utils.py:
+        2: def echo(message):
+    expected:
+      expects_refusal: false
+      expected_files_min: 2
+      expected_files_max: 6
+      expected_spec_changes_min: 2
+
+  - id: pass_test_file_included
+    description: Blast report points at existing test file
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      directive: add type hints
+      blast_report: |
+        {"direct_callers": [{"qualified_name": "test_parse", "path": "tests/test_a.py", "line": 5}],
+         "contract_violations": [], "blast_score": 2, "recommendation": "proceed"}
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+    expected:
+      expects_refusal: false
+      expected_files_min: 2
+      expected_files_max: 4
+      expected_spec_changes_min: 2
+
+  - id: refuse_ambiguous_directive
+    description: Ambiguous directive cannot be interpreted
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      directive: make it better
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0,
+         "recommendation": "proceed"}
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+    expected:
+      expects_refusal: true
+      expected_files_min: 0
+      expected_files_max: 1
+
+  - id: pass_typed_signature
+    description: Function already has partial annotations
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      directive: add missing type hints
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0,
+         "recommendation": "proceed"}
+      skeleton: |
+        a.py:
+        5: def parse(raw: str):
+    expected:
+      expects_refusal: false
+      expected_files_min: 1
+      expected_files_max: 2
+      expected_spec_changes_min: 1
+
+  - id: pass_no_directive_scope
+    description: Directive names a specific annotation type
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      directive: add return annotation only
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0,
+         "recommendation": "proceed"}
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+    expected:
+      expects_refusal: false
+      expected_files_min: 1
+      expected_files_max: 2
+      expected_spec_changes_min: 1

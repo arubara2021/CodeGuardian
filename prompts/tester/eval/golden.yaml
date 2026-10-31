@@ -1,0 +1,259 @@
+# Tester golden cases. Consumed by agent_eval.run_golden("tester", ...).
+# Each case exercises a different target-function shape. Retry
+# variables are present but empty on non-retry cases so the same file
+# renders under prompt v1.0.0 and v1.1.0.
+
+cases:
+  - id: pass_simple_function
+    description: Simple leaf function, no branches
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def test_", "assert"]
+      min_assertion_count: 1
+
+  - id: pass_two_branches
+    description: Function with if/else branches
+    variables:
+      target_symbol: check
+      target_path: a.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        a.py:
+        5: def check(x):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def test_", "assert"]
+      min_assertion_count: 2
+
+  - id: pass_with_exception_path
+    description: Function with a raise statement
+    variables:
+      target_symbol: load
+      target_path: io.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        io.py:
+        3: def load(path):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["pytest.raises"]
+      min_assertion_count: 2
+
+  - id: pass_boundary_values
+    description: Numeric function needing boundary coverage
+    variables:
+      target_symbol: divide
+      target_path: math_utils.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        math_utils.py:
+        1: def divide(a, b):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def test_", "assert"]
+      min_assertion_count: 2
+
+  - id: pass_contract_assertion
+    description: Blast report carries a contract assertion
+    variables:
+      target_symbol: load_config
+      target_path: config.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        config.py:
+        3: def load_config(path):
+      blast_report: |
+        {"direct_callers": [{"qualified_name": "setup", "path": "app.py", "line": 5}],
+         "contract_violations": [
+           {"caller": "setup", "assumption": "returns non-None dict",
+            "risk": "warning"}],
+         "blast_score": 10}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["is not None"]
+      min_assertion_count: 2
+
+  - id: refuse_missing_target
+    description: Target function not present in skeleton
+    variables:
+      target_symbol: nonexistent
+      target_path: a.py
+      language: python
+      directive: add type hints
+      skeleton: "(no declarations)"
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: true
+      expected_ast_valid: false
+      expected_contains: []
+      min_assertion_count: 0
+
+  - id: refuse_untestable
+    description: Function whose behavior depends on external state
+    variables:
+      target_symbol: current_temperature
+      target_path: sensor.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        sensor.py:
+        3: def current_temperature():
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: true
+      expected_ast_valid: false
+      expected_contains: []
+      min_assertion_count: 0
+
+  - id: pass_return_none
+    description: Function returning None explicitly
+    variables:
+      target_symbol: log_event
+      target_path: logging.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        logging.py:
+        5: def log_event(name, payload):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def test_", "assert"]
+      min_assertion_count: 1
+
+  - id: pass_string_operations
+    description: Function operating on strings
+    variables:
+      target_symbol: normalize
+      target_path: text.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        text.py:
+        3: def normalize(data):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def test_", "assert"]
+      min_assertion_count: 2
+
+  - id: pass_numeric_arithmetic
+    description: Simple numeric arithmetic function
+    variables:
+      target_symbol: add
+      target_path: math_utils.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        math_utils.py:
+        1: def add(a, b):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def test_", "assert"]
+      min_assertion_count: 2
+
+  - id: pass_multiple_return_paths
+    description: Function with three distinct return values
+    variables:
+      target_symbol: classify
+      target_path: a.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        a.py:
+        3: def classify(x):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def test_", "assert"]
+      min_assertion_count: 3
+
+  - id: pass_list_processing
+    description: Function processing a list
+    variables:
+      target_symbol: double_all
+      target_path: util.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        util.py:
+        1: def double_all(items):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      previous_test_attempt: ""
+      parse_error: ""
+      old_code_failure: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def test_", "assert"]
+      min_assertion_count: 1

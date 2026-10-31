@@ -1,0 +1,100 @@
+# Adversarial contract-verifier cases. Each trap provides a
+# contract_assertions string and a diff that breaks the assertion.
+# expected_verdict is always fail.
+
+cases:
+  - id: trap_return_none_where_assertion_says_never_none
+    description: Refactor returns None where caller assumes dict
+    change_kind: contract
+    blast_score: 40
+    contract_assertions: |
+      1. caller: setup
+         assumption: returns dict, never None
+         test: assert result is not None
+    expected_verdict: fail
+    expected_finding_contains: ["assertion", "None", "return", "dict"]
+    diff: |
+      --- a/config.py
+      +++ b/config.py
+      @@ -1,4 +1,6 @@
+       def load_config(path):
+           if not path:
+      -        return {}
+      +        return None
+           return parse(path)
+
+  - id: trap_default_param_positional_callers
+    description: Add default param where callers pass positionally
+    change_kind: contract
+    blast_score: 30
+    contract_assertions: |
+      1. caller: handle_request
+         assumption: second positional argument is timeout
+         test: assert parse(data, 5) == expected
+    expected_verdict: fail
+    expected_finding_contains: ["parameter", "positional", "order", "signature"]
+    diff: |
+      --- a/parse.py
+      +++ b/parse.py
+      @@ -1,3 +1,3 @@
+      -def parse(data, timeout):
+      +def parse(data, strict=False, timeout=30):
+           return _parse(data, timeout)
+
+  - id: trap_exception_type_change
+    description: Change exception type where caller catches original
+    change_kind: contract
+    blast_score: 45
+    contract_assertions: |
+      1. caller: retry_wrapper
+         assumption: raises ValueError on invalid input
+         test: with pytest.raises(ValueError): parse("")
+    expected_verdict: fail
+    expected_finding_contains: ["exception", "type", "ValueError", "raises"]
+    diff: |
+      --- a/parse.py
+      +++ b/parse.py
+      @@ -1,4 +1,4 @@
+       def parse(data):
+           if not data:
+      -        raise ValueError("empty input")
+      +        raise RuntimeError("empty input")
+           return data.strip()
+
+  - id: trap_attribute_added_closed_object
+    description: Add an attribute where caller treats the return as a closed shape
+    change_kind: contract
+    blast_score: 35
+    contract_assertions: |
+      1. caller: serializer
+         assumption: return value has exactly id and name
+         test: assert set(result.keys()) == {"id", "name"}
+    expected_verdict: fail
+    expected_finding_contains: ["attribute", "closed", "shape", "keys"]
+    diff: |
+      --- a/user.py
+      +++ b/user.py
+      @@ -1,4 +1,4 @@
+       def get_user(user_id):
+      -    return {"id": user_id, "name": _db.lookup(user_id)}
+      +    return {"id": user_id, "name": _db.lookup(user_id),
+      +            "email": _db.lookup_email(user_id)}
+
+  - id: trap_side_effect_reorder
+    description: Reorder side effects where caller assumes ordering
+    change_kind: contract
+    blast_score: 40
+    contract_assertions: |
+      1. caller: save_and_notify
+         assumption: log is written before bus.publish is called
+         test: assert log_handler.call_order.index("log") < log_handler.call_order.index("bus")
+    expected_verdict: fail
+    expected_finding_contains: ["side", "effect", "order", "publish", "log"]
+    diff: |
+      --- a/io.py
+      +++ b/io.py
+      @@ -1,4 +1,4 @@
+       def save_and_notify(record, log, bus):
+      -    log.write(record.id)
+           bus.publish(record)
+      +    log.write(record.id)

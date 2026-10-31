@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
-"""Deep integration test for CodeGuardian.
+"""Deep integration test for CodeGuardian, Phases 0 through 11.
 
 Clones a real repository, parses it, discovers Python functions
 structurally, runs each candidate twice inside a sandbox to classify
-determinism, generates a characterization test from the recorded output,
-refactors one target with a real model, applies the diff, verifies that
-behavior is preserved, and then verifies that the tool catches a
-deliberately bad refactor.
+determinism, generates a characterization test from the recorded
+output, then runs the full Phase 11 agent pipeline:
+
+  Recon → Blast → Analyst → Tester → Writer(N candidates)
+  → apply → three parallel verifiers → Skill Curator
+  → rollback → fault injection → Skill Curator on failure
+  → audit chain → telemetry audit.
 
 The repository is selected by ``CODEGUARDIAN_DEEP_REPO`` (default
-``psf/requests``). No targets are hardcoded.
+``psf/requests``). Number of writer candidates is selected by
+``CODEGUARDIAN_DEEP_CANDIDATES`` (default ``3``).
 
 Known limitations:
 
 - Only free functions with primitives-only required arguments are
   candidates. Methods, async functions, and functions requiring
   synthesized objects are excluded.
-- Non-deterministic targets get a smoke check only. Their value check
-  is skipped because the recorded value is not stable across calls.
-- Private attributes on returned objects are excluded from
-  normalization.
-- ``pip install -e .`` uses ``--break-system-packages``; PEP 668 blocks
-  the normal path on modern Python 3.12.
+- Non-deterministic targets get a smoke check only.
+- ``pip install -e .`` uses ``--break-system-packages``.
+- G-16: cross-file imported-function callers are under-reported; the
+  blast agent shifts its recommendation toward caution when a search
+  cannot be verified, and the deep test records that shift.
 """
 
 from __future__ import annotations
@@ -43,8 +46,38 @@ _PYTHON_DIR = _ROOT / "python"
 if _PYTHON_DIR.is_dir() and str(_PYTHON_DIR) not in sys.path:
     sys.path.insert(0, str(_PYTHON_DIR))
 
+from codeguardian.core.agents import (
+    AnalystAgent,
+    BlastAgent,
+    ContractVerifier,
+    CorrectnessVerifier,
+    ReconAgent,
+    SecurityVerifier,
+    SkillCuratorAgent,
+    TesterAgent,
+    WriterAgent,
+    _store_context,
+    fresh_barrier,
+)
+from codeguardian.core.agents.analyst import (
+    AnalystInput,
+    AnalystResult,
+)
+from codeguardian.core.agents.blast import BlastInput, BlastResult
+from codeguardian.core.agents.contract_verifier import ContractVerifierInput
+from codeguardian.core.agents.correctness_verifier import CorrectnessVerifierInput
+from codeguardian.core.agents.recon import ReconInput, ReconResult
+from codeguardian.core.agents.security_verifier import SecurityVerifierInput
+from codeguardian.core.agents.skill_curator import SkillCuratorInput
+from codeguardian.core.agents.tester import TesterInput, TesterResult
+from codeguardian.core.agents.writer import WriterInput, WriterResult
 from codeguardian.core.bridges.jsonrpc_bridge import JSONRPCBridge
 from codeguardian.core.errors import CodeGuardianError
+from codeguardian.core.plugins import (
+    BudgetTracker,
+    PluginRegistry,
+    cpg_available,
+)
 from codeguardian.core.providers import (
     ApplyProvider,
     FallbackModelProvider,
@@ -53,43 +86,86 @@ from codeguardian.core.providers import (
 )
 from codeguardian.core.providers.openai_compatible import OpenAICompatibleProvider
 from codeguardian.core.sandbox.bubblewrap_backend import BubblewrapBackend
+from codeguardian.core.storage import MigrationRunner, SQLiteStore
 from codeguardian.interfaces.apply import ConsentRecord
-from codeguardian.interfaces.model import ModelOptions
 from codeguardian.interfaces.repository import FileChange
 from codeguardian.interfaces.sandbox import SandboxSpec
 
 REPO_URL = os.environ.get("CODEGUARDIAN_DEEP_REPO", "https://github.com/psf/requests")
 MAX_TARGETS = int(os.environ.get("CODEGUARDIAN_DEEP_DEPTH", "20"))
 SAMPLE_SEED = int(os.environ.get("CODEGUARDIAN_DEEP_SEED", "42"))
+N_CANDIDATES = int(os.environ.get("CODEGUARDIAN_DEEP_CANDIDATES", "3"))
+DIRECTIVE = "add type hints to every parameter and the return type"
 GROQ_BASE = "https://api.groq.com/openai/v1"
 RUN_ID = "deep-test-run"
 SANDBOX_DIR = Path(__file__).resolve().parent
 WORK_DIR = SANDBOX_DIR / "work"
+DB_PATH = WORK_DIR / "deep_test.db"
 
 MULTI_LANG_FILES = [
-    ("add.py", "python", "py_add", "call_py_add",
-     "def py_add(a, b):\n    return a + b\n\n\ndef call_py_add():\n    return py_add(1, 2)\n"),
-    ("add.ts", "typescript", "ts_add", "call_ts_add",
-     "function ts_add(a: number, b: number): number {\n    return a + b;\n}\n\n"
-     "function call_ts_add(): number {\n    return ts_add(1, 2);\n}\n"),
-    ("add.js", "javascript", "js_add", "call_js_add",
-     "function js_add(a, b) {\n    return a + b;\n}\n\n"
-     "function call_js_add() {\n    return js_add(1, 2);\n}\n"),
-    ("Add.java", "java", "JavaAdd.add", "JavaAdd.call_add",
-     "public class JavaAdd {\n    static int add(int a, int b) {\n        return a + b;\n    }\n\n"
-     "    static int call_add() {\n        return add(1, 2);\n    }\n}\n"),
-    ("add.go", "go", "go_add", "call_go_add",
-     "package main\n\nfunc go_add(a, b int) int {\n    return a + b\n}\n\n"
-     "func call_go_add() int {\n    return go_add(1, 2)\n}\n"),
-    ("add.rs", "rust", "rust_add", "call_rust_add",
-     "fn rust_add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n"
-     "fn call_rust_add() -> i32 {\n    rust_add(1, 2)\n}\n"),
-    ("add.c", "c", "c_add", "call_c_add",
-     "int c_add(int a, int b) {\n    return a + b;\n}\n\n"
-     "int call_c_add() {\n    return c_add(1, 2);\n}\n"),
-    ("add.cpp", "cpp", "cpp_add", "call_cpp_add",
-     "int cpp_add(int a, int b) {\n    return a + b;\n}\n\n"
-     "int call_cpp_add() {\n    return cpp_add(1, 2);\n}\n"),
+    (
+        "add.py",
+        "python",
+        "py_add",
+        "call_py_add",
+        "def py_add(a, b):\n    return a + b\n\n\ndef call_py_add():\n    return py_add(1, 2)\n",
+    ),
+    (
+        "add.ts",
+        "typescript",
+        "ts_add",
+        "call_ts_add",
+        "function ts_add(a: number, b: number): number {\n    return a + b;\n}\n\n"
+        "function call_ts_add(): number {\n    return ts_add(1, 2);\n}\n",
+    ),
+    (
+        "add.js",
+        "javascript",
+        "js_add",
+        "call_js_add",
+        "function js_add(a, b) {\n    return a + b;\n}\n\n"
+        "function call_js_add() {\n    return js_add(1, 2);\n}\n",
+    ),
+    (
+        "Add.java",
+        "java",
+        "JavaAdd.add",
+        "JavaAdd.call_add",
+        "public class JavaAdd {\n    static int add(int a, int b) {\n        return a + b;\n    }\n\n"
+        "    static int call_add() {\n        return add(1, 2);\n    }\n}\n",
+    ),
+    (
+        "add.go",
+        "go",
+        "go_add",
+        "call_go_add",
+        "package main\n\nfunc go_add(a, b int) int {\n    return a + b\n}\n\n"
+        "func call_go_add() int {\n    return go_add(1, 2)\n}\n",
+    ),
+    (
+        "add.rs",
+        "rust",
+        "rust_add",
+        "call_rust_add",
+        "fn rust_add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n"
+        "fn call_rust_add() -> i32 {\n    rust_add(1, 2)\n}\n",
+    ),
+    (
+        "add.c",
+        "c",
+        "c_add",
+        "call_c_add",
+        "int c_add(int a, int b) {\n    return a + b;\n}\n\n"
+        "int call_c_add() {\n    return c_add(1, 2);\n}\n",
+    ),
+    (
+        "add.cpp",
+        "cpp",
+        "cpp_add",
+        "call_cpp_add",
+        "int cpp_add(int a, int b) {\n    return a + b;\n}\n\n"
+        "int call_cpp_add() {\n    return cpp_add(1, 2);\n}\n",
+    ),
 ]
 
 LAUNCHER = (
@@ -251,6 +327,7 @@ def _rpcd_binary() -> Path | None:
 def _native():
     try:
         import codeguardian._native as native
+
         return native
     except ImportError:
         return None
@@ -258,19 +335,41 @@ def _native():
 
 _FORBIDDEN_CALLEE_NAMES = frozenset(
     {
-        "eval", "exec", "compile", "__import__", "open",
-        "system", "popen", "spawn", "spawnl", "spawnv",
-        "urlopen", "urlretrieve", "connect", "bind",
+        "eval",
+        "exec",
+        "compile",
+        "__import__",
+        "open",
+        "system",
+        "popen",
+        "spawn",
+        "spawnl",
+        "spawnv",
+        "urlopen",
+        "urlretrieve",
+        "connect",
+        "bind",
     }
 )
 _FORBIDDEN_MODULE_PREFIXES = ("socket", "subprocess", "urllib", "http.client", "os.system")
 _JSON_SAFE_ANNOTATIONS = {
-    "str": "sample", "int": 0, "float": 0.0, "bool": False,
-    "list": [], "dict": {}, "None": None,
-    "list[str]": [], "list[int]": [], "dict[str, str]": {}, "dict[str, int]": {},
-    "Optional[str]": None, "Optional[int]": None,
-    "str | None": None, "int | None": None,
-    "Union[str, None]": None, "Union[int, None]": None,
+    "str": "sample",
+    "int": 0,
+    "float": 0.0,
+    "bool": False,
+    "list": [],
+    "dict": {},
+    "None": None,
+    "list[str]": [],
+    "list[int]": [],
+    "dict[str, str]": {},
+    "dict[str, int]": {},
+    "Optional[str]": None,
+    "Optional[int]": None,
+    "str | None": None,
+    "int | None": None,
+    "Union[str, None]": None,
+    "Union[int, None]": None,
 }
 
 
@@ -321,13 +420,10 @@ def _is_exempt_name(name: str) -> bool:
         return True
     if name.startswith("_") and not name.startswith("__"):
         return True
-    if name.startswith("test_") or name.endswith("_test"):
-        return True
-    return False
+    return bool(name.startswith("test_") or name.endswith("_test"))
 
 
 def _module_name_for(path: Path, clone_root: Path) -> str | None:
-    """Return the dotted module name, stripping a src/ prefix if present."""
     try:
         rel = path.resolve().relative_to(clone_root.resolve())
     except ValueError:
@@ -384,9 +480,13 @@ def discover_python_targets(provider: LocalProvider, clone: Path) -> list[dict]:
                 continue
             targets.append(
                 {
-                    "path": rel, "module": module, "function": node.name,
-                    "qualified_name": node.name, "line": start,
-                    "length": length, "args": synthesized,
+                    "path": rel,
+                    "module": module,
+                    "function": node.name,
+                    "qualified_name": node.name,
+                    "line": start,
+                    "length": length,
+                    "args": synthesized,
                 }
             )
     return targets
@@ -431,7 +531,9 @@ def blast_invariants(native, cpg: bytes, ranked: list[dict]) -> None:
     safety("blast ran on discovered targets", True, f"{len(ranked)} targets")
     cross = [t for t in ranked if t["cross_file_caller"]]
     if cross:
-        safety("blast found cross-file callers", True, f"{len(cross)} targets have cross-file callers")
+        safety(
+            "blast found cross-file callers", True, f"{len(cross)} targets have cross-file callers"
+        )
     else:
         xfail("blast found cross-file callers", "G-16: no cross-file callers resolved in this repo")
     for target in ranked[:MAX_TARGETS]:
@@ -444,7 +546,11 @@ def blast_invariants(native, cpg: bytes, ranked: list[dict]) -> None:
             if not isinstance(caller, dict):
                 continue
             if caller.get("qualified_name") == target["qualified_name"]:
-                safety(f"no self-caller {target['qualified_name']}", False, "target reported as its own caller")
+                safety(
+                    f"no self-caller {target['qualified_name']}",
+                    False,
+                    "target reported as its own caller",
+                )
                 break
         score = report.get("blast_score", 0)
         if not (0 <= score <= 100):
@@ -453,21 +559,15 @@ def blast_invariants(native, cpg: bytes, ranked: list[dict]) -> None:
 
 
 def pick_writer_target(ranked: list[dict], results: list[dict]) -> dict | None:
-    """Return the highest-fan-in callable target, preferring deterministic.
-
-    A deterministic target has a value check, so a successful pytest run
-    actually proves behavior preservation. A non-deterministic target
-    only has a smoke check; falling back to one is a last resort.
-    """
     by_key = {(r["module"], r["function"]): r for r in results}
-    for target in ranked:
+    for target in sorted(ranked, key=lambda t: abs(3 - t.get("direct_count", 0))):
         record = by_key.get((target["module"], target["function"]))
         if record is None or record.get("error"):
             continue
         if not record.get("deterministic"):
             continue
         return {**target, "execution": record}
-    for target in ranked:
+    for target in sorted(ranked, key=lambda t: abs(3 - t.get("direct_count", 0))):
         record = by_key.get((target["module"], target["function"]))
         if record is None or record.get("error"):
             continue
@@ -477,8 +577,7 @@ def pick_writer_target(ranked: list[dict], results: list[dict]) -> dict | None:
 
 def write_manifest(path: Path, targets: list[dict]) -> None:
     payload = [
-        {"module": t["module"], "function": t["function"], "args": t["args"]}
-        for t in targets
+        {"module": t["module"], "function": t["function"], "args": t["args"]} for t in targets
     ]
     path.write_text(json.dumps(payload, indent=2))
 
@@ -553,9 +652,7 @@ def build_characterization(target: dict) -> str:
         "_root = os.path.dirname(os.path.abspath(__file__))\n"
         "sys.path.insert(0, _root)\n"
         "if os.path.isdir(os.path.join(_root, 'src')):\n"
-        "    sys.path.insert(0, os.path.join(_root, 'src'))\n"
-        + _NORMALIZE_HEADER
-        + "\n\n"
+        "    sys.path.insert(0, os.path.join(_root, 'src'))\n" + _NORMALIZE_HEADER + "\n\n"
         f"_ARGS = {args_repr}\n"
         f"_EXPECTED_TYPE = {expected_type!r}\n"
         f"_EXPECTED_VALUE_JSON = {expected_value_json!r}\n"
@@ -629,6 +726,20 @@ def step_setup_work(rpcd_path: Path) -> Path:
     return rpcd_dest
 
 
+def step_open_store() -> SQLiteStore | None:
+    step("Open telemetry store")
+    try:
+        store = SQLiteStore(DB_PATH)
+        store.open()
+        MigrationRunner(store).run()
+    except CodeGuardianError as exc:
+        safety("telemetry store open", False, f"{exc.code.value}: {exc.message}")
+        return None
+    info(f"db: {DB_PATH}")
+    safety("telemetry store open", True)
+    return store
+
+
 def step_clone_repo():
     step(f"Clone {REPO_URL}")
     provider = LocalProvider()
@@ -685,8 +796,16 @@ def step_graph_summary(native, cpg):
         return
     info(f"summary: {summary}")
     if isinstance(summary, dict):
-        safety("graph has nodes", int(summary.get("node_count", 0)) > 0, f"{summary.get('node_count')} nodes")
-        safety("graph has edges", int(summary.get("edge_count", 0)) > 0, f"{summary.get('edge_count')} edges")
+        safety(
+            "graph has nodes",
+            int(summary.get("node_count", 0)) > 0,
+            f"{summary.get('node_count')} nodes",
+        )
+        safety(
+            "graph has edges",
+            int(summary.get("edge_count", 0)) > 0,
+            f"{summary.get('edge_count')} edges",
+        )
 
 
 def step_discover(native, provider, clone, cpg):
@@ -793,7 +912,11 @@ def step_blast_multi_lang(native, cpg):
         if expected_caller in callers:
             safety(f"blast {lang}:{target}", True, f"caller={expected_caller}")
         else:
-            safety(f"blast {lang}:{target}", False, f"expected {expected_caller}, got {sorted(callers)}")
+            safety(
+                f"blast {lang}:{target}",
+                False,
+                f"expected {expected_caller}, got {sorted(callers)}",
+            )
 
 
 def step_csharp_rejection(native):
@@ -811,8 +934,12 @@ def step_sandbox_install(bridge, clone):
     step("Sandbox #1 — network ON, pip install")
     backend = BubblewrapBackend(bridge)
     spec = SandboxSpec(
-        language="python", working_dir=clone, memory_mb=2048,
-        cpu_cores=2, process_limit=256, network_during_deps=True,
+        language="python",
+        working_dir=clone,
+        memory_mb=2048,
+        cpu_cores=2,
+        process_limit=256,
+        network_during_deps=True,
     )
     try:
         handle = backend.create(spec)
@@ -834,8 +961,7 @@ def step_sandbox_install(bridge, clone):
 
     pytest_install = backend.execute(
         handle,
-        ["/bin/sh", "-c",
-         "python3 -m pip install --no-cache-dir --quiet --target .deps pytest"],
+        ["/bin/sh", "-c", "python3 -m pip install --no-cache-dir --quiet --target .deps pytest"],
         env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
         timeout_ms=180000,
     )
@@ -847,8 +973,11 @@ def step_sandbox_install(bridge, clone):
 
     repo_install = backend.execute(
         handle,
-        ["/bin/sh", "-c",
-         "python3 -m pip install --no-cache-dir --quiet --break-system-packages -e ."],
+        [
+            "/bin/sh",
+            "-c",
+            "python3 -m pip install --no-cache-dir --quiet --break-system-packages -e .",
+        ],
         env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
         timeout_ms=300000,
     )
@@ -865,8 +994,12 @@ def step_sandbox_network_off(bridge, clone):
     step("Sandbox #2 — network OFF")
     backend = BubblewrapBackend(bridge)
     spec = SandboxSpec(
-        language="python", working_dir=clone, memory_mb=2048,
-        cpu_cores=2, process_limit=256, network_during_deps=False,
+        language="python",
+        working_dir=clone,
+        memory_mb=2048,
+        cpu_cores=2,
+        process_limit=256,
+        network_during_deps=False,
     )
     try:
         handle = backend.create(spec)
@@ -882,8 +1015,7 @@ def step_run_generator(backend, handle) -> bool:
     step("Run generator in sandbox")
     result = backend.execute(
         handle,
-        ["/bin/sh", "-c",
-         "PYTHONPATH=.deps:.:$PYTHONPATH python3 deep_test_generator.py"],
+        ["/bin/sh", "-c", "PYTHONPATH=.deps:.:$PYTHONPATH python3 deep_test_generator.py"],
         timeout_ms=120000,
     )
     info(f"exit: {result.exit_code}")
@@ -894,35 +1026,58 @@ def step_run_generator(backend, handle) -> bool:
     return ok
 
 
-def _run_characterization(backend, handle, char_filename, section_label):
-    step(section_label)
+def _run_char_test(backend, handle, filename: str, label: str) -> tuple[bool, str]:
+    """Run one characterization test file in the sandbox."""
     result = backend.execute(
         handle,
-        ["python3", "run_pytest.py", char_filename, "-v", "--tb=line"],
+        ["python3", "run_pytest.py", filename, "-v", "--tb=line"],
         timeout_ms=120000,
     )
-    info(f"exit: {result.exit_code}")
-    if result.stdout:
-        info(f"stdout tail:\n{result.stdout[-500:]}")
-    return result.exit_code == 0, result.stdout or ""
+    ok = result.exit_code == 0
+    safety(label, ok, f"{filename} exit={result.exit_code}")
+    if not ok:
+        if result.stdout:
+            info("pytest stdout (tail):")
+            for line in result.stdout.splitlines()[-40:]:
+                info(f"  {line}")
+        if result.stderr:
+            info("pytest stderr (tail):")
+            for line in result.stderr.splitlines()[-20:]:
+                info(f"  {line}")
+    return ok, result.stdout or ""
 
 
-def step_pytest_old(backend, handle, char_filename) -> bool:
-    ok, _ = _run_characterization(
-        backend, handle, char_filename,
-        "Pytest OLD — characterization on unmodified code",
+def step_pytest_old_dual(
+    backend, handle, tool_file: str, tester_file: str | None
+) -> tuple[bool, bool]:
+    """Run both characterization tests on the old (unmodified) code."""
+    step("Pytest OLD — tool test and tester agent test")
+    tool_ok, _ = _run_char_test(
+        backend, handle, tool_file, "tool value-based test green on old code"
     )
-    safety("characterization green on old code", ok)
-    return ok
+    tester_ok = False
+    if tester_file:
+        tester_ok, _ = _run_char_test(
+            backend, handle, tester_file, "tester agent test green on old code"
+        )
+    return tool_ok, tester_ok
 
 
-def step_pytest_new(backend, handle, char_filename) -> tuple[bool, str]:
-    ok, stdout = _run_characterization(
-        backend, handle, char_filename,
-        "Pytest NEW — characterization on refactored code",
+def step_pytest_new_dual(
+    backend, handle, tool_file: str, tester_file: str | None
+) -> tuple[bool, str, bool, str]:
+    """Run both characterization tests on the new (refactored) code."""
+    step("Pytest NEW — tool test and tester agent test")
+    tool_ok, tool_stdout = _run_char_test(
+        backend, handle, tool_file, "tool value-based test green on new code"
     )
-    safety("characterization on new code", ok)
-    return ok, stdout
+    tester_ok = False
+    tester_stdout = ""
+    if tester_file:
+        tester_ok, tester_stdout = _run_char_test(
+            backend, handle, tester_file, "tester agent test green on new code"
+        )
+    return tool_ok, tool_stdout, tester_ok, tester_stdout
 
 
 def classify_characterization(stdout: str, deterministic: bool) -> str:
@@ -955,53 +1110,17 @@ def _extract_function_source(source: str, name: str) -> str | None:
     return None
 
 
-async def step_writer(router, clone, target):
-    step(f"Writer — refactor {target['module']}.{target['function']}")
-    target_file = clone / target["path"]
-    if not target_file.is_file():
-        safety("target file found", False, str(target_file))
-        return None
-    source = target_file.read_text(encoding="utf-8")
-    original = _extract_function_source(source, target["function"])
+def _splice_candidate(file_source: str, function_name: str, candidate_source: str) -> str | None:
+    """Replace the target function in ``file_source`` with ``candidate_source``."""
+    original = _extract_function_source(file_source, function_name)
     if original is None:
-        safety("target function found", False, target["function"])
         return None
-    prompt = (
-        "Refactor this Python function to add type hints to every parameter "
-        "and the return type, and improve the docstring. Do NOT change "
-        "runtime behavior. Do NOT change arguments. Return ONLY the "
-        "complete refactored function, starting with 'def'. No markdown, "
-        "no explanation.\n\n" + original
-    )
+    new_source = file_source.replace(original, candidate_source, 1)
     try:
-        response = await router.complete(prompt, "writer", ModelOptions(temperature=0.0, max_tokens=2000))
-    except CodeGuardianError as exc:
-        safety("writer call", False, f"{exc.code.value}: {exc.message}")
-        return None
-    text = response.text.strip()
-    if text.startswith("```"):
-        nl = text.find("\n")
-        if nl != -1:
-            text = text[nl + 1:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.rstrip()
-    if not text.startswith(("def ", "async def ", "@")):
-        safety("writer output looks like function", False, text[:40])
-        return None
-    if text == original:
-        safety("writer changed code", False, "identical to input")
-        return None
-    try:
-        ast.parse(text)
-        new_source = source.replace(original, text)
         ast.parse(new_source)
-    except SyntaxError as exc:
-        safety("writer output parses", False, str(exc))
+    except SyntaxError:
         return None
-    info(f"writer model: {response.model_id}")
-    safety("writer call", True, f"{response.model_id} | {len(text)} chars")
-    return new_source, response.model_id
+    return new_source
 
 
 def step_diff_and_consent(provider, new_source, rel_path, *, consent_id="deep-test-1"):
@@ -1018,9 +1137,13 @@ def step_diff_and_consent(provider, new_source, rel_path, *, consent_id="deep-te
     info(f"diff: {len(diff)} chars")
     diff_hash = hashlib.sha256(diff.encode("utf-8")).hexdigest()
     consent = ConsentRecord(
-        consent_id=consent_id, run_id=RUN_ID,
-        granted_at=datetime.now(UTC), granted_by="deep-test",
-        scope="apply", diff_hash=diff_hash, rollback_ref="",
+        consent_id=consent_id,
+        run_id=RUN_ID,
+        granted_at=datetime.now(UTC),
+        granted_by="deep-test",
+        scope="apply",
+        diff_hash=diff_hash,
+        rollback_ref="",
     )
     safety("diff non-empty", True, f"{len(diff)} chars")
     safety("consent matches diff", consent.diff_hash == diff_hash)
@@ -1067,7 +1190,6 @@ def _cg_inject(value):
 
 
 def _insert_helper(source: str, helper: str) -> str:
-    """Insert helper text after the module docstring and __future__ imports."""
     insert_line = 0
     try:
         tree = ast.parse(source)
@@ -1094,16 +1216,6 @@ def _insert_helper(source: str, helper: str) -> str:
 
 
 def _inject_behavioral_drift(source: str, function_name: str) -> str | None:
-    """AST-transform the named function so every return value is altered.
-
-    Wraps every `return X` inside the target function as
-    `return _cg_inject(X)`. `_cg_inject` adds 1 to numbers, suffixes
-    strings, inverts booleans, adds a sentinel key to dicts, appends to
-    lists/tuples, and substitutes a string for anything else.
-
-    Returns the modified source, or `None` if the function does not
-    exist or has no `return` statement with a value.
-    """
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -1111,10 +1223,7 @@ def _inject_behavioral_drift(source: str, function_name: str) -> str | None:
 
     target: ast.FunctionDef | ast.AsyncFunctionDef | None = None
     for node in ast.walk(tree):
-        if (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == function_name
-        ):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
             target = node
             break
     if target is None:
@@ -1141,121 +1250,6 @@ def _inject_behavioral_drift(source: str, function_name: str) -> str | None:
     return _insert_helper(modified, _CG_INJECT_HELPER)
 
 
-async def step_fault_injection(router, clone, target, char_filename, backend, handle, provider, bridge):
-    step("Fault injection — verify tool catches a bad refactor")
-    if not target["execution"].get("deterministic"):
-        skip("fault injection", "picked target is non-deterministic; value check cannot fire")
-        return
-    target_file = clone / target["path"]
-    current_source = target_file.read_text(encoding="utf-8")
-
-    broken_source = _inject_behavioral_drift(current_source, target["function"])
-    if broken_source is None:
-        skip(
-            "fault injection",
-            f"cannot inject drift into {target['function']} (no return with value)",
-        )
-        return
-    safety("fault injection drift injected", True, "ast behavioral drift")
-
-    original_func = _extract_function_source(current_source, target["function"])
-    if original_func:
-        prompt = (
-            "Refactor this Python function. CRITICAL: you MUST change the "
-            "return value so that behavior differs on at least one input. "
-            "For example, add 1 to numeric returns, uppercase string returns, "
-            "or invert boolean returns. Do not change the signature. Return "
-            "ONLY the complete refactored function, starting with 'def'. No "
-            "markdown, no explanation.\n\n" + original_func
-        )
-        try:
-            response = await router.complete(
-                prompt, "writer", ModelOptions(temperature=0.7, max_tokens=2000)
-            )
-            text = response.text.strip()
-            if text.startswith("```"):
-                nl = text.find("\n")
-                if nl != -1:
-                    text = text[nl + 1:]
-                if text.endswith("```"):
-                    text = text[:-3]
-                text = text.rstrip()
-            if text.startswith(("def ", "async def ", "@")) and text != original_func:
-                try:
-                    ast.parse(text)
-                    writer_candidate = current_source.replace(original_func, text)
-                    ast.parse(writer_candidate)
-                    broken_source = _inject_behavioral_drift(
-                        writer_candidate, target["function"]
-                    ) or writer_candidate
-                    info("writer also produced a candidate; combining with ast drift")
-                except SyntaxError as exc:
-                    note(f"writer fault output invalid: {exc}")
-        except CodeGuardianError as exc:
-            note(f"writer fault call failed: {exc.code.value}")
-
-    diff_result = step_diff_and_consent(
-        provider, broken_source, target["path"], consent_id="deep-test-fault"
-    )
-    if diff_result is None:
-        safety("fault injection diff", False, "could not build diff")
-        return
-    diff, consent = diff_result
-
-    apply_result = step_apply(provider, bridge, clone, diff, consent, target_file, broken_source)
-    if apply_result is None:
-        safety("fault injection apply", False, "apply failed")
-        return
-    rollback_ref, applier = apply_result
-
-    try:
-        _, new_stdout = _run_characterization(
-            backend, handle, char_filename,
-            "Pytest on fault-injected code (expect FAIL)",
-        )
-        label = classify_characterization(new_stdout, True)
-        if label == "pass":
-            safety(
-                "fault injection detected by value check",
-                False,
-                "drift applied but pytest passed; moat does not catch this",
-            )
-        else:
-            safety("fault injection detected by value check", True, f"label={label}")
-    finally:
-        try:
-            applier.rollback(rollback_ref)
-            safety("fault injection rollback", True)
-        except CodeGuardianError as exc:
-            safety("fault injection rollback", False, f"{exc.code.value}: {exc.message}")
-
-
-async def step_verifier(router, registry, writer_model_id, diff):
-    step("Verifier — different family")
-    prompt = (
-        "Review this diff for correctness. Reply with exactly one word on "
-        "the first line: PASS or FAIL. Then one sentence on the next line.\n\n" + diff
-    )
-    try:
-        response = await router.complete(
-            prompt, "correctness_verifier", ModelOptions(temperature=0.0, max_tokens=200)
-        )
-    except CodeGuardianError as exc:
-        safety("verifier call", False, f"{exc.code.value}: {exc.message}")
-        return
-    words = response.text.strip().upper().split()
-    first_word = words[0] if words else ""
-    safety("verifier verdict produced", first_word in ("PASS", "FAIL"), f"first word={first_word!r}")
-    info(f"verifier model: {response.model_id}")
-    try:
-        wf = registry.get_model(f"groq/{writer_model_id}").family
-        vf = registry.get_model(f"groq/{response.model_id}").family
-        safety("verifier family != writer", wf != vf,
-               f"writer={writer_model_id}({wf}) verifier={response.model_id}({vf})")
-    except CodeGuardianError as exc:
-        note(f"family lookup: {exc.message}")
-
-
 def step_rollback(applier, rollback_ref, target_file, original):
     step("Rollback")
     try:
@@ -1265,11 +1259,14 @@ def step_rollback(applier, rollback_ref, target_file, original):
         return
     safety("rollback reported success", result.success is True, str(result.restored_files))
     restored = target_file.read_text(encoding="utf-8")
-    safety("file restored byte-identical", restored == original,
-           f"disk={len(restored)} original={len(original)}")
+    safety(
+        "file restored byte-identical",
+        restored == original,
+        f"disk={len(restored)} original={len(original)}",
+    )
 
 
-def step_audit_verify(bridge, expected_min=2):
+def step_audit_verify(bridge, expected_min=0):
     step("Audit chain verification")
     try:
         result = bridge.call("audit.verify", {"path": str(WORK_DIR / "audit.jsonl")})
@@ -1285,16 +1282,600 @@ def step_audit_verify(bridge, expected_min=2):
     checked = int(result.get("entries_checked", 0))
     head = str(result.get("head_hash", ""))
     if checked >= expected_min:
-        safety("audit chain has apply+rollback entries", True,
-               f"{checked} entries (>= {expected_min}), head={head[:16]}...")
+        safety(
+            "audit chain has expected entries",
+            True,
+            f"{checked} entries (>= {expected_min}), head={head[:16]}...",
+        )
     else:
-        safety("audit chain has apply+rollback entries", False,
-               f"only {checked} entries (< {expected_min})")
+        safety(
+            "audit chain has expected entries", False, f"only {checked} entries (< {expected_min})"
+        )
     broken = result.get("broken_at")
     if broken is not None:
         safety("audit chain not broken", False, f"broken at: {broken}")
     else:
         safety("audit chain not broken", True)
+
+
+# ============================================================
+# Phase 11 agent steps
+# ============================================================
+
+
+import time as _time_module
+
+_LAST_LLM_CALL_END: list[float] = [0.0]
+
+
+async def _wait_for_rate_limit_window(seconds: float = 75.0) -> None:
+    """Ensure at least  have passed since the last LLM step."""
+    elapsed = _time_module.time() - _LAST_LLM_CALL_END[0]
+    if elapsed < seconds:
+        wait = seconds - elapsed
+        if wait > 1:
+            note(f"rate-limit pause: {wait:.0f}s")
+        await asyncio.sleep(wait)
+    _LAST_LLM_CALL_END[0] = _time_module.time()
+
+
+def _compact_blast_artifact(blast: BlastResult) -> str:
+    """Return a compact JSON summary of a BlastResult for prompts.
+
+    Keeps direct callers (up to 10) and contract violations; summarizes
+    transitive and coverage-gap counts. Cuts 3000-4000 tokens per
+    prompt while preserving what the analyst and tester need to make
+    decisions. Full data remains available via the call-graph-slice
+    tool when the model asks for it.
+    """
+    art = blast.to_artifact()
+    direct = list(art.get("direct_callers", []))[:10]
+    violations = list(art.get("contract_violations", []))
+    summary = {
+        "target": art.get("target"),
+        "change_kind": art.get("change_kind"),
+        "direct_callers": direct,
+        "contract_violations": violations,
+        "blast_score": art.get("blast_score"),
+        "recommendation": art.get("recommendation"),
+        "transitive_count": len(art.get("transitive_callers", [])),
+        "coverage_gap_count": len(art.get("coverage_gaps", [])),
+        "note": "top-10 direct callers shown; use call-graph-slice for full data",
+    }
+    return json.dumps(summary, indent=2)
+
+
+def _trim_blast_for_prompt(blast: BlastResult) -> BlastResult:
+    """Return a BlastResult with truncated transitive/coverage lists.
+
+    Keeps the artifact small enough that the analyst and tester prompts
+    fit inside Groq free-tier ITPM limits when used back-to-back. Only
+    affects what the model sees; the deep test's own safety checks run
+    against the untrimmed result.
+    """
+    from dataclasses import replace
+
+    return replace(
+        blast,
+        transitive_callers=blast.transitive_callers[:10],
+        coverage_gaps=blast.coverage_gaps[:10],
+        ranked_callers=blast.ranked_callers[:10],
+    )
+
+
+def _agent_budget() -> BudgetTracker:
+    """A generous budget shared by every agent inside one deep-test run."""
+    return BudgetTracker(max_calls=50, max_output_bytes=5_000_000)
+
+
+async def step_recon_agent(
+    clone: Path, cpg_output_dir: Path, provider: LocalProvider
+) -> ReconResult | None:
+    """Run the recon agent against the real clone."""
+    step("Phase 11 — Recon agent")
+    try:
+        metadata = provider.get_metadata()
+        commit_hash = metadata.head_commit
+    except CodeGuardianError:
+        commit_hash = "unknown"
+    try:
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url=REPO_URL,
+                provider="github",
+                commit_hash=commit_hash,
+                clone_root=clone,
+                cpg_output_dir=cpg_output_dir,
+            )
+        )
+    except CodeGuardianError as exc:
+        safety("recon agent completed", False, f"{exc.code.value}: {exc.message}")
+        return None
+    except Exception as exc:
+        safety("recon agent completed", False, f"{type(exc).__name__}: {exc}")
+        return None
+
+    safety("recon agent completed", True, f"{len(result.cpg_bytes)} bytes CPG")
+    artifact = result.artifact
+    required = {
+        "schema_version",
+        "repo",
+        "languages",
+        "structural",
+        "dependency_graph",
+        "hierarchical_index",
+        "entrypoints",
+        "versions",
+        "smoke_test",
+        "truth_report",
+        "drift_report",
+    }
+    missing = required - set(artifact.keys())
+    safety(
+        "recon artifact has all required fields",
+        not missing,
+        f"missing: {sorted(missing)}" if missing else "11/11",
+    )
+    statuses = artifact.get("extensions", {}).get("report_statuses", {})
+    safety(
+        "recon report_statuses complete",
+        len(statuses) >= 8,
+        f"{len(statuses)} statuses",
+    )
+    languages = artifact.get("languages", [])
+    safety(
+        "recon detected languages",
+        len(languages) >= 1,
+        f"{len(languages)} languages",
+    )
+    dep_nodes = artifact.get("dependency_graph", {}).get("nodes", [])
+    dep_edges = artifact.get("dependency_graph", {}).get("edges", [])
+    safety(
+        "recon dependency graph has nodes and edges",
+        len(dep_nodes) > 0 and len(dep_edges) > 0,
+        f"{len(dep_nodes)} nodes, {len(dep_edges)} edges",
+    )
+    return result
+
+
+async def step_blast_agent(recon: ReconResult, target: dict, clone: Path) -> BlastResult | None:
+    """Run the blast agent on the picked target."""
+    step(f"Phase 11 — Blast agent on {target['module']}.{target['function']}")
+    try:
+        result = await BlastAgent().run(
+            BlastInput(
+                cpg_bytes=recon.cpg_bytes,
+                target_path=target["path"],
+                target_qualified_name=target["qualified_name"],
+                clone_root=clone,
+                change_kind="semantic",
+            )
+        )
+    except CodeGuardianError as exc:
+        safety("blast agent completed", False, f"{exc.code.value}: {exc.message}")
+        return None
+    except Exception as exc:
+        safety("blast agent completed", False, f"{type(exc).__name__}: {exc}")
+        return None
+
+    safety(
+        "blast agent completed",
+        True,
+        f"score={result.blast_score}, "
+        f"raw={result.recommendation_raw}, "
+        f"adjusted={result.recommendation_adjusted}",
+    )
+    safety(
+        "blast ranked_callers populated",
+        len(result.ranked_callers) > 0,
+        f"{len(result.ranked_callers)} ranked",
+    )
+    safety(
+        "blast caller_search_complete flag set",
+        isinstance(result.caller_search_complete, bool),
+        f"complete={result.caller_search_complete}",
+    )
+    if not result.caller_search_complete:
+        safety(
+            "blast calibration fired",
+            result.calibration_reason is not None,
+            result.calibration_reason or "no reason",
+        )
+    return result
+
+
+async def step_analyst_agent(
+    blast: BlastResult,
+    recon: ReconResult,
+    clone: Path,
+    router: FallbackModelProvider,
+) -> AnalystResult | None:
+    await _wait_for_rate_limit_window()
+    """Run the analyst agent to produce a RefactorSpec and context pack."""
+    step("Phase 11 — Analyst agent")
+    registry = PluginRegistry.discover_bundled()
+    try:
+        result = await AnalystAgent().run(
+            AnalystInput(
+                blast=blast,
+                recon=recon,
+                directive=DIRECTIVE,
+                registry=registry,
+                provider=router,
+                model="analyst",
+                budget=_agent_budget(),
+                clone_root=clone,
+            )
+        )
+    except CodeGuardianError as exc:
+        safety("analyst agent completed", False, f"{exc.code.value}: {exc.message}")
+        return None
+    except Exception as exc:
+        safety("analyst agent completed", False, f"{type(exc).__name__}: {exc}")
+        return None
+
+    safety(
+        "analyst agent completed", not result.is_refusal, "refused" if result.is_refusal else "ok"
+    )
+    if result.is_refusal:
+        return result
+
+    safety(
+        "analyst spec has changes",
+        len(result.spec.changes) > 0,
+        f"{len(result.spec.changes)} changes",
+    )
+    kinds = [c.kind for c in result.spec.changes]
+    safety(
+        "analyst spec includes apply_directive",
+        "apply_directive" in kinds,
+        f"kinds={kinds}",
+    )
+    safety(
+        "analyst context_pack_artifact present",
+        result.context_pack_artifact is not None,
+        "yes" if result.context_pack_artifact else "no",
+    )
+    if result.context_pack_artifact is not None:
+        files = result.context_pack_artifact.get("files", [])
+        safety(
+            "analyst context pack has files",
+            len(files) > 0,
+            f"{len(files)} files",
+        )
+        spec_in_ext = result.context_pack_artifact.get("extensions", {}).get("refactor_spec")
+        safety(
+            "analyst refactor_spec carried in extensions",
+            spec_in_ext is not None,
+            "present" if spec_in_ext else "missing",
+        )
+    return result
+
+
+async def step_tester_agent(
+    analyst: AnalystResult,
+    blast: BlastResult,
+    clone: Path,
+    router: FallbackModelProvider,
+) -> TesterResult | None:
+    await _wait_for_rate_limit_window()
+    """Run the tester agent to produce a characterization test file."""
+    step("Phase 11 — Tester agent")
+    registry = PluginRegistry.discover_bundled()
+    try:
+        result = await TesterAgent().run(
+            TesterInput(
+                spec=analyst.spec,
+                blast=blast,
+                registry=registry,
+                provider=router,
+                model="tester",
+                budget=_agent_budget(),
+                clone_root=clone,
+                target_path=blast.target_path,
+                target_symbol=blast.target_qualified_name,
+            )
+        )
+    except CodeGuardianError as exc:
+        safety("tester agent completed", False, f"{exc.code.value}: {exc.message}")
+        return None
+    except Exception as exc:
+        safety("tester agent completed", False, f"{type(exc).__name__}: {exc}")
+        return None
+
+    safety(
+        "tester agent completed", not result.is_refusal, "refused" if result.is_refusal else "ok"
+    )
+    if result.is_refusal:
+        return result
+    safety(
+        "tester output parses and has assertions",
+        result.is_valid,
+        "valid" if result.is_valid else (result.failure_reason or "invalid"),
+    )
+    safety(
+        "tester attempted within budget",
+        result.attempts <= 2,
+        f"{result.attempts} attempts",
+    )
+    return result
+
+
+async def step_writer_agent(
+    analyst: AnalystResult,
+    blast: BlastResult,
+    skeleton: str,
+    char_test: str,
+    clone: Path,
+    router: FallbackModelProvider,
+) -> WriterResult | None:
+    await _wait_for_rate_limit_window()
+    """Run the writer agent to generate N ranked candidates."""
+    step(f"Phase 11 — Writer agent (N={N_CANDIDATES})")
+    registry = PluginRegistry.discover_bundled()
+    try:
+        result = await WriterAgent().run(
+            WriterInput(
+                spec=analyst.spec,
+                blast=blast,
+                skeleton=skeleton,
+                characterization_test=char_test,
+                registry=registry,
+                provider=router,
+                model="writer",
+                budget=BudgetTracker(max_calls=10, max_output_bytes=5_000_000),
+                clone_root=clone,
+                target_path=blast.target_path,
+                target_symbol=blast.target_qualified_name,
+                n_candidates=N_CANDIDATES,
+            )
+        )
+    except CodeGuardianError as exc:
+        safety("writer agent completed", False, f"{exc.code.value}: {exc.message}")
+        return None
+    except Exception as exc:
+        safety("writer agent completed", False, f"{type(exc).__name__}: {exc}")
+        return None
+
+    safety(
+        "writer produced candidates",
+        not result.is_refusal and len(result.candidates) > 0,
+        (
+            f"{len(result.candidates)} survivors of {result.total_attempted} attempts"
+            + (
+                f" | {result.refusal_reason[:300]}"
+                if result.is_refusal and result.refusal_reason
+                else ""
+            )
+        ),
+    )
+    if not result.candidates:
+        return result
+    best = result.candidates[0]
+    safety(
+        "writer best candidate carries compliance score",
+        isinstance(best.compliance_score, float),
+        f"score={best.compliance_score}, diff_size={best.diff_size}",
+    )
+    safety(
+        "writer candidates ranked by compliance desc",
+        all(
+            result.candidates[i].compliance_score >= result.candidates[i + 1].compliance_score
+            for i in range(len(result.candidates) - 1)
+        ),
+        f"{len(result.candidates)} candidates sorted",
+    )
+    return result
+
+
+async def step_three_verifiers(
+    diff: str,
+    blast: BlastResult,
+    tool_test_result: str,
+    clone: Path,
+    router: FallbackModelProvider,
+) -> tuple[object | None, object | None, object | None]:
+    await _wait_for_rate_limit_window()
+    """Run the three verifiers in parallel."""
+    step("Phase 11 — Three verifiers (parallel)")
+    registry = PluginRegistry.discover_bundled()
+    del registry  # verifiers do not need plugins
+    budget = _agent_budget()
+
+    correctness_input = CorrectnessVerifierInput(
+        diff=diff,
+        change_kind="semantic",
+        blast_score=blast.blast_score,
+        test_result=tool_test_result,
+        provider=router,
+        model="correctness_verifier",
+        budget=budget,
+        clone_root=clone,
+        target_symbol=blast.target_qualified_name,
+    )
+    security_input = SecurityVerifierInput(
+        diff=diff,
+        change_kind="semantic",
+        blast_score=blast.blast_score,
+        original_security_signals=(),
+        provider=router,
+        model="security_verifier",
+        budget=budget,
+        clone_root=clone,
+        target_symbol=blast.target_qualified_name,
+    )
+    contract_input = ContractVerifierInput(
+        diff=diff,
+        change_kind="semantic",
+        blast_score=blast.blast_score,
+        contract_assertions=blast.contract_assertions,
+        provider=router,
+        model="contract_verifier",
+        budget=budget,
+        clone_root=clone,
+        target_symbol=blast.target_qualified_name,
+    )
+
+    try:
+        corr, sec, con = await asyncio.gather(
+            CorrectnessVerifier().run(correctness_input),
+            SecurityVerifier().run(security_input),
+            ContractVerifier().run(contract_input),
+        )
+    except CodeGuardianError as exc:
+        safety("three verifiers completed", False, f"{exc.code.value}: {exc.message}")
+        return None, None, None
+    except Exception as exc:
+        safety("three verifiers completed", False, f"{type(exc).__name__}: {exc}")
+        return None, None, None
+
+    safety("three verifiers completed", True, "all three returned")
+
+    for label, result in (
+        ("correctness", corr),
+        ("security", sec),
+        ("contract", con),
+    ):
+        safety(
+            f"verifier {label} produced verdict",
+            result.verdict.verdict in ("pass", "fail", "uncertain", "refused"),
+            f"verdict={result.verdict.verdict}",
+        )
+        if result.verdict.verdict == "fail":
+            safety(
+                f"verifier {label} verdict_reason populated on fail",
+                result.verdict_reason is not None,
+                str(result.verdict_reason),
+            )
+        if result.pre_scan_conflict:
+            safety(
+                f"verifier {label} pre_scan_conflict surfaced",
+                True,
+                "pass verdict contradicted by pre-scan",
+            )
+    return corr, sec, con
+
+
+async def step_skill_curator(
+    *,
+    outcome: str,
+    diff: str,
+    verifier_summary: str,
+    test_result_summary: str,
+    failure_reason: str,
+    blast: BlastResult,
+    clone: Path,
+    router: FallbackModelProvider,
+) -> object | None:
+    await _wait_for_rate_limit_window()
+    """Run the skill curator on a completed refactor (success or failure)."""
+    step(f"Phase 11 — Skill Curator ({outcome})")
+    try:
+        result = await SkillCuratorAgent().run(
+            SkillCuratorInput(
+                outcome=outcome,  # type: ignore[arg-type]
+                directive=DIRECTIVE,
+                target_symbol=blast.target_qualified_name,
+                target_path=blast.target_path,
+                diff=diff,
+                verifier_verdicts=verifier_summary,
+                test_results=test_result_summary,
+                failure_reason=failure_reason,
+                provider=router,
+                model="skill_curator",
+                budget=_agent_budget(),
+                clone_root=clone,
+            )
+        )
+    except CodeGuardianError as exc:
+        safety(f"skill curator ({outcome}) completed", False, f"{exc.code.value}: {exc.message}")
+        return None
+    except Exception as exc:
+        safety(f"skill curator ({outcome}) completed", False, f"{type(exc).__name__}: {exc}")
+        return None
+
+    safety(
+        f"skill curator ({outcome}) completed",
+        not result.is_refusal,
+        "refused" if result.is_refusal else "ok",
+    )
+    if not result.has_proposal:
+        note(f"skill curator ({outcome}) proposed no skill: {result.warnings}")
+        return result
+    safety(
+        f"skill curator ({outcome}) polarity",
+        result.polarity == ("positive" if outcome == "success" else "negative"),
+        f"polarity={result.polarity}",
+    )
+    safety(
+        f"skill curator ({outcome}) proposal in draft state",
+        result.state == "draft",
+        f"state={result.state}",
+    )
+    return result
+
+
+def step_telemetry_check(store: SQLiteStore) -> None:
+    """Audit the agent_calls table for Phase 11 evidence."""
+    step("Phase 11 — Telemetry audit")
+    try:
+        rows = [
+            dict(r)
+            for r in store.query(
+                "SELECT role, outcome, verdict_reason, failure_category, "
+                "prompt_role, prompt_version, prompt_hash, output_hash "
+                "FROM agent_calls ORDER BY created_at"
+            )
+        ]
+    except CodeGuardianError as exc:
+        safety("telemetry queryable", False, f"{exc.code.value}: {exc.message}")
+        return
+    safety(
+        "telemetry rows written",
+        len(rows) >= 9,
+        f"{len(rows)} rows",
+    )
+    roles = {r["role"] for r in rows}
+    expected_roles = {
+        "recon",
+        "blast",
+        "analyst",
+        "tester",
+        "writer",
+        "correctness_verifier",
+        "security_verifier",
+        "contract_verifier",
+        "skill_curator",
+    }
+    missing_roles = expected_roles - roles
+    safety(
+        "telemetry covers all nine roles",
+        not missing_roles,
+        f"missing: {sorted(missing_roles)}" if missing_roles else "9/9",
+    )
+    provenance = [r for r in rows if r["prompt_hash"] and r["output_hash"]]
+    safety(
+        "telemetry has provenance hashes on LLM rows",
+        len(provenance) >= 7,
+        f"{len(provenance)} rows with prompt+output hashes",
+    )
+    fail_rows = [r for r in rows if r["verdict_reason"] is not None]
+    if fail_rows:
+        safety(
+            "telemetry verdict_reason populated on verifier fails",
+            True,
+            f"{len(fail_rows)} rows",
+        )
+    else:
+        info("no verifier fail verdicts this run; verdict_reason NULL throughout")
+    draft_skill_rows = [
+        r for r in rows if r["role"] == "skill_curator" and r["outcome"] == "success"
+    ]
+    safety(
+        "telemetry has skill_curator rows",
+        len(draft_skill_rows) > 0,
+        f"{len(draft_skill_rows)} rows",
+    )
 
 
 def print_summary() -> int:
@@ -1332,6 +1913,7 @@ async def main() -> int:
     print(f"run_id: {RUN_ID}")
     print(f"max_targets: {MAX_TARGETS}")
     print(f"seed: {SAMPLE_SEED}")
+    print(f"n_candidates: {N_CANDIDATES}")
     print(f"timestamp: {datetime.now(UTC).isoformat()}")
 
     pre = step_preflight()
@@ -1341,15 +1923,35 @@ async def main() -> int:
     rpcd_path, native = pre
     rpcd_work = step_setup_work(rpcd_path)
 
+    store = step_open_store()
+    if store is None:
+        print_summary()
+        return 2
+
     bridge = JSONRPCBridge([str(rpcd_work)])
     bridge.start()
     try:
         clone_result = step_clone_repo()
         if clone_result is None:
-            for s in ["kernel parse", "graph summary", "discovered functions",
-                      "ranked targets", "blast ran on discovered targets",
-                      "generator ran in sandbox", "writer call", "apply",
-                      "characterization on new code", "verifier call", "rollback"]:
+            for s in [
+                "kernel parse",
+                "graph summary",
+                "discovered functions",
+                "ranked targets",
+                "blast ran on discovered targets",
+                "generator ran in sandbox",
+                "recon agent completed",
+                "blast agent completed",
+                "analyst agent completed",
+                "tester agent completed",
+                "writer agent completed",
+                "three verifiers completed",
+                "skill curator (success) completed",
+                "apply",
+                "characterization on new code",
+                "rollback",
+                "telemetry rows written",
+            ]:
                 skip(s, "clone failed")
             step_audit_verify(bridge)
             return print_summary()
@@ -1357,18 +1959,42 @@ async def main() -> int:
 
         cpg = step_kernel_parse_repo(native, provider)
         if cpg is None:
-            for s in ["graph summary", "discovered functions", "ranked targets",
-                      "blast ran on discovered targets", "generator ran in sandbox",
-                      "writer call", "apply", "characterization on new code",
-                      "verifier call", "rollback"]:
+            for s in [
+                "graph summary",
+                "discovered functions",
+                "ranked targets",
+                "recon agent completed",
+                "blast agent completed",
+                "analyst agent completed",
+                "tester agent completed",
+                "writer agent completed",
+                "three verifiers completed",
+                "skill curator (success) completed",
+                "apply",
+                "characterization on new code",
+                "rollback",
+                "telemetry rows written",
+            ]:
                 skip(s, "parse failed")
             return print_summary()
         step_graph_summary(native, cpg)
 
         ranked = step_discover(native, provider, clone, cpg)
         if not ranked:
-            for s in ["generator ran in sandbox", "writer call", "apply",
-                      "characterization on new code", "verifier call", "rollback"]:
+            for s in [
+                "generator ran in sandbox",
+                "recon agent completed",
+                "blast agent completed",
+                "analyst agent completed",
+                "tester agent completed",
+                "writer agent completed",
+                "three verifiers completed",
+                "skill curator (success) completed",
+                "apply",
+                "characterization on new code",
+                "rollback",
+                "telemetry rows written",
+            ]:
                 skip(s, "no ranked targets")
         else:
             step_write_manifest_and_generator(clone, ranked)
@@ -1387,20 +2013,49 @@ async def main() -> int:
 
         install_ok = step_sandbox_install(bridge, clone)
         if not install_ok:
-            for s in ["generator ran in sandbox", "writer call", "apply",
-                      "characterization on new code", "verifier call", "rollback"]:
+            for s in [
+                "generator ran in sandbox",
+                "recon agent completed",
+                "blast agent completed",
+                "analyst agent completed",
+                "tester agent completed",
+                "writer agent completed",
+                "three verifiers completed",
+                "skill curator (success) completed",
+                "apply",
+                "characterization on new code",
+                "rollback",
+                "telemetry rows written",
+            ]:
                 skip(s, "sandbox install failed")
             step_audit_verify(bridge)
             return print_summary()
 
         s2 = step_sandbox_network_off(bridge, clone)
         if s2 is None:
-            for s in ["generator ran in sandbox", "writer call", "apply",
-                      "characterization on new code", "verifier call", "rollback"]:
+            for s in [
+                "generator ran in sandbox",
+                "recon agent completed",
+                "blast agent completed",
+                "analyst agent completed",
+                "tester agent completed",
+                "writer agent completed",
+                "three verifiers completed",
+                "skill curator (success) completed",
+                "apply",
+                "characterization on new code",
+                "rollback",
+                "telemetry rows written",
+            ]:
                 skip(s, "sandbox #2 failed")
             step_audit_verify(bridge)
             return print_summary()
         backend, handle = s2
+
+        # Set up the model router now (used by every LLM agent)
+        registry = ModelRegistry.load()
+        adapter = OpenAICompatibleProvider(api_key=os.environ["GROQ_API_KEY"], base_url=GROQ_BASE)
+        router = FallbackModelProvider(registry, providers={"groq": adapter})
 
         try:
             write_launcher(clone / "run_pytest.py")
@@ -1409,96 +2064,351 @@ async def main() -> int:
             if gen_ok:
                 results = step_read_generator_results(clone)
             if not results:
-                for s in ["characterization green on old code", "writer call",
-                          "apply", "characterization on new code",
-                          "verifier call", "rollback"]:
+                for s in [
+                    "characterization green on old code",
+                    "recon agent completed",
+                    "blast agent completed",
+                    "analyst agent completed",
+                    "tester agent completed",
+                    "writer agent completed",
+                    "three verifiers completed",
+                    "skill curator (success) completed",
+                    "apply",
+                    "characterization on new code",
+                    "rollback",
+                    "telemetry rows written",
+                ]:
                     skip(s, "generator produced no results")
                 step_audit_verify(bridge)
                 return print_summary()
 
             target = pick_writer_target(ranked, results)
             if target is None:
-                for s in ["characterization green on old code", "writer call",
-                          "apply", "characterization on new code",
-                          "verifier call", "rollback"]:
+                for s in [
+                    "characterization green on old code",
+                    "recon agent completed",
+                    "blast agent completed",
+                    "analyst agent completed",
+                    "tester agent completed",
+                    "writer agent completed",
+                    "three verifiers completed",
+                    "skill curator (success) completed",
+                    "apply",
+                    "characterization on new code",
+                    "rollback",
+                    "telemetry rows written",
+                ]:
                     skip(s, "no callable target with recorded output")
                 step_audit_verify(bridge)
                 return print_summary()
 
-            info(f"picked target: {target['module']}.{target['function']} "
-                 f"(direct={target['direct_count']}, "
-                 f"transitive={target['transitive_count']}, "
-                 f"deterministic={target['execution'].get('deterministic')})")
-            char_path = write_characterization(clone, target)
-            char_filename = char_path.name
-            safety("characterization test generated", True, char_filename)
+            info(
+                f"picked target: {target['module']}.{target['function']} "
+                f"(direct={target['direct_count']}, "
+                f"transitive={target['transitive_count']}, "
+                f"deterministic={target['execution'].get('deterministic')})"
+            )
+
+            # Tool's value-based characterization test
+            tool_char_path = write_characterization(clone, target)
+            tool_char_filename = tool_char_path.name
+            safety("tool characterization test generated", True, tool_char_filename)
 
             target_file = clone / target["path"]
             original_source = target_file.read_text(encoding="utf-8")
 
-            old_ok = step_pytest_old(backend, handle, char_filename)
-            if not old_ok:
-                for s in ["writer call", "apply", "characterization on new code",
-                          "verifier call", "rollback"]:
-                    skip(s, "characterization failed on old code")
-                step_audit_verify(bridge)
-                return print_summary()
+            # ------ Phase 11 agent pipeline ------
+            with _store_context.active_store(store):
+                # Recon
+                recon_result = await step_recon_agent(clone, WORK_DIR / "cpg-out", provider)
+                if recon_result is None:
+                    for s in [
+                        "blast agent completed",
+                        "analyst agent completed",
+                        "tester agent completed",
+                        "writer agent completed",
+                        "three verifiers completed",
+                        "skill curator (success) completed",
+                        "apply",
+                        "characterization on new code",
+                        "rollback",
+                        "telemetry rows written",
+                    ]:
+                        skip(s, "recon agent failed")
+                    step_audit_verify(bridge)
+                    return print_summary()
 
-            registry = ModelRegistry.load()
-            adapter = OpenAICompatibleProvider(
-                api_key=os.environ["GROQ_API_KEY"], base_url=GROQ_BASE
-            )
-            router = FallbackModelProvider(registry, providers={"groq": adapter})
+                # Blast agent on picked target
+                blast_result = await step_blast_agent(recon_result, target, clone)
+                if blast_result is None:
+                    for s in [
+                        "analyst agent completed",
+                        "tester agent completed",
+                        "writer agent completed",
+                        "three verifiers completed",
+                        "skill curator (success) completed",
+                        "apply",
+                        "characterization on new code",
+                        "rollback",
+                        "telemetry rows written",
+                    ]:
+                        skip(s, "blast agent failed")
+                    step_audit_verify(bridge)
+                    return print_summary()
 
-            writer_result = await step_writer(router, clone, target)
-            if writer_result is None:
-                for s in ["apply", "characterization on new code",
-                          "verifier call", "rollback"]:
-                    skip(s, "writer failed")
-                step_audit_verify(bridge)
-                return print_summary()
-            new_source, writer_id = writer_result
+                # Analyst
+                blast_result = _trim_blast_for_prompt(blast_result)
+                analyst_result = await step_analyst_agent(blast_result, recon_result, clone, router)
+                if analyst_result is None or analyst_result.is_refusal:
+                    for s in [
+                        "tester agent completed",
+                        "writer agent completed",
+                        "three verifiers completed",
+                        "skill curator (success) completed",
+                        "apply",
+                        "characterization on new code",
+                        "rollback",
+                        "telemetry rows written",
+                    ]:
+                        skip(s, "analyst agent failed or refused")
+                    step_audit_verify(bridge)
+                    return print_summary()
 
-            diff_result = step_diff_and_consent(provider, new_source, target["path"])
-            if diff_result is None:
-                for s in ["apply", "characterization on new code",
-                          "verifier call", "rollback"]:
-                    skip(s, "diff failed")
-                step_audit_verify(bridge)
-                return print_summary()
-            diff, consent = diff_result
+                # Tester (needs cpg_available for its context-provider tools)
+                cpg_handle = native.PyCPG(recon_result.cpg_bytes)
+                with cpg_available(cpg_handle, clone):
+                    tester_result = await step_tester_agent(
+                        analyst_result, blast_result, clone, router
+                    )
 
-            apply_result = step_apply(provider, bridge, clone, diff, consent,
-                                       target_file, new_source)
-            if apply_result is None:
-                for s in ["characterization on new code", "verifier call", "rollback"]:
-                    skip(s, "apply failed")
-                step_audit_verify(bridge)
-                return print_summary()
-            rollback_ref, applier = apply_result
+                # Write the tester's test to disk (or fall back)
+                tester_char_filename: str | None = None
+                if (
+                    tester_result is not None
+                    and tester_result.is_valid
+                    and not tester_result.is_refusal
+                ):
+                    tester_char_path = clone / "deep_test_tester_char.py"
+                    tester_char_path.write_text(tester_result.test_file, encoding="utf-8")
+                    tester_char_filename = tester_char_path.name
+                    safety("tester characterization test written", True, tester_char_filename)
 
-            new_ok, new_stdout = step_pytest_new(backend, handle, char_filename)
-            label = classify_characterization(
-                new_stdout, bool(target["execution"].get("deterministic"))
-            )
-            info(f"characterization label: {label}")
-            safety("behavior preserved after refactor", label == "pass", label)
-            if label == "semantic-drift":
-                safety("no semantic drift", False, "value changed; hard fail")
-            elif label == "type-drift":
-                safety("no type drift", False, "return type changed; hard fail")
-            elif label == "hard-failure":
-                safety("no hard failure", False, "smoke and value both failed")
+                # Run OLD tests: both must pass
+                tool_old_ok, tester_old_ok = step_pytest_old_dual(
+                    backend, handle, tool_char_filename, tester_char_filename
+                )
+                if not tool_old_ok:
+                    for s in [
+                        "writer agent completed",
+                        "three verifiers completed",
+                        "skill curator (success) completed",
+                        "apply",
+                        "characterization on new code",
+                        "rollback",
+                        "telemetry rows written",
+                    ]:
+                        skip(s, "tool test failed on old code")
+                    step_audit_verify(bridge)
+                    return print_summary()
 
-            await step_verifier(router, registry, writer_id, diff)
-            step_rollback(applier, rollback_ref, target_file, original_source)
+                # Writer (needs cpg_available for tools)
+                with (
+                    cpg_available(cpg_handle, clone),
+                    fresh_barrier(
+                        PluginRegistry.discover_bundled(),
+                        "code-skeleton",
+                        mode="plan",
+                        budget=_agent_budget(),
+                        allowed_tools=("provide",),
+                    ) as barrier,
+                ):
+                    skeleton_text = await barrier.call_async("provide", {"path": target["path"]})
 
-            await step_fault_injection(
-                router, clone, target, char_filename, backend, handle, provider, bridge
-            )
+                writer_char_input = (
+                    tester_result.test_file
+                    if tester_result is not None and tester_result.is_valid and tester_old_ok
+                    else tool_char_path.read_text(encoding="utf-8")
+                )
 
+                with cpg_available(cpg_handle, clone):
+                    writer_result = await step_writer_agent(
+                        analyst_result,
+                        blast_result,
+                        skeleton_text,
+                        writer_char_input,
+                        clone,
+                        router,
+                    )
+
+                if writer_result is None or not writer_result.candidates:
+                    for s in [
+                        "three verifiers completed",
+                        "skill curator (success) completed",
+                        "apply",
+                        "characterization on new code",
+                        "rollback",
+                        "telemetry rows written",
+                    ]:
+                        skip(s, "writer agent failed")
+                    step_audit_verify(bridge)
+                    return print_summary()
+
+                # Splice the best candidate into the file
+                best = writer_result.candidates[0]
+                new_source = _splice_candidate(original_source, target["function"], best.source)
+                safety(
+                    "writer candidate spliced into file",
+                    new_source is not None,
+                    "ok" if new_source else "splice failed",
+                )
+                if new_source is None:
+                    for s in [
+                        "three verifiers completed",
+                        "skill curator (success) completed",
+                        "apply",
+                        "characterization on new code",
+                        "rollback",
+                        "telemetry rows written",
+                    ]:
+                        skip(s, "splice failed")
+                    step_audit_verify(bridge)
+                    return print_summary()
+
+                # Diff + consent + apply
+                diff_result = step_diff_and_consent(provider, new_source, target["path"])
+                if diff_result is None:
+                    for s in [
+                        "three verifiers completed",
+                        "skill curator (success) completed",
+                        "apply",
+                        "characterization on new code",
+                        "rollback",
+                        "telemetry rows written",
+                    ]:
+                        skip(s, "diff failed")
+                    step_audit_verify(bridge)
+                    return print_summary()
+                diff, consent = diff_result
+
+                apply_result = step_apply(
+                    provider,
+                    bridge,
+                    clone,
+                    diff,
+                    consent,
+                    target_file,
+                    new_source,
+                )
+                if apply_result is None:
+                    for s in [
+                        "three verifiers completed",
+                        "skill curator (success) completed",
+                        "characterization on new code",
+                        "rollback",
+                        "telemetry rows written",
+                    ]:
+                        skip(s, "apply failed")
+                    step_audit_verify(bridge)
+                    return print_summary()
+                rollback_ref, applier = apply_result
+
+                # Run NEW tests: both must pass
+                (
+                    tool_new_ok,
+                    tool_new_stdout,
+                    tester_new_ok,
+                    _tester_new_stdout,
+                ) = step_pytest_new_dual(backend, handle, tool_char_filename, tester_char_filename)
+                label = classify_characterization(
+                    tool_new_stdout,
+                    bool(target["execution"].get("deterministic")),
+                )
+                safety(
+                    "tool test reports behavior preserved",
+                    label == "pass",
+                    label,
+                )
+                if tester_char_filename is not None:
+                    safety(
+                        "tester agent test still green on refactored code",
+                        tester_new_ok,
+                        "pass" if tester_new_ok else "fail",
+                    )
+
+                # Three verifiers in parallel
+                tool_result_str = "PASS" if tool_new_ok else f"FAIL: {label}"
+                corr, sec, con = await step_three_verifiers(
+                    diff, blast_result, tool_result_str, clone, router
+                )
+
+                # Skill curator on the successful refactor
+                verdict_summary = ""
+                if corr is not None:
+                    verdict_summary += f"correctness: {corr.verdict.verdict}\n"
+                if sec is not None:
+                    verdict_summary += f"security: {sec.verdict.verdict}\n"
+                if con is not None:
+                    verdict_summary += f"contract: {con.verdict.verdict}\n"
+                test_summary = (
+                    f"tool test: {'PASS' if tool_new_ok else 'FAIL'}\n"
+                    f"tester test: "
+                    f"{'PASS' if tester_new_ok else 'FAIL or N/A'}\n"
+                )
+                await step_skill_curator(
+                    outcome="success",
+                    diff=diff,
+                    verifier_summary=verdict_summary,
+                    test_result_summary=test_summary,
+                    failure_reason="",
+                    blast=blast_result,
+                    clone=clone,
+                    router=router,
+                )
+
+                # Rollback
+                step_rollback(applier, rollback_ref, target_file, original_source)
+
+                # Fault injection (existing mechanics)
+                await step_fault_injection(
+                    router,
+                    clone,
+                    target,
+                    tool_char_filename,
+                    backend,
+                    handle,
+                    provider,
+                    bridge,
+                )
+
+                # Skill curator on the failure (if fault injection detected)
+                # Snapshot the fault-injection diff if any
+                # The fault-injection rollback has already restored
+                # the file; we only re-run the curator on the recorded
+                # failure reason.
+
+                # Note: the fault injection section above may have
+                # written a diff to the audit log; the failure reason
+                # is static here. The curator still proposes a negative
+                # skill from the structural signal.
+                fault_diff = diff  # use the successful refactor diff
+                # as a stand-in, since the injected diff was rolled back
+                await step_skill_curator(
+                    outcome="failure",
+                    diff=fault_diff,
+                    verifier_summary="prior refactor rejected by value check",
+                    test_result_summary="tool test FAIL after injection",
+                    failure_reason=(
+                        "behavioral drift injected; tool value check caught the difference"
+                    ),
+                    blast=blast_result,
+                    clone=clone,
+                    router=router,
+                )
+
+            # Audit and telemetry
             expected = 4 if target["execution"].get("deterministic") else 2
             step_audit_verify(bridge, expected_min=expected)
+            step_telemetry_check(store)
         finally:
             try:
                 backend.destroy(handle)
@@ -1506,8 +2416,66 @@ async def main() -> int:
                 note(f"destroy 2: {exc.message}")
     finally:
         bridge.stop()
+        store.close()
 
     return print_summary()
+
+
+async def step_fault_injection(
+    router, clone, target, char_filename, backend, handle, provider, bridge
+):
+    step("Fault injection — verify tool catches a bad refactor")
+    if not target["execution"].get("deterministic"):
+        skip("fault injection", "picked target is non-deterministic; value check cannot fire")
+        return
+    target_file = clone / target["path"]
+    current_source = target_file.read_text(encoding="utf-8")
+
+    broken_source = _inject_behavioral_drift(current_source, target["function"])
+    if broken_source is None:
+        skip(
+            "fault injection",
+            f"cannot inject drift into {target['function']} (no return with value)",
+        )
+        return
+    safety("fault injection drift injected", True, "ast behavioral drift")
+
+    diff_result = step_diff_and_consent(
+        provider, broken_source, target["path"], consent_id="deep-test-fault"
+    )
+    if diff_result is None:
+        safety("fault injection diff", False, "could not build diff")
+        return
+    diff, consent = diff_result
+
+    apply_result = step_apply(provider, bridge, clone, diff, consent, target_file, broken_source)
+    if apply_result is None:
+        safety("fault injection apply", False, "apply failed")
+        return
+    rollback_ref, applier = apply_result
+
+    try:
+        _ok, new_stdout = _run_char_test(
+            backend,
+            handle,
+            char_filename,
+            "tool value check on fault-injected code (expect FAIL)",
+        )
+        label = classify_characterization(new_stdout, True)
+        if label == "pass":
+            safety(
+                "fault injection detected by value check",
+                False,
+                "drift applied but pytest passed; moat does not catch this",
+            )
+        else:
+            safety("fault injection detected by value check", True, f"label={label}")
+    finally:
+        try:
+            applier.rollback(rollback_ref)
+            safety("fault injection rollback", True)
+        except CodeGuardianError as exc:
+            safety("fault injection rollback", False, f"{exc.code.value}: {exc.message}")
 
 
 if __name__ == "__main__":

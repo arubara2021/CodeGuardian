@@ -1,0 +1,298 @@
+# Writer golden cases. Consumed by agent_eval.run_golden("writer", ...).
+# Retry variables empty on non-retry cases so the same file renders
+# under prompt v1.0.0 and v1.1.0. expected_compliance_score_min is
+# informational; agent_eval does not currently assert on it.
+
+cases:
+  - id: pass_add_type_hints
+    description: Simple add type hints, signature preserved
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      characterization_test: |
+        def test_parse():
+            assert parse("x") == "x"
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def parse", "raw", "str"]
+      expected_compliance_score_min: 0.5
+
+  - id: pass_extract_helper
+    description: Extract inner logic into helper
+    variables:
+      target_symbol: process_all
+      target_path: b.py
+      language: python
+      directive: extract the loop into a helper function
+      skeleton: |
+        b.py:
+        10: def process_all(items):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      characterization_test: |
+        def test_process_all():
+            assert process_all([1, 2]) == [2, 4]
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def "]
+      expected_compliance_score_min: 0.5
+
+  - id: pass_rename_variable
+    description: Rename local variable only
+    variables:
+      target_symbol: normalize
+      target_path: a.py
+      language: python
+      directive: rename result to cleaned
+      skeleton: |
+        a.py:
+        5: def normalize(data):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      characterization_test: |
+        def test_normalize():
+            assert normalize("x  ") == "x"
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def normalize"]
+      expected_compliance_score_min: 0.5
+
+  - id: pass_add_return_annotation
+    description: Add return type annotation only
+    variables:
+      target_symbol: add
+      target_path: math_utils.py
+      language: python
+      directive: add return annotation
+      skeleton: |
+        math_utils.py:
+        1: def add(a, b):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      characterization_test: |
+        def test_add():
+            assert add(1, 2) == 3
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def add", "->"]
+      expected_compliance_score_min: 0.5
+
+  - id: refuse_missing_target
+    description: Target body not retrievable
+    variables:
+      target_symbol: nonexistent
+      target_path: a.py
+      language: python
+      directive: add type hints
+      skeleton: "(no declarations)"
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      characterization_test: |
+        def test_x():
+            assert True
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: true
+      expected_ast_valid: false
+      expected_contains: ["REFUSED:"]
+      expected_compliance_score_min: 0.0
+
+  - id: refuse_ambiguous_directive
+    description: Directive cannot be interpreted
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      language: python
+      directive: make it better somehow
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      characterization_test: |
+        def test_parse():
+            assert parse("x") == "x"
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: true
+      expected_ast_valid: false
+      expected_contains: ["REFUSED:"]
+      expected_compliance_score_min: 0.0
+
+  - id: refuse_breaks_caller
+    description: Directive requires breaking a caller's contract
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      language: python
+      directive: remove the unused parameter raw
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+      blast_report: |
+        {"direct_callers": [{"qualified_name": "caller", "path": "b.py", "line": 10}],
+         "contract_violations": [], "blast_score": 2}
+      characterization_test: |
+        def test_parse():
+            assert parse("x") == "x"
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: true
+      expected_ast_valid: false
+      expected_contains: ["REFUSED:"]
+      expected_compliance_score_min: 0.0
+
+  - id: pass_simplify
+    description: Simplify conditional without behavior change
+    variables:
+      target_symbol: check
+      target_path: a.py
+      language: python
+      directive: simplify the if/else to a ternary
+      skeleton: |
+        a.py:
+        5: def check(x):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      characterization_test: |
+        def test_check():
+            assert check(1) == "positive"
+            assert check(-1) == "negative"
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def check"]
+      expected_compliance_score_min: 0.3
+
+  - id: pass_add_docstring
+    description: Add docstring without behavior change
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      language: python
+      directive: add a docstring
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      characterization_test: |
+        def test_parse():
+            assert parse("x") == "x"
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def parse", '"""']
+      expected_compliance_score_min: 0.3
+
+  - id: refuse_high_risk
+    description: High blast score with contract violation demands refusal
+    variables:
+      target_symbol: load_config
+      target_path: config.py
+      language: python
+      directive: change the return type to list
+      skeleton: |
+        config.py:
+        3: def load_config(path):
+      blast_report: |
+        {"direct_callers": [{"qualified_name": "setup", "path": "app.py", "line": 5}],
+         "contract_violations": [
+           {"caller": "setup", "assumption": "returns dict",
+            "risk": "critical"}],
+         "blast_score": 72, "recommendation": "block"}
+      characterization_test: |
+        def test_load_config():
+            result = load_config("x")
+            assert isinstance(result, dict)
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: true
+      expected_ast_valid: false
+      expected_contains: ["REFUSED:"]
+      expected_compliance_score_min: 0.0
+
+  - id: pass_add_keyword_only
+    description: Add keyword-only parameter with default
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      language: python
+      directive: add keyword-only parameter strict with default False
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      characterization_test: |
+        def test_parse():
+            assert parse("x") == "x"
+      previous_attempt: ""
+      test_failure: ""
+      previous_diff: ""
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def parse", "strict"]
+      expected_compliance_score_min: 0.5
+
+  - id: pass_retry_type_hints
+    description: Retry case; previous attempt failed
+    variables:
+      target_symbol: parse
+      target_path: a.py
+      language: python
+      directive: add type hints
+      skeleton: |
+        a.py:
+        5: def parse(raw):
+      blast_report: |
+        {"direct_callers": [], "contract_violations": [], "blast_score": 0}
+      characterization_test: |
+        def test_parse():
+            assert parse("x") == "x"
+      previous_attempt: "def parse(data: str) -> str:\n    return data\n"
+      test_failure: "TypeError: parse() got an unexpected keyword argument 'data'"
+      previous_diff: "-def parse(raw): ...\n+def parse(data: str) -> str: ..."
+    expected:
+      expects_refusal: false
+      expected_ast_valid: true
+      expected_contains: ["def parse", "raw"]
+      expected_compliance_score_min: 0.5

@@ -1,0 +1,264 @@
+# Skill curator golden cases. Consumed by
+# agent_eval.run_golden("skill_curator", ...). Each case exercises a
+# different reusable-vs-specific decision.
+#
+# Expected fields:
+#   expected_skill_name_or_none: "auto" means a real skill name is
+#     expected; "(none)" means the sentinel is expected.
+#   expected_confidence_min: lower bound on confidence.
+#   expected_polarity: informational; not enforced by agent_eval.
+#     Polarity is derived from the input outcome, not the model.
+
+cases:
+  - id: pass_clear_pattern
+    description: Type hints from return expressions, clearly reusable
+    variables:
+      directive: add type hints
+      target_symbol: parse
+      target_path: a.py
+      diff: |
+        --- a/a.py
+        +++ b/a.py
+        @@ -1,2 +1,2 @@
+        -def parse(raw):
+        +def parse(raw: str) -> str:
+             return raw.strip()
+      verifier_verdicts: |
+        correctness: pass
+        security: pass
+        contract: pass
+      test_results: |
+        1 passed
+    expected:
+      expected_skill_name_or_none: auto
+      expected_confidence_min: 0.5
+      expected_polarity: positive
+
+  - id: pass_pattern_medium_confidence
+    description: Type hints with mixed return types
+    variables:
+      directive: add type hints
+      target_symbol: compute
+      target_path: b.py
+      diff: |
+        --- a/b.py
+        +++ b/b.py
+        @@ -1,4 +1,4 @@
+        -def compute(x):
+        +def compute(x: int) -> int | None:
+             if x < 0:
+                 return None
+             return x
+      verifier_verdicts: |
+        correctness: pass
+        security: pass
+        contract: pass
+      test_results: |
+        2 passed
+    expected:
+      expected_skill_name_or_none: auto
+      expected_confidence_min: 0.3
+      expected_polarity: positive
+
+  - id: pass_no_pattern
+    description: Rename of a single variable, not reusable
+    variables:
+      directive: rename result to cleaned
+      target_symbol: normalize
+      target_path: a.py
+      diff: |
+        --- a/a.py
+        +++ b/a.py
+        @@ -1,3 +1,3 @@
+         def normalize(data):
+        -    result = data.strip()
+        -    return result
+        +    cleaned = data.strip()
+        +    return cleaned
+      verifier_verdicts: |
+        correctness: pass
+        security: pass
+        contract: pass
+      test_results: |
+        1 passed
+    expected:
+      expected_skill_name_or_none: "(none)"
+      expected_confidence_min: 0.0
+
+  - id: pass_specific_fix
+    description: Fix specific to one library, not reusable
+    variables:
+      directive: fix the off-by-one in the loop bound
+      target_symbol: iterate
+      target_path: util.py
+      diff: |
+        --- a/util.py
+        +++ b/util.py
+        @@ -1,4 +1,4 @@
+         def iterate(items):
+        -    for i in range(len(items) - 1):
+        +    for i in range(len(items)):
+                 yield items[i]
+      verifier_verdicts: |
+        correctness: pass
+        security: pass
+        contract: pass
+      test_results: |
+        3 passed
+    expected:
+      expected_skill_name_or_none: "(none)"
+      expected_confidence_min: 0.0
+
+  - id: pass_pattern_low_confidence
+    description: Broader pattern, lower confidence
+    variables:
+      directive: add a docstring
+      target_symbol: helper
+      target_path: a.py
+      diff: |
+        --- a/a.py
+        +++ b/a.py
+        @@ -1,2 +1,3 @@
+         def helper(x):
+        +    """Return x doubled."""
+             return x * 2
+      verifier_verdicts: |
+        correctness: pass
+        security: pass
+        contract: pass
+      test_results: |
+        1 passed
+    expected:
+      expected_skill_name_or_none: auto
+      expected_confidence_min: 0.2
+      expected_polarity: positive
+
+  - id: pass_test_pattern
+    description: Test-writing pattern from a characterization test
+    variables:
+      directive: add type hints
+      target_symbol: parse
+      target_path: a.py
+      diff: |
+        --- a/a.py
+        +++ b/a.py
+        @@ -1,2 +1,2 @@
+        -def parse(raw):
+        +def parse(raw: str) -> str:
+             return raw.strip()
+      verifier_verdicts: |
+        correctness: pass
+        security: pass
+        contract: pass
+      test_results: |
+        1 passed (test_parse_returns_str_typed)
+    expected:
+      expected_skill_name_or_none: auto
+      expected_confidence_min: 0.4
+      expected_polarity: positive
+
+  - id: pass_no_pattern_import
+    description: Reorder imports, not a reusable procedure
+    variables:
+      directive: reorder imports
+      target_symbol: parse
+      target_path: a.py
+      diff: |
+        --- a/a.py
+        +++ b/a.py
+        @@ -1,3 +1,3 @@
+        -import sys
+         import os
+        +import sys
+
+         def parse(raw):
+      verifier_verdicts: |
+        correctness: pass
+        security: pass
+        contract: pass
+      test_results: |
+        1 passed
+    expected:
+      expected_skill_name_or_none: "(none)"
+      expected_confidence_min: 0.0
+
+  - id: pass_negative_lesson
+    description: Failure case; reusable anti-pattern
+    variables:
+      directive: add type hints
+      target_symbol: parse
+      target_path: a.py
+      diff: |
+        --- a/a.py
+        +++ b/a.py
+        @@ -1,2 +1,4 @@
+        -def parse(raw):
+        +def parse(raw: str | None) -> str:
+        +    if raw is None:
+        +        return ""
+             return raw.strip()
+      verifier_verdicts: |
+        correctness: fail (behavior_drift: None handling changed)
+        security: pass
+        contract: pass
+      test_results: |
+        1 failed: TypeError expected on None input, got ""
+    expected:
+      expected_skill_name_or_none: auto
+      expected_confidence_min: 0.4
+      expected_polarity: negative
+
+  - id: pass_no_pattern_typo
+    description: Single typo fix, not a reusable skill
+    variables:
+      directive: fix spelling in docstring
+      target_symbol: helper
+      target_path: a.py
+      diff: |
+        --- a/a.py
+        +++ b/a.py
+        @@ -1,3 +1,3 @@
+         def helper(x):
+        -    """Retrun x doubled."""
+        +    """Return x doubled."""
+             return x * 2
+      verifier_verdicts: |
+        correctness: pass
+        security: pass
+        contract: pass
+      test_results: |
+        1 passed
+    expected:
+      expected_skill_name_or_none: "(none)"
+      expected_confidence_min: 0.0
+
+  - id: pass_strong_pattern
+    description: Extract-helper refactor with clear precondition
+    variables:
+      directive: extract the inner loop into a helper
+      target_symbol: process_all
+      target_path: b.py
+      diff: |
+        --- a/b.py
+        +++ b/b.py
+        @@ -1,5 +1,8 @@
+        +def _transform(item):
+        +    return item * 2
+        +
+        +
+         def process_all(items):
+        -    result = []
+        -    for item in items:
+        -        result.append(item * 2)
+        -    return result
+        +    return [_transform(item) for item in items]
+      verifier_verdicts: |
+        correctness: pass
+        security: pass
+        contract: pass
+      test_results: |
+        2 passed
+    expected:
+      expected_skill_name_or_none: auto
+      expected_confidence_min: 0.5
+      expected_polarity: positive

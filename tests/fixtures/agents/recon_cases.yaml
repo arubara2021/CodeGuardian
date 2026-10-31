@@ -1,0 +1,149 @@
+# Recon fixtures for test_agent_golden.py. The test writes each case's
+# files to a temp directory, runs the recon agent, and validates against
+# the expected_* fields. Sources are inline so the fixtures are
+# self-contained and no committed repos are needed.
+
+cases:
+  - id: recon_python_basic
+    description: Small Python repo with one caller edge
+    files:
+      - path: main.py
+        content: |
+          def helper(x):
+              return x * 2
+
+          def caller():
+              return helper(5)
+    expected_languages: [python]
+    expected_min_nodes: 5
+    expected_report_statuses:
+      dependency_graph: complete
+      hierarchical_index: complete
+      smoke_test: skipped
+      truth_report: skipped
+      drift_report: skipped
+
+  - id: recon_python_import
+    description: Two Python files with an import edge
+    files:
+      - path: a.py
+        content: |
+          def parse(x):
+              return x.strip()
+      - path: b.py
+        content: |
+          from a import parse
+
+          def run():
+              return parse("hello")
+    expected_languages: [python]
+    expected_min_nodes: 6
+    expected_report_statuses:
+      dependency_graph: complete
+      hierarchical_index: complete
+
+  - id: recon_typescript_basic
+    description: Small TypeScript repo
+    files:
+      - path: main.ts
+        content: |
+          function helper(x: number): number {
+              return x * 2;
+          }
+
+          function caller(): number {
+              return helper(5);
+          }
+    expected_languages: [typescript]
+    expected_min_nodes: 5
+    expected_report_statuses:
+      dependency_graph: partial
+      hierarchical_index: complete
+
+  - id: recon_javascript_basic
+    description: Small JavaScript repo
+    files:
+      - path: main.js
+        content: |
+          function helper(x) {
+              return x * 2;
+          }
+
+          function caller() {
+              return helper(5);
+          }
+    expected_languages: [javascript]
+    expected_min_nodes: 5
+    expected_report_statuses:
+      dependency_graph: partial
+
+  - id: recon_java_basic
+    description: Small Java class with two static methods
+    files:
+      - path: Main.java
+        content: |
+          public class Main {
+              public static int helper(int x) {
+                  return x * 2;
+              }
+              public static int caller() {
+                  return helper(5);
+              }
+          }
+    expected_languages: [java]
+    expected_min_nodes: 5
+    expected_report_statuses:
+      dependency_graph: partial
+
+  - id: recon_go_basic
+    description: Small Go file with two functions
+    files:
+      - path: main.go
+        content: |
+          package main
+
+          func helper(x int) int {
+              return x * 2
+          }
+
+          func caller() int {
+              return helper(5)
+          }
+    expected_languages: [go]
+    expected_min_nodes: 5
+    expected_report_statuses:
+      dependency_graph: partial
+
+  - id: recon_rust_basic
+    description: Small Rust file with two functions
+    files:
+      - path: main.rs
+        content: |
+          fn helper(x: i32) -> i32 {
+              x * 2
+          }
+
+          fn caller() -> i32 {
+              helper(5)
+          }
+    expected_languages: [rust]
+    expected_min_nodes: 5
+    expected_report_statuses:
+      dependency_graph: partial
+
+  - id: recon_cpp_basic
+    description: Small C++ file; best-effort tier
+    files:
+      - path: main.cpp
+        content: |
+          int helper(int x) {
+              return x * 2;
+          }
+
+          int caller() {
+              return helper(5);
+          }
+    expected_languages: [cpp]
+    expected_min_nodes: 4
+    expected_report_statuses:
+      dependency_graph: partial

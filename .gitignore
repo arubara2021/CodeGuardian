@@ -67,3 +67,5 @@ python/codeguardian/_native.dylib
 sandtest/*.txt
 *_context.txt
 phase9_context.txt
+
+sandtest_output.txt

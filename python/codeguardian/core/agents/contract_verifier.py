@@ -1,9 +1,16 @@
 """Contract verifier agent.
 
 Receives the diff and one ContractAssertion per caller assumption.
-Checks each assertion against the diff. The deterministic pre-scan
-records whether each assertion has a corresponding line in the diff,
-so the model can see which assertions the refactor touched.
+When a SandboxExecutor and a contract test path are supplied, runs
+the test file and treats its exit code as conclusive evidence. When
+no test path is supplied, the verifier stays model-only and the
+receipt is None.
+
+Synthesis of the contract test file is the caller's responsibility in
+this block. A later block adds an in-verifier synthesizer that builds
+the file from the assertions. This block establishes the execution
+path and the evidence contract; the synthesis that produces the file
+comes later.
 
 Independence. The verifier does not see the correctness test result,
 the original source, or the security signal list.
@@ -11,8 +18,6 @@ the original source, or the security signal list.
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -24,27 +29,24 @@ from codeguardian.interfaces.model import ModelOptions, ModelProvider
 from codeguardian.interfaces.verifier import ContractAssertion
 
 from ._runtime import tracked_model_call
-from .telemetry import record_call
+from ._verifier_common import (
+    SandboxExecutor,
+    apply_evidence,
+    apply_veto,
+    assemble_annotated_diff,
+    compute_blind_prediction,
+    diff_stats,
+    execute_characterization_test,
+    parse_and_strip,
+    schema_refusal_verdict,
+)
+from .telemetry import EvidenceReceipt, record_call
 
 __all__ = [
     "ContractVerifier",
     "ContractVerifierInput",
     "ContractVerifierResult",
 ]
-
-
-_VALID_REFUSAL_CODES = frozenset(
-    {
-        "target_missing",
-        "directive_ambiguous",
-        "context_contradicts",
-        "tool_unavailable",
-        "budget_exhausted",
-        "unsupported_language",
-    }
-)
-
-_HUNK_RE = re.compile(r"^@@ .* @@", re.MULTILINE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,11 +65,18 @@ class ContractVerifierInput:
     clone_root: Path
     target_symbol: str = ""
     prompt_version: str = "1.0.0"
+    sandbox_executor: SandboxExecutor | None = None
+    contract_test_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ContractVerifierResult:
-    """Output of the contract verifier."""
+    """Output of the contract verifier.
+
+    The evidence fields are additive. Callers that do not supply a
+    sandbox or test path see evidence_receipt is None,
+    counterexample is None, and evidence_conflict is False.
+    """
 
     verdict: VerdictOutput
     verdict_reason: str | None
@@ -75,6 +84,18 @@ class ContractVerifierResult:
     pre_scan_conflict: bool
     refusal_code: str | None = None
     is_refusal: bool = False
+    evidence_receipt: EvidenceReceipt | None = None
+    counterexample: str | None = None
+    evidence_conflict: bool = False
+    blind_prediction: str | None = None
+    informed_verdict: str | None = None
+
+    @property
+    def disagreement(self) -> bool:
+        """True when the blind prediction and the informed verdict differ."""
+        if self.blind_prediction is None or self.informed_verdict is None:
+            return False
+        return self.blind_prediction != self.informed_verdict
 
 
 class ContractVerifier:
@@ -110,7 +131,7 @@ class ContractVerifier:
             "contract_verifier",
         )
 
-        parsed, refusal_code, reason_error = _parse_and_strip(response.text)
+        parsed, refusal_code, reason_error = parse_and_strip(response.text)
         if reason_error is not None:
             _record(
                 input,
@@ -146,10 +167,18 @@ class ContractVerifier:
             )
             return _schema_refusal("unexpected output type", pre_scan)
 
-        verdict_reason: str | None = "contract_broken" if validated.verdict == "fail" else None
+        receipt, counterexample, evidence_passed = _run_evidence_check(input)
+
+        informed_verdict = validated.verdict
         pre_scan_conflict = validated.verdict == "pass" and any(
             not entry["in_diff"] for entry in pre_scan["assertions"]
         )
+        final_verdict, evidence_conflict = apply_evidence(validated, evidence_passed)
+        final_verdict = apply_veto(final_verdict, pre_scan_conflict)
+
+        verdict_reason: str | None = None
+        if final_verdict.verdict == "fail":
+            verdict_reason = "contract_broken"
 
         _record(
             input,
@@ -159,21 +188,67 @@ class ContractVerifier:
             outcome="success",
             failure_category=None,
             verdict_reason=verdict_reason,
+            evidence_receipt=receipt,
         )
 
         return ContractVerifierResult(
-            verdict=validated,
+            verdict=final_verdict,
             verdict_reason=verdict_reason,
             pre_scan=pre_scan,
             pre_scan_conflict=pre_scan_conflict,
             refusal_code=refusal_code,
-            is_refusal=validated.verdict == "refused",
+            is_refusal=final_verdict.verdict == "refused",
+            evidence_receipt=receipt,
+            counterexample=counterexample,
+            evidence_conflict=evidence_conflict,
+            blind_prediction=compute_blind_prediction(
+                contract_assertion_severities=tuple(a.severity for a in input.contract_assertions),
+            ),
+            informed_verdict=informed_verdict,
         )
 
 
-def _compute_pre_scan(diff: str, assertions: tuple[ContractAssertion, ...]) -> dict[str, Any]:
+def _run_evidence_check(
+    input: ContractVerifierInput,
+) -> tuple[EvidenceReceipt | None, str | None, bool | None]:
+    """Run the contract test file when sandbox access is available.
+
+    Returns:
+        A three-tuple of (receipt, counterexample, evidence_passed).
+        All three are None / None / None when the caller did not
+        supply a sandbox or a test path.
+    """
+    if input.sandbox_executor is None or input.contract_test_path is None:
+        return None, None, None
+
+    command = f"python3 run_pytest.py {input.contract_test_path} -v --tb=short"
+    receipt: EvidenceReceipt = {
+        "evidence_ids": ["contract_test"],
+        "artifacts_checked": [input.contract_test_path],
+        "commands_run": [command],
+    }
+
+    try:
+        outcome, counterexample = execute_characterization_test(
+            input.sandbox_executor,
+            input.contract_test_path,
+        )
+    except Exception:
+        return receipt, None, None
+
+    if outcome.exit_code == 0:
+        return receipt, None, True
+    if outcome.exit_code == 1:
+        return receipt, counterexample, False
+    return receipt, None, None
+
+
+def _compute_pre_scan(
+    diff: str,
+    assertions: tuple[ContractAssertion, ...],
+) -> dict[str, Any]:
     """Return diff stats plus per-assertion in_diff flags."""
-    stats = _diff_stats(diff)
+    stats = diff_stats(diff)
     annotated: list[dict[str, Any]] = []
     for assertion in assertions:
         in_diff = _assertion_in_diff(assertion, diff)
@@ -197,18 +272,11 @@ def _assertion_in_diff(assertion: ContractAssertion, diff: str) -> bool:
 
 def _annotate_diff(diff: str, pre_scan: dict[str, Any]) -> str:
     """Prepend pre-scan evidence to the diff."""
-    stats = pre_scan["diff_stats"]
-    lines = [
-        "# PRE-SCAN EVIDENCE",
-        f"# diff_stats: +{stats['lines_added']} -{stats['lines_removed']} "
-        f"across {stats['hunks']} hunks in {len(stats['files'])} files",
-    ]
+    evidence: list[str] = []
     for entry in pre_scan["assertions"]:
         in_diff = "yes" if entry["in_diff"] else "no"
-        lines.append(f"# assertion: caller={entry['caller']}, in_diff={in_diff}")
-    lines.append("# ---")
-    lines.append(diff)
-    return "\n".join(lines)
+        evidence.append(f"# assertion: caller={entry['caller']}, in_diff={in_diff}")
+    return assemble_annotated_diff(diff, pre_scan["diff_stats"], evidence)
 
 
 def _format_assertions(assertions: tuple[ContractAssertion, ...]) -> str:
@@ -224,62 +292,10 @@ def _format_assertions(assertions: tuple[ContractAssertion, ...]) -> str:
     return "\n".join(lines)
 
 
-def _diff_stats(diff: str) -> dict[str, Any]:
-    """Return added/removed line counts, hunk count, and file list."""
-    lines_added = 0
-    lines_removed = 0
-    files: set[str] = set()
-    for line in diff.splitlines():
-        if line.startswith("+++") or line.startswith("---"):
-            if line.startswith("+++ "):
-                path = line[4:].strip()
-                if path.startswith("b/"):
-                    path = path[2:]
-                files.add(path)
-            continue
-        if line.startswith("+"):
-            lines_added += 1
-        elif line.startswith("-"):
-            lines_removed += 1
-    return {
-        "lines_added": lines_added,
-        "lines_removed": lines_removed,
-        "hunks": len(_HUNK_RE.findall(diff)),
-        "files": sorted(files),
-    }
-
-
-def _parse_and_strip(text: str) -> tuple[dict[str, Any], str | None, str | None]:
-    """Parse JSON, validate reason_code, strip it."""
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        return {}, None, f"invalid JSON: {exc}"
-
-    if not isinstance(parsed, dict):
-        return {}, None, "model output is not a JSON object"
-
-    reason_code = parsed.pop("reason_code", None)
-    if reason_code is not None and reason_code not in _VALID_REFUSAL_CODES:
-        return (
-            {},
-            None,
-            f"invalid reason_code {reason_code!r}; valid: {sorted(_VALID_REFUSAL_CODES)}",
-        )
-
-    return parsed, reason_code, None
-
-
 def _schema_refusal(reason: str, pre_scan: dict[str, Any]) -> ContractVerifierResult:
     """Return a schema-refusal result."""
     return ContractVerifierResult(
-        verdict=VerdictOutput(
-            role="contract_verifier",
-            verdict="refused",
-            confidence=None,
-            findings=(),
-            reason=f"schema: {reason}",
-        ),
+        verdict=schema_refusal_verdict("contract_verifier", reason),
         verdict_reason=None,
         pre_scan=pre_scan,
         pre_scan_conflict=False,
@@ -296,6 +312,7 @@ def _record(
     outcome: str,
     failure_category: Any,
     verdict_reason: Any = None,
+    evidence_receipt: EvidenceReceipt | None = None,
 ) -> None:
     from codeguardian.core.agents import _store_context
 
@@ -318,4 +335,5 @@ def _record(
         prompt_role="contract_verifier",
         prompt_version=input.prompt_version,
         model_options={"temperature": 0.0},
+        evidence_receipt=evidence_receipt,
     )

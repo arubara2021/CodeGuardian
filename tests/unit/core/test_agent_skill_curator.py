@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from codeguardian.core.agents import _store_context
 from codeguardian.core.agents.skill_curator import (
+    MIN_RUNS_FOR_PROPOSAL,
+    RecentRun,
     SkillCuratorAgent,
     SkillCuratorInput,
+    SkillEvalCase,
 )
 from codeguardian.core.plugins import BudgetTracker
 from codeguardian.core.storage import MigrationRunner, SQLiteStore
@@ -347,3 +351,290 @@ class TestTelemetry:
         assert row["verdict_reason"] is None
         assert row["prompt_role"] == "skill_curator"
         assert row["prompt_version"] == "1.0.0"
+
+
+def _runs_of(
+    *,
+    count: int,
+    directive: str = "add type hints",
+    outcome: str = "success",
+) -> tuple[RecentRun, ...]:
+    return tuple(
+        RecentRun(
+            run_id=f"r{i + 1}",
+            directive=directive,
+            outcome=outcome,
+            verdict_reason=None,
+            target_symbol="parse",
+        )
+        for i in range(count)
+    )
+
+
+class TestMining:
+    async def test_mining_bypassed_when_recent_runs_none(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        result = await SkillCuratorAgent().run(_make_input(provider))
+        assert result.has_proposal is True
+        assert result.source_runs == ()
+
+    async def test_zero_runs_returns_no_proposal_without_model_call(self) -> None:
+        provider = FakeProvider([])
+        inp = replace(_make_input(provider), recent_runs=())
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is False
+        assert result.is_refusal is False
+        assert len(provider.calls) == 0
+
+    async def test_one_run_returns_no_proposal(self) -> None:
+        provider = FakeProvider([])
+        inp = replace(_make_input(provider), recent_runs=_runs_of(count=1))
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is False
+        assert len(provider.calls) == 0
+        assert any("repeated pattern" in w for w in result.warnings)
+
+    async def test_two_runs_returns_no_proposal(self) -> None:
+        provider = FakeProvider([])
+        inp = replace(
+            _make_input(provider),
+            recent_runs=_runs_of(count=MIN_RUNS_FOR_PROPOSAL - 1),
+        )
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is False
+        assert len(provider.calls) == 0
+
+    async def test_three_matching_runs_proposes_with_sources(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        inp = replace(
+            _make_input(provider),
+            recent_runs=_runs_of(count=MIN_RUNS_FOR_PROPOSAL),
+        )
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is True
+        assert result.source_runs == ("r1", "r2", "r3")
+        assert len(provider.calls) == 1
+
+    async def test_current_directive_must_match_pattern(self) -> None:
+        provider = FakeProvider([])
+        runs = _runs_of(count=MIN_RUNS_FOR_PROPOSAL, directive="add type hints")
+        inp = replace(
+            _make_input(provider),
+            recent_runs=runs,
+            directive="extract a helper",
+        )
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is False
+        assert len(provider.calls) == 0
+
+    async def test_mixed_outcomes_do_not_cluster(self) -> None:
+        provider = FakeProvider([])
+        runs = (
+            RecentRun(
+                run_id="r1",
+                directive="add type hints",
+                outcome="success",
+                verdict_reason=None,
+                target_symbol="parse",
+            ),
+            RecentRun(
+                run_id="r2",
+                directive="add type hints",
+                outcome="success",
+                verdict_reason=None,
+                target_symbol="parse",
+            ),
+            RecentRun(
+                run_id="r3",
+                directive="add type hints",
+                outcome="failure",
+                verdict_reason="behavior_drift",
+                target_symbol="parse",
+            ),
+        )
+        inp = replace(_make_input(provider), recent_runs=runs)
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is False
+        assert len(provider.calls) == 0
+
+
+class TestDedupe:
+    async def test_duplicate_name_rejected(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        inp = replace(
+            _make_input(provider),
+            existing_skills=("python-add-type-hints-from-returns",),
+        )
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is False
+        assert result.dedupe_status == "duplicate"
+        assert any("duplicates" in w for w in result.warnings)
+
+    async def test_normalized_duplicate_caught(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        inp = replace(
+            _make_input(provider),
+            existing_skills=("Python_Add_Type_Hints_From_Returns",),
+        )
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is False
+        assert result.dedupe_status == "duplicate"
+
+    async def test_unique_name_accepted(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        inp = replace(
+            _make_input(provider),
+            existing_skills=("some-other-skill",),
+        )
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is True
+        assert result.dedupe_status == "unique"
+
+    async def test_empty_existing_skills_is_unique(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        inp = replace(_make_input(provider), existing_skills=())
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is True
+        assert result.dedupe_status == "unique"
+
+
+class TestEvalGate:
+    async def test_eval_skipped_when_no_cases(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        inp = replace(_make_input(provider), eval_cases=())
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is True
+        assert result.eval_score is None
+
+    async def test_eval_pass_keeps_proposal(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        inp = replace(
+            _make_input(provider),
+            eval_cases=(
+                SkillEvalCase(
+                    case_id="c1",
+                    expected_contains=("When a Python function returns values",),
+                ),
+            ),
+        )
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is True
+        assert result.eval_score == 1.0
+
+    async def test_eval_fail_rejects_proposal(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        inp = replace(
+            _make_input(provider),
+            eval_cases=(
+                SkillEvalCase(
+                    case_id="c1",
+                    expected_contains=("phrase_that_is_not_in_the_body",),
+                ),
+            ),
+        )
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is False
+        assert result.eval_score == 0.0
+        assert any("eval gate failed" in w for w in result.warnings)
+
+    async def test_partial_eval_below_threshold_rejects(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        inp = replace(
+            _make_input(provider),
+            eval_cases=(
+                SkillEvalCase(
+                    case_id="c1",
+                    expected_contains=("When a Python function returns values",),
+                ),
+                SkillEvalCase(
+                    case_id="c2",
+                    expected_contains=("phrase_that_is_not_in_the_body",),
+                ),
+            ),
+            eval_min_score=0.6,
+        )
+        result = await SkillCuratorAgent().run(inp)
+        assert result.has_proposal is False
+        assert result.eval_score == 0.5
+
+
+class TestSkillMdFrontmatter:
+    async def test_missing_optional_fields_normalized(self) -> None:
+        provider = FakeProvider([_VALID_SKILL_JSON])
+        result = await SkillCuratorAgent().run(_make_input(provider))
+        assert result.has_proposal is True
+        assert result.proposal is not None
+        markdown = result.proposal.skill_markdown
+        assert "allowed-tools:" in markdown
+        assert "version:" in markdown
+
+    async def test_existing_optional_fields_preserved(self) -> None:
+        json_with_fields = json.dumps(
+            {
+                "skill_name": "python-add-type-hints-from-returns",
+                "skill_markdown": (
+                    "---\n"
+                    "name: python-add-type-hints-from-returns\n"
+                    "description: Add return type hints from return expressions\n"
+                    "trigger: When a function has no return annotation\n"
+                    "skill_type: refactor_pattern\n"
+                    "allowed-tools:\n"
+                    "- function-body\n"
+                    "- code-skeleton\n"
+                    "version: 1.0.0\n"
+                    "---\n"
+                    "body content\n"
+                ),
+                "confidence": 0.7,
+            }
+        )
+        provider = FakeProvider([json_with_fields])
+        result = await SkillCuratorAgent().run(_make_input(provider))
+        assert result.has_proposal is True
+        assert result.proposal is not None
+        assert "1.0.0" in result.proposal.skill_markdown
+        assert "function-body" in result.proposal.skill_markdown
+
+    async def test_invalid_allowed_tools_rejected(self) -> None:
+        invalid = json.dumps(
+            {
+                "skill_name": "python-add-type-hints-from-returns",
+                "skill_markdown": (
+                    "---\n"
+                    "name: python-add-type-hints-from-returns\n"
+                    "description: Add return type hints\n"
+                    "trigger: When no return annotation\n"
+                    "skill_type: refactor_pattern\n"
+                    "allowed-tools: not-a-list\n"
+                    "---\n"
+                    "body\n"
+                ),
+                "confidence": 0.5,
+            }
+        )
+        provider = FakeProvider([invalid])
+        result = await SkillCuratorAgent().run(_make_input(provider))
+        assert result.has_proposal is False
+        assert any("allowed-tools" in w for w in result.warnings)
+
+    async def test_invalid_version_rejected(self) -> None:
+        invalid = json.dumps(
+            {
+                "skill_name": "python-add-type-hints-from-returns",
+                "skill_markdown": (
+                    "---\n"
+                    "name: python-add-type-hints-from-returns\n"
+                    "description: Add return type hints\n"
+                    "trigger: When no return annotation\n"
+                    "skill_type: refactor_pattern\n"
+                    "version: not-semver\n"
+                    "---\n"
+                    "body\n"
+                ),
+                "confidence": 0.5,
+            }
+        )
+        provider = FakeProvider([invalid])
+        result = await SkillCuratorAgent().run(_make_input(provider))
+        assert result.has_proposal is False
+        assert any("version" in w for w in result.warnings)

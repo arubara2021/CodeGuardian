@@ -18,6 +18,7 @@ it is returned as the agent's verdict.
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +34,9 @@ from codeguardian.core.prompts import (
 from codeguardian.interfaces.model import ModelOptions, ModelProvider
 from codeguardian.interfaces.verifier import ContractAssertion
 
+from ._mutation import generate_mutations
 from ._runtime import fresh_barrier, tracked_model_call
+from ._verifier_common import SandboxExecutor
 from .analyst import RefactorSpec
 from .blast import BlastResult
 from .telemetry import record_call
@@ -73,6 +76,36 @@ class TesterInput:
     previous_test_attempt: str = ""
     parse_error: str = ""
     old_code_failure: str = ""
+    sandbox_executor: SandboxExecutor | None = None
+    run_tests_runner: str = "run_pytest.py"
+    enable_mutation_gate: bool = False
+    enable_coverage: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TestQuality:
+    """Quality signals for a generated characterization test.
+
+    Attributes:
+        assertion_count: Number of assert statements and pytest.raises
+            blocks in the test file. Populated from AST on every run,
+            with or without a sandbox.
+        mutation_score: Percentage of generated mutants that the test
+            caught, in the range 0 through 100. Populated only when
+            ``enable_mutation_gate`` is set and the sandbox provides
+            write access. None otherwise.
+        branch_coverage: Percentage of branch coverage measured by
+            pytest-cov on the target module. Populated only when
+            ``enable_coverage`` is set and pytest-cov is installed in
+            the sandbox. None otherwise.
+        flaky: True when the test failed intermittently. Not measured
+            in this block; always False.
+    """
+
+    assertion_count: int
+    mutation_score: float | None = None
+    branch_coverage: float | None = None
+    flaky: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +131,7 @@ class TesterResult:
     refusal_reason: str | None = None
     failure_reason: str | None = None
     attempts: int = 0
+    test_quality: TestQuality | None = None
 
 
 class TesterAgent:
@@ -194,18 +228,18 @@ class TesterAgent:
 
         valid, reason = _validate_test_file(first.content, input.blast.contract_assertions)
         if valid:
-            return TesterResult(
-                test_file=first.content,
-                is_refusal=False,
-                is_valid=True,
-                attempts=attempts,
+            sandbox_ok, sandbox_failure = _run_tests_in_sandbox(
+                input, first.content, "tester_validate.py"
             )
+            if sandbox_ok:
+                return _build_success_result(input, first.content, attempts)
+            reason = sandbox_failure or "sandbox run failed"
 
         retry_vars = {
             **base_vars,
             "previous_test_attempt": first.content,
             "parse_error": reason if reason and "SyntaxError" in reason else "",
-            "old_code_failure": reason if reason and "no assertions" in reason else "",
+            "old_code_failure": reason if reason and "assert" in (reason or "").lower() else "",
         }
         second = await _call_model(input, "1.1.0", retry_vars)
         attempts = 2
@@ -224,11 +258,18 @@ class TesterAgent:
             second.content, input.blast.contract_assertions
         )
         if second_valid:
+            sandbox_ok, sandbox_failure = _run_tests_in_sandbox(
+                input, second.content, "tester_validate.py"
+            )
+            if sandbox_ok:
+                return _build_success_result(input, second.content, attempts)
             return TesterResult(
                 test_file=second.content,
                 is_refusal=False,
-                is_valid=True,
+                is_valid=False,
+                failure_reason=sandbox_failure or "sandbox run failed",
                 attempts=attempts,
+                test_quality=_build_test_quality(input, second.content, run_extras=False),
             )
 
         return TesterResult(
@@ -237,6 +278,7 @@ class TesterAgent:
             is_valid=False,
             failure_reason=second_reason,
             attempts=attempts,
+            test_quality=_build_test_quality(input, second.content, run_extras=False),
         )
 
 
@@ -377,3 +419,212 @@ def _record(
         prompt_version=version,
         model_options={"temperature": 0.0},
     )
+
+
+def _run_tests_in_sandbox(
+    input: TesterInput,
+    test_content: str,
+    filename: str,
+) -> tuple[bool, str | None]:
+    """Write the test into the sandbox and run it.
+
+    Returns:
+        A two-tuple of (passed, failure). When no sandbox is available
+        or the executor does not support writing, returns (True, None)
+        so existing callers that do not use a sandbox see unchanged
+        behavior. On sandbox infrastructure failure (write_file or run
+        raising), also returns (True, None) so an infrastructure fault
+        does not fail the tester.
+    """
+    executor = input.sandbox_executor
+    if executor is None or not hasattr(executor, "write_file"):
+        return True, None
+
+    try:
+        executor.write_file(filename, test_content)
+        outcome = executor.run(
+            ["python3", input.run_tests_runner, filename, "-v", "--tb=short"],
+            timeout_s=180.0,
+        )
+    except Exception:
+        return True, None
+
+    if outcome.exit_code == 0:
+        return True, None
+
+    stderr = (outcome.stderr or "")[-500:]
+    return False, f"exit={outcome.exit_code}: {stderr}"
+
+
+def _build_success_result(
+    input: TesterInput,
+    test_content: str,
+    attempts: int,
+) -> TesterResult:
+    """Return a successful TesterResult, optionally enriched with quality signals."""
+    quality = _build_test_quality(input, test_content, run_extras=True)
+    return TesterResult(
+        test_file=test_content,
+        is_refusal=False,
+        is_valid=True,
+        attempts=attempts,
+        test_quality=quality,
+    )
+
+
+def _build_test_quality(
+    input: TesterInput,
+    test_content: str,
+    *,
+    run_extras: bool,
+) -> TestQuality:
+    """Assemble a TestQuality object for the given test source.
+
+    assertion_count is always populated. mutation_score is populated
+    only when run_extras is True, enable_mutation_gate is True, and
+    the executor supports write_file. branch_coverage is populated
+    only when run_extras is True, enable_coverage is True, and
+    pytest-cov is available in the sandbox.
+    """
+    assertion_count = _count_assertions(test_content)
+    mutation_score: float | None = None
+    branch_coverage: float | None = None
+
+    if run_extras and input.enable_mutation_gate:
+        mutation_score = _run_mutation_gate(input, test_content)
+    if run_extras and input.enable_coverage:
+        branch_coverage = _run_coverage_check(input, test_content)
+
+    return TestQuality(
+        assertion_count=assertion_count,
+        mutation_score=mutation_score,
+        branch_coverage=branch_coverage,
+    )
+
+
+def _count_assertions(source: str) -> int:
+    """Count assert statements and pytest.raises blocks in a test source."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return 0
+
+    count = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            count += 1
+        elif isinstance(node, ast.With):
+            for item in node.items:
+                ctx = item.context_expr
+                if (
+                    isinstance(ctx, ast.Call)
+                    and isinstance(ctx.func, ast.Attribute)
+                    and ctx.func.attr == "raises"
+                    and isinstance(ctx.func.value, ast.Name)
+                    and ctx.func.value.id == "pytest"
+                ):
+                    count += 1
+    return count
+
+
+def _run_mutation_gate(
+    input: TesterInput,
+    test_content: str,
+) -> float | None:
+    """Run the mutation gate against the test content.
+
+    Returns the mutation score in the range 0 through 100, or None
+    when the gate cannot be run (no executor, no write support, target
+    file unreadable, or no mutations generated).
+    """
+    executor = input.sandbox_executor
+    if executor is None or not hasattr(executor, "write_file"):
+        return None
+
+    target_file = input.clone_root / input.target_path
+    try:
+        original_source = target_file.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    mutations = generate_mutations(original_source, input.target_symbol, limit=5)
+    if not mutations:
+        return None
+
+    try:
+        executor.write_file("tester_mutation.py", test_content)
+    except Exception:
+        return None
+
+    caught = 0
+    total = 0
+    try:
+        for mutation in mutations:
+            try:
+                executor.write_file(input.target_path, mutation.mutated_source)
+                outcome = executor.run(
+                    ["python3", input.run_tests_runner, "tester_mutation.py", "-q", "--tb=no"],
+                    timeout_s=120.0,
+                )
+            except Exception:
+                continue
+            total += 1
+            if outcome.exit_code == 1:
+                caught += 1
+    finally:
+        with contextlib.suppress(Exception):
+            executor.write_file(input.target_path, original_source)
+
+    if total == 0:
+        return None
+    return (caught / total) * 100.0
+
+
+def _run_coverage_check(
+    input: TesterInput,
+    test_content: str,
+) -> float | None:
+    """Run pytest-cov against the target module and parse branch coverage.
+
+    Returns the percentage, or None when pytest-cov is not installed
+    in the sandbox, when the target path cannot be turned into a
+    module name, or when the output cannot be parsed.
+    """
+    executor = input.sandbox_executor
+    if executor is None or not hasattr(executor, "write_file"):
+        return None
+
+    module_name = input.target_path
+    if module_name.endswith(".py"):
+        module_name = module_name[:-3]
+    module_name = module_name.replace("/", ".")
+    if not module_name:
+        return None
+
+    try:
+        executor.write_file("tester_coverage.py", test_content)
+        outcome = executor.run(
+            [
+                "python3",
+                "-m",
+                "pytest",
+                "tester_coverage.py",
+                f"--cov={module_name}",
+                "--cov-report=term-missing",
+                "-q",
+                "--tb=no",
+            ],
+            timeout_s=180.0,
+        )
+    except Exception:
+        return None
+
+    if outcome.exit_code != 0:
+        return None
+
+    import re as _re
+
+    match = _re.search(r"TOTAL\s+\d+\s+\d+\s+\d+\s+\d+\s+(\d+)%", outcome.stdout or "")
+    if match:
+        return float(match.group(1))
+    return None

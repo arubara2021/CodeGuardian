@@ -6,12 +6,15 @@ correct verdict (fail with a specific finding). The verifier agent
 must propagate the verdict faithfully.
 
 A companion test per verifier class uses a "fooled" fake that returns
-pass despite the trap. This documents that the pipeline does NOT
-magically fix a fooled model. The security and contract verifiers can
-still surface the mismatch via their deterministic pre-scan; the
-correctness verifier cannot, because it has no signal to work with
-when test_result is PASS. This asymmetry is honest: the correctness
-verifier depends on the model.
+pass despite the trap. For the security and contract verifiers, the
+deterministic pre-scan now overrides the model in this block: a
+critical or high security finding flips the verdict, and a contract
+assertion not present in the diff flips the verdict. This is the
+stronger form of the earlier flag-only behaviour. The correctness
+verifier still cannot override a pass when test_result is PASS and no
+counterexample exists, because it has no deterministic signal to work
+with; it depends on the model. That asymmetry remains, and is honest:
+correctness verification without executable evidence is model-bound.
 """
 
 from __future__ import annotations
@@ -187,10 +190,16 @@ class TestSecurityAdversarial:
         case = cases[0]
         provider = FakeProvider(_PASS_JSON)
         result = await SecurityVerifier().run(_security_input(case, provider))
-        assert result.verdict.verdict == "pass"
-        # Security pre-scan regex matched; conflict surfaces even when
-        # the model is fooled
-        assert result.pre_scan_conflict is True
+        # Block 9 upgraded the security pre-scan from a flag-only signal
+        # to a deterministic override when a critical or high taint
+        # finding exists. The SQL f-string in the first adversarial case
+        # is detected as CWE-89 at high severity, so the model's pass
+        # verdict is overridden. The pipeline still catches the fooled
+        # model; it does so more directly than before.
+        assert result.verdict.verdict == "fail"
+        assert result.verdict_reason == "vulnerability_introduced"
+        assert result.evidence_conflict is True
+        assert any(f.cwe_id == "CWE-89" for f in result.taint_findings)
 
 
 class TestContractAdversarial:
@@ -216,6 +225,10 @@ class TestContractAdversarial:
         case = cases[0]
         provider = FakeProvider(_PASS_JSON)
         result = await ContractVerifier().run(_contract_input(case, provider))
-        assert result.verdict.verdict == "pass"
-        # Assertion caller/test_expression not in diff → conflict
+        # Block 13 adds a veto: when the deterministic pre-scan flags
+        # something the model missed, the model's pass is downgraded to
+        # uncertain rather than allowed through clean. The conflict is
+        # still recorded; the verdict is stronger than before.
+        assert result.verdict.verdict == "uncertain"
         assert result.pre_scan_conflict is True
+        assert result.informed_verdict == "pass"

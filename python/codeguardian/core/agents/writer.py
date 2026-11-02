@@ -1,28 +1,36 @@
 """Writer agent.
 
 Model-backed. Reads the RefactorSpec. Generates N candidates with
-different seeds. Deterministic pre-check per candidate: signature
-drift (Python only), ast.parse on the candidate, directive compliance
-score. Prunes candidates whose compliance score is below 0.5. Ranks
-survivors by (compliance_score desc, diff_size asc, creation order).
+different seeds and different strategy hints. Deterministic pre-check
+per candidate: signature drift (Python only), ast.parse on the
+candidate, directive compliance score. Candidates that survive the
+pre-check are then verified in a sandbox when the caller supplies one:
+the candidate is spliced into the target file and the characterization
+test is run against the spliced file. Survivors are ranked by
+verification (test pass first, verifier score next, compliance next,
+diff size last).
 
-The prompt is prefixed with a preamble telling the model it has no
-API-level tool calling. Without it, tool-use-trained models attempt
-tool calls even when the API request defines no tools.
+The Writer's final status reflects both candidate production and blast
+context. Status is "success" when candidates were produced without a
+block recommendation, "partial" when candidates were produced under a
+block recommendation (the caller must attach human approval), and
+"refused" when no candidate survived the pre-check.
 
-On retry: when the input carries ``previous_attempt``,
-``test_failure``, or ``previous_diff``, the agent uses prompt v1.1.0
-with those variables populated.
+On retry: when the input carries ``previous_attempt``, ``test_failure``,
+or ``previous_diff``, the agent uses prompt v1.1.0 with those variables
+populated.
 """
 
 from __future__ import annotations
 
 import ast
+import contextlib
 import difflib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from codeguardian.core.errors import CodeGuardianError, ErrorCode
 from codeguardian.core.plugins import BudgetTracker, PluginRegistry
@@ -34,6 +42,7 @@ from codeguardian.core.prompts import (
 from codeguardian.interfaces.model import ModelOptions, ModelProvider
 
 from ._runtime import fresh_barrier, tracked_model_call
+from ._verifier_common import SandboxExecutor
 from .analyst import RefactorSpec
 from .blast import BlastResult
 from .telemetry import record_call
@@ -46,8 +55,11 @@ __all__ = [
 ]
 
 
+WriterStatus = Literal["success", "partial", "refused"]
+
 _MIN_COMPLIANCE = 0.5
 _CANDIDATE_TEMPERATURE = 0.2
+_DEFAULT_VERIFIER_TIMEOUT_S = 120.0
 
 _NO_TOOL_PREAMBLE = (
     "IMPORTANT: You do not have API-level tool calling. "
@@ -60,10 +72,31 @@ _NO_TOOL_PREAMBLE = (
     + chr(10) * 2
 )
 
+_STRATEGY_HINTS: tuple[str, ...] = (
+    "Prefer the most minimal change that satisfies the directive.",
+    "If the directive allows, extract a helper function to reduce complexity.",
+    "If the directive allows, add a guard clause for edge cases.",
+    "If the directive allows, add a docstring explaining the function's contract.",
+    "Preserve every existing line; make only the changes the directive requires.",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class WriterInput:
-    """Input to the writer agent."""
+    """Input to the writer agent.
+
+    Attributes:
+        sandbox_executor: Optional sandbox for splice-and-verify. When
+            None, pre-check is the only gate and verification fields
+            on candidates remain None.
+        characterization_test_path: Path to the characterization test
+            inside the sandbox. Required when sandbox_executor is set
+            for the sandbox test run to fire.
+        verifier_score_fn: Optional callback that takes a candidate
+            source string and returns a score in the range 0 through
+            100. Used by the ranking. Exceptions from the callback are
+            caught and the score is left as None for that candidate.
+    """
 
     spec: RefactorSpec
     blast: BlastResult
@@ -81,25 +114,68 @@ class WriterInput:
     previous_attempt: str = ""
     test_failure: str = ""
     previous_diff: str = ""
+    sandbox_executor: SandboxExecutor | None = None
+    characterization_test_path: str | None = None
+    verifier_score_fn: Callable[[str], float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class WriterCandidate:
-    """One refactor candidate that passed all deterministic checks."""
+    """One refactor candidate that passed the pre-check.
+
+    Attributes:
+        source: The candidate function source.
+        compliance_score: Fraction of the spec changes present, 0.0 to
+            1.0.
+        diff_size: Number of changed lines against the original.
+        verification: A dict populated when a sandbox was supplied.
+            Keys: ``splices`` (bool), ``parses`` (bool), ``tests_pass``
+            (True, False, or None when the test did not run),
+            ``verifier_score`` (float or None). All four are the
+            default (True, True, None, None) when no sandbox was used.
+    """
 
     source: str
     compliance_score: float
     diff_size: int
+    verification: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class WriterResult:
-    """Output of the writer agent."""
+    """Output of the writer agent.
+
+    Attributes:
+        candidates: Survivors ranked by verification, then compliance,
+            then diff size. Empty when status is "refused".
+        status: One of "success", "partial", "refused".
+            "success" means candidates were produced without a block
+            recommendation. "partial" means candidates were produced
+            under a block recommendation and require human approval
+            before apply. "refused" means no candidate survived
+            pre-check.
+        requires: Pre-apply requirements. Set to
+            ``("human_approval",)`` when status is "partial". Empty
+            otherwise.
+        refusal_reason: Human-readable reason when status is
+            "refused", None otherwise.
+        total_attempted: Number of model calls made.
+    """
 
     candidates: tuple[WriterCandidate, ...]
-    is_refusal: bool
-    refusal_reason: str | None
-    total_attempted: int
+    status: WriterStatus
+    requires: tuple[str, ...] = ()
+    refusal_reason: str | None = None
+    total_attempted: int = 0
+
+    def __post_init__(self) -> None:
+        if self.status not in ("success", "partial", "refused"):
+            raise ValueError(f"invalid status: {self.status!r}")
+
+    @property
+    def is_refusal(self) -> bool:
+        """True when the agent refused to produce candidates."""
+        return self.status == "refused"
 
 
 class WriterAgent:
@@ -114,12 +190,7 @@ class WriterAgent:
     prompt_version = "1.0.0"
 
     async def run(self, input: WriterInput) -> WriterResult:
-        """Run the writer agent.
-
-        Raises:
-            CodeGuardianError: ``SYS_NOT_IMPLEMENTED`` when the kernel
-                extension is unavailable.
-        """
+        """Run the writer agent."""
         try:
             from codeguardian import _native  # noqa: F401
         except ImportError as exc:
@@ -136,7 +207,7 @@ class WriterAgent:
         if _is_not_found(body):
             return WriterResult(
                 candidates=(),
-                is_refusal=True,
+                status="refused",
                 refusal_reason=f"target body not found: {body[:100]}",
                 total_attempted=0,
             )
@@ -164,6 +235,7 @@ class WriterAgent:
             "blast_report": json.dumps(input.blast.to_artifact(), indent=2),
             "skeleton": input.skeleton,
             "characterization_test": input.characterization_test,
+            "function_body": original_source,
         }
         if is_retry:
             variables = {
@@ -178,6 +250,8 @@ class WriterAgent:
         prompt_result = render_prompt("writer", version, variables)
         augmented_prompt = _NO_TOOL_PREAMBLE + prompt_result.rendered
 
+        is_block = input.blast.recommendation_adjusted == "block"
+
         survivors: list[WriterCandidate] = []
         attempted = 0
         model_call_failures = 0
@@ -189,6 +263,7 @@ class WriterAgent:
 
         for seed_index in range(input.n_candidates):
             attempted += 1
+            strategy_prompt = _augment_with_strategy(augmented_prompt, seed_index)
             options = ModelOptions(
                 temperature=_CANDIDATE_TEMPERATURE,
                 max_tokens=4096,
@@ -196,7 +271,7 @@ class WriterAgent:
             try:
                 response, latency_ms = await tracked_model_call(
                     input.provider,
-                    augmented_prompt,
+                    strategy_prompt,
                     input.model,
                     options,
                     "writer",
@@ -209,7 +284,7 @@ class WriterAgent:
             _record(
                 input,
                 version,
-                augmented_prompt,
+                strategy_prompt,
                 response,
                 latency_ms,
                 seed_index,
@@ -234,7 +309,15 @@ class WriterAgent:
             if candidate is None:
                 pre_check_failures += 1
                 continue
-            survivors.append(candidate)
+
+            verification = _verify_candidate(input, parsed.content)
+            candidate_with_verification = WriterCandidate(
+                source=candidate.source,
+                compliance_score=candidate.compliance_score,
+                diff_size=candidate.diff_size,
+                verification=verification,
+            )
+            survivors.append(candidate_with_verification)
 
         if not survivors:
             reason = (
@@ -250,15 +333,26 @@ class WriterAgent:
                 reason += f"; refusal text: {last_refusal_reason[:300]}"
             return WriterResult(
                 candidates=(),
-                is_refusal=True,
+                status="refused",
                 refusal_reason=reason,
                 total_attempted=attempted,
             )
 
-        survivors.sort(key=lambda c: (-c.compliance_score, c.diff_size))
+        ranked = _rank_candidates(survivors)
+
+        if is_block:
+            return WriterResult(
+                candidates=tuple(ranked),
+                status="partial",
+                requires=("human_approval",),
+                refusal_reason=None,
+                total_attempted=attempted,
+            )
+
         return WriterResult(
-            candidates=tuple(survivors),
-            is_refusal=False,
+            candidates=tuple(ranked),
+            status="success",
+            requires=(),
             refusal_reason=None,
             total_attempted=attempted,
         )
@@ -288,6 +382,149 @@ def _is_not_found(tool_output: str) -> bool:
     )
 
 
+def _augment_with_strategy(prompt: str, seed_index: int) -> str:
+    """Append a strategy hint that differs per candidate."""
+    hint = _STRATEGY_HINTS[seed_index % len(_STRATEGY_HINTS)]
+    return f"{prompt}\n\n# Strategy for this attempt\n\n{hint}\n"
+
+
+def _rank_candidates(candidates: list[WriterCandidate]) -> list[WriterCandidate]:
+    """Rank candidates by verification, then compliance, then diff size.
+
+    Primary sort: tests_pass descending (True before False before None).
+    Secondary sort: verifier_score descending.
+    Tertiary sort: compliance_score descending.
+    Quaternary sort: diff_size ascending.
+    """
+
+    def key(c: WriterCandidate) -> tuple[int, float, float, int]:
+        v = c.verification or {}
+        tests_pass = 1 if v.get("tests_pass") is True else 0
+        verifier_score = float(v.get("verifier_score") or 0.0)
+        return (-tests_pass, -verifier_score, -c.compliance_score, c.diff_size)
+
+    return sorted(candidates, key=key)
+
+
+def _verify_candidate(
+    input: WriterInput,
+    candidate_source: str,
+) -> dict[str, Any]:
+    """Splice the candidate into the target file and run the test.
+
+    Returns a verification dict with keys ``splices``, ``parses``,
+    ``tests_pass``, and ``verifier_score``. When no sandbox is
+    available, tests_pass remains None and the other flags reflect the
+    in-memory splice check only.
+    """
+    result: dict[str, Any] = {
+        "splices": True,
+        "parses": True,
+        "tests_pass": None,
+        "verifier_score": None,
+    }
+
+    if input.verifier_score_fn is not None:
+        with contextlib.suppress(Exception):
+            result["verifier_score"] = float(input.verifier_score_fn(candidate_source))
+
+    executor = input.sandbox_executor
+    if executor is None or not hasattr(executor, "write_file"):
+        return result
+
+    target_file = input.clone_root / input.target_path
+    try:
+        file_source = target_file.read_text(encoding="utf-8")
+    except OSError:
+        return result
+
+    spliced = _splice_into_file(file_source, input.target_symbol, candidate_source)
+    if spliced is None:
+        result["splices"] = False
+        result["parses"] = False
+        return result
+
+    try:
+        ast.parse(spliced)
+    except SyntaxError:
+        result["parses"] = False
+        return result
+
+    try:
+        executor.write_file(input.target_path, spliced)
+    except Exception:
+        return result
+
+    if input.characterization_test_path:
+        try:
+            outcome = executor.run(
+                [
+                    "python3",
+                    "run_pytest.py",
+                    input.characterization_test_path,
+                    "-q",
+                    "--tb=no",
+                ],
+                timeout_s=_DEFAULT_VERIFIER_TIMEOUT_S,
+            )
+            result["tests_pass"] = outcome.exit_code == 0
+        except Exception:
+            pass
+
+    with contextlib.suppress(Exception):
+        executor.write_file(input.target_path, file_source)
+
+    return result
+
+
+def _splice_into_file(
+    file_source: str,
+    qualified_name: str,
+    candidate: str,
+) -> str | None:
+    """Replace the target function in file_source with candidate.
+
+    Walks the qualified name through the AST. Returns the spliced
+    source when the replacement parses; None otherwise.
+    """
+    try:
+        tree = ast.parse(file_source)
+    except SyntaxError:
+        return None
+
+    parts = qualified_name.split(".")
+    current_scope: list[ast.stmt] = list(tree.body)
+    target: ast.AST | None = None
+
+    for part in parts:
+        found: ast.AST | None = None
+        for node in current_scope:
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and node.name == part
+            ):
+                found = node
+                break
+        if found is None:
+            return None
+        target = found
+        current_scope = list(found.body) if isinstance(found, ast.ClassDef) else []
+
+    if target is None:
+        return None
+
+    segment = ast.get_source_segment(file_source, target)
+    if segment is None:
+        return None
+
+    spliced = file_source.replace(segment, candidate, 1)
+    try:
+        ast.parse(spliced)
+    except SyntaxError:
+        return None
+    return spliced
+
+
 def _pre_check(
     *,
     original_source: str,
@@ -309,10 +546,14 @@ def _pre_check(
         return None
 
     diff_size = _compute_diff_size(original_source, candidate_source)
+    if diff_size == 0:
+        return None
+
     return WriterCandidate(
         source=candidate_source,
         compliance_score=compliance,
         diff_size=diff_size,
+        verification=None,
     )
 
 

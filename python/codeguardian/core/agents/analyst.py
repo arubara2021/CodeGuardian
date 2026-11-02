@@ -17,6 +17,22 @@ escalates on need:
 4. call-graph-slice — medium. Called only when the blast report
    contains contract violations.
 
+Change taxonomy. The RefactorSpec's changes carry one of thirteen
+kinds. Three were present from the start (apply_directive,
+parameter_annotation, return_annotation). Ten are added: rename_symbol,
+extract_function, inline_function, add_parameter, remove_parameter,
+change_return_type, add_guard, change_exception, reorder_statements,
+add_docstring. Each change carries acceptance criteria, a risk level,
+and a reversibility rating. Kinds are detected from directive keywords
+with a conservative phrase-matching rule; when no specific kind is
+detected, apply_directive is the fallback.
+
+Clarification. When the directive is a single ambiguous word or one of
+a small set of vague phrases, the analyst short-circuits before any
+model call and returns status "needs_input" with a Clarification
+carrying a question, options, and a default. This is honest asking
+rather than a silent refusal.
+
 Contradiction resolution. If the model omits the target file from its
 context pack, the agent adds it and records a warning. Tool evidence
 wins over model judgment; the warning records the override.
@@ -27,9 +43,10 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from codeguardian.core.errors import CodeGuardianError, ErrorCode
 from codeguardian.core.plugins import BudgetTracker, PluginRegistry
@@ -51,10 +68,14 @@ __all__ = [
     "AnalystAgent",
     "AnalystInput",
     "AnalystResult",
+    "AnalystStatus",
+    "Clarification",
     "RefactorChange",
     "RefactorSpec",
 ]
 
+
+AnalystStatus = Literal["success", "refused", "needs_input"]
 
 _DIRECTIVE_BODY_KEYWORDS = (
     "type",
@@ -77,15 +98,168 @@ _SCHEMA_REASONS = frozenset(
     }
 )
 
+_AMBIGUOUS_DIRECTIVES = frozenset(
+    {
+        "improve",
+        "improve it",
+        "optimize",
+        "optimise",
+        "make it better",
+        "clean up",
+        "cleanup",
+        "refactor",
+        "simplify",
+        "fix",
+        "fix it",
+        "update",
+    }
+)
+
+_KIND_DEFAULTS: dict[str, dict[str, Any]] = {
+    "apply_directive": {
+        "acceptance": ("the directive's stated outcome is achieved",),
+        "risk": "medium",
+        "reversibility": "medium",
+    },
+    "parameter_annotation": {
+        "acceptance": ("the parameter is annotated with the correct type",),
+        "risk": "low",
+        "reversibility": "easy",
+    },
+    "return_annotation": {
+        "acceptance": ("the return type is annotated with the correct type",),
+        "risk": "low",
+        "reversibility": "easy",
+    },
+    "rename_symbol": {
+        "acceptance": (
+            "every reference to the old name is updated",
+            "the function's behavior is unchanged",
+        ),
+        "risk": "medium",
+        "reversibility": "easy",
+    },
+    "extract_function": {
+        "acceptance": (
+            "the extracted function preserves the original body's semantics",
+            "the caller's behavior is unchanged",
+        ),
+        "risk": "medium",
+        "reversibility": "medium",
+    },
+    "inline_function": {
+        "acceptance": (
+            "the inlined code preserves the callee's semantics",
+            "the caller's behavior is unchanged",
+        ),
+        "risk": "high",
+        "reversibility": "hard",
+    },
+    "add_parameter": {
+        "acceptance": (
+            "the new parameter is keyword-only with a default",
+            "existing callers continue to work",
+        ),
+        "risk": "medium",
+        "reversibility": "easy",
+    },
+    "remove_parameter": {
+        "acceptance": (
+            "every caller is updated",
+            "the parameter is not referenced in the body",
+        ),
+        "risk": "high",
+        "reversibility": "hard",
+    },
+    "change_return_type": {
+        "acceptance": (
+            "every caller accepts the new type",
+            "the characterization test still passes",
+        ),
+        "risk": "high",
+        "reversibility": "medium",
+    },
+    "add_guard": {
+        "acceptance": (
+            "the guarded condition does not change unguarded behavior",
+            "the guard raises on the expected edge case",
+        ),
+        "risk": "medium",
+        "reversibility": "easy",
+    },
+    "change_exception": {
+        "acceptance": (
+            "every caller catches the new exception",
+            "the old exception is no longer raised in the changed path",
+        ),
+        "risk": "high",
+        "reversibility": "medium",
+    },
+    "reorder_statements": {
+        "acceptance": (
+            "no observable side-effect order changes",
+            "the characterization test still passes",
+        ),
+        "risk": "high",
+        "reversibility": "hard",
+    },
+    "add_docstring": {
+        "acceptance": (
+            "the docstring describes the current behavior accurately",
+            "the function body is unchanged",
+        ),
+        "risk": "low",
+        "reversibility": "easy",
+    },
+}
+
+_ADD_PARAMETER_RE = re.compile(r"\badd\s+(?:a\s+)?(?:new\s+)?(?:param|arg(?:ument)?)\b")
+_REMOVE_PARAMETER_RE = re.compile(
+    r"\b(?:remove|drop|delete)\s+(?:a\s+)?(?:the\s+)?(?:param|arg(?:ument)?)\b"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Clarification:
+    """A question the analyst asks instead of refusing.
+
+    Attributes:
+        question: The question the caller should answer.
+        options: Concrete answers the caller can pick from.
+        default: The analyst's suggested answer. None when no
+            suggestion is reasonable.
+    """
+
+    question: str
+    options: tuple[str, ...]
+    default: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class RefactorChange:
-    """One change the spec requires."""
+    """One change the spec requires.
+
+    Attributes:
+        kind: One of the thirteen change kinds.
+        name: The symbol affected by this change, when relevant.
+        inferred_type: The type inferred for annotation changes, when
+            the analyst can determine it from the body.
+        reason: The directive text or rationale this change addresses.
+        acceptance: The criteria that must hold for the change to be
+            considered complete.
+        risk: "low", "medium", or "high". Reflects how much caller
+            breakage the change can cause.
+        reversibility: "easy", "medium", or "hard". Reflects how
+            cleanly the change can be rolled back.
+    """
 
     kind: str
     name: str | None = None
     inferred_type: str | None = None
     reason: str | None = None
+    acceptance: tuple[str, ...] = ()
+    risk: str = "medium"
+    reversibility: str = "easy"
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-shaped form."""
@@ -96,6 +270,10 @@ class RefactorChange:
             result["inferred_type"] = self.inferred_type
         if self.reason is not None:
             result["reason"] = self.reason
+        if self.acceptance:
+            result["acceptance"] = list(self.acceptance)
+        result["risk"] = self.risk
+        result["reversibility"] = self.reversibility
         return result
 
 
@@ -142,16 +320,38 @@ class AnalystResult:
         spec: The structured RefactorSpec, always present.
         context_pack: The validated model output, always present.
         context_pack_artifact: Schema-conforming context-pack.json
-            content, or None on refusal.
-        is_refusal: True when the analyst is refusing the task.
+            content, or None on refusal or needs_input.
+        status: "success", "refused", or "needs_input".
+        clarification: The question to ask the caller, populated only
+            when status is "needs_input".
+        alternatives: Alternative specs the caller supplied for
+            consideration. Empty in this block; Phase 13 populates
+            from a critic pass.
         warnings: Non-fatal issues (contradiction overrides, etc.).
     """
 
     spec: RefactorSpec
     context_pack: ContextPackOutput
     context_pack_artifact: dict[str, Any] | None
-    is_refusal: bool
-    warnings: tuple[str, ...]
+    status: AnalystStatus
+    clarification: Clarification | None = None
+    alternatives: tuple[RefactorSpec, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def is_refusal(self) -> bool:
+        """True when the analyst refused to produce a spec."""
+        return self.status == "refused"
+
+    @property
+    def needs_input(self) -> bool:
+        """True when the analyst is asking for clarification."""
+        return self.status == "needs_input"
+
+    @property
+    def is_usable(self) -> bool:
+        """True when the spec and context pack are ready for the next agent."""
+        return self.status == "success"
 
 
 class AnalystAgent:
@@ -177,13 +377,16 @@ class AnalystAgent:
             input: The analyst input.
 
         Returns:
-            An AnalystResult. On refusal, ``is_refusal`` is True and
-            ``context_pack_artifact`` is None.
+            An AnalystResult with status set.
 
         Raises:
-            CodeGuardianError: ``SYS_NOT_IMPLEMENTED`` when the kernel
+            CodeGuardianError: SYS_NOT_IMPLEMENTED when the kernel
                 extension is unavailable.
         """
+        clarification = _detect_ambiguity(input.directive)
+        if clarification is not None:
+            return _needs_input_result(input, clarification)
+
         try:
             from codeguardian import _native
         except ImportError as exc:
@@ -308,7 +511,7 @@ class AnalystAgent:
                 spec=spec,
                 context_pack=context_pack,
                 context_pack_artifact=None,
-                is_refusal=True,
+                status="refused",
                 warnings=(),
             )
 
@@ -344,9 +547,109 @@ class AnalystAgent:
             spec=spec,
             context_pack=context_pack,
             context_pack_artifact=artifact,
-            is_refusal=False,
+            status="success",
             warnings=tuple(warnings),
         )
+
+
+def _detect_change_kinds(directive: str) -> list[str]:
+    """Return the change kinds inferred from the directive text.
+
+    Detection is conservative: only explicit phrasings trigger a
+    specific kind. "add type hints to every parameter and the return
+    type" describes what to annotate, not what to add or change, so it
+    does not trigger add_parameter or change_return_type.
+    """
+    lowered = directive.lower()
+    kinds: list[str] = []
+
+    if "rename" in lowered:
+        kinds.append("rename_symbol")
+    if "extract" in lowered and any(word in lowered for word in ("function", "helper", "method")):
+        kinds.append("extract_function")
+    if "inline" in lowered:
+        kinds.append("inline_function")
+    if _ADD_PARAMETER_RE.search(lowered):
+        kinds.append("add_parameter")
+    if _REMOVE_PARAMETER_RE.search(lowered):
+        kinds.append("remove_parameter")
+    if "change the return type" in lowered or "change return type" in lowered:
+        kinds.append("change_return_type")
+    if "add a guard" in lowered or "add guard" in lowered:
+        kinds.append("add_guard")
+    if "change the exception" in lowered or "change exception" in lowered:
+        kinds.append("change_exception")
+    if "reorder" in lowered:
+        kinds.append("reorder_statements")
+    if "docstring" in lowered or "add documentation" in lowered:
+        kinds.append("add_docstring")
+
+    return kinds
+
+
+def _detect_ambiguity(directive: str) -> Clarification | None:
+    """Return a Clarification when the directive is too vague to plan."""
+    lowered = directive.strip().lower()
+
+    if lowered in _AMBIGUOUS_DIRECTIVES:
+        return Clarification(
+            question=(
+                f"The directive {directive!r} is too ambiguous to plan. "
+                "Which specific change should be made to the target?"
+            ),
+            options=(
+                "add type hints",
+                "add a docstring",
+                "extract a helper function",
+                "add a guard clause",
+                "rename a symbol",
+            ),
+            default="add type hints",
+        )
+
+    words = lowered.split()
+    if len(words) < 2 and not _detect_change_kinds(lowered):
+        return Clarification(
+            question=(
+                f"The directive {directive!r} is too short to plan. "
+                "What change should be made to the target?"
+            ),
+            options=(
+                "add type hints",
+                "add a docstring",
+                "add a guard clause",
+            ),
+            default="add type hints",
+        )
+
+    return None
+
+
+def _needs_input_result(
+    input: AnalystInput,
+    clarification: Clarification,
+) -> AnalystResult:
+    """Return a needs_input result with a stub spec and context pack."""
+    target = f"{input.blast.target_path}:{input.blast.target_qualified_name}"
+    spec = RefactorSpec(
+        directive=input.directive,
+        target=target,
+        changes=(),
+        constraints=(),
+    )
+    context_pack = ContextPackOutput(
+        role="analyst",
+        files=(),
+        reason=f"needs_input: {clarification.question}",
+    )
+    return AnalystResult(
+        spec=spec,
+        context_pack=context_pack,
+        context_pack_artifact=None,
+        status="needs_input",
+        clarification=clarification,
+        warnings=(),
+    )
 
 
 async def _call_tool(input: AnalystInput, name: str, tool_input: dict[str, object]) -> str:
@@ -375,7 +678,31 @@ def _build_refactor_spec(
     blast: BlastResult,
 ) -> RefactorSpec:
     """Build the RefactorSpec deterministically from tool evidence."""
-    changes: list[RefactorChange] = [RefactorChange(kind="apply_directive", reason=directive)]
+    changes: list[RefactorChange] = []
+
+    for kind in _detect_change_kinds(directive):
+        defaults = _KIND_DEFAULTS.get(kind, _KIND_DEFAULTS["apply_directive"])
+        changes.append(
+            RefactorChange(
+                kind=kind,
+                reason=directive,
+                acceptance=defaults["acceptance"],
+                risk=defaults["risk"],
+                reversibility=defaults["reversibility"],
+            )
+        )
+
+    if not changes:
+        defaults = _KIND_DEFAULTS["apply_directive"]
+        changes.append(
+            RefactorChange(
+                kind="apply_directive",
+                reason=directive,
+                acceptance=defaults["acceptance"],
+                risk=defaults["risk"],
+                reversibility=defaults["reversibility"],
+            )
+        )
 
     if body is not None and _needs_body(directive):
         try:
@@ -389,19 +716,27 @@ def _build_refactor_spec(
                     if arg.arg == "self":
                         continue
                     if arg.annotation is None:
+                        defaults = _KIND_DEFAULTS["parameter_annotation"]
                         changes.append(
                             RefactorChange(
                                 kind="parameter_annotation",
                                 name=arg.arg,
                                 inferred_type=None,
+                                acceptance=defaults["acceptance"],
+                                risk=defaults["risk"],
+                                reversibility=defaults["reversibility"],
                             )
                         )
                 if func.returns is None:
                     inferred = _infer_return_type(func)
+                    defaults = _KIND_DEFAULTS["return_annotation"]
                     changes.append(
                         RefactorChange(
                             kind="return_annotation",
                             inferred_type=inferred,
+                            acceptance=defaults["acceptance"],
+                            risk=defaults["risk"],
+                            reversibility=defaults["reversibility"],
                         )
                     )
 
@@ -422,11 +757,7 @@ def _build_refactor_spec(
 
 
 def _infer_return_type(func: ast.AST) -> str | None:
-    """Infer the return type from return statements, or None if unknown.
-
-    Returns the inferred type only when every return statement yields
-    the same syntactic type. Mixed return types yield None.
-    """
+    """Infer the return type from return statements, or None if unknown."""
     returns = [node for node in ast.walk(func) if isinstance(node, ast.Return)]
     if not returns:
         return "None"
@@ -577,7 +908,7 @@ def _budget_refusal(input: AnalystInput, exc: CodeGuardianError) -> AnalystResul
         spec=spec,
         context_pack=context_pack,
         context_pack_artifact=None,
-        is_refusal=True,
+        status="refused",
         warnings=(),
     )
 
@@ -611,7 +942,7 @@ def _refuse_invalid_output(
         spec=spec,
         context_pack=context_pack,
         context_pack_artifact=None,
-        is_refusal=True,
+        status="refused",
         warnings=(f"schema violation: {reason}",),
     )
 

@@ -25,6 +25,7 @@ from codeguardian.core.prompts import (
 PROMPTS_ROOT = Path(__file__).resolve().parents[3] / "prompts"
 
 SAMPLE_VARS = {
+    "function_body": "def f(x):\n    return x\n",
     "target_symbol": "Session.send",
     "target_path": "src/requests/sessions.py",
     "language": "python",

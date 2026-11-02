@@ -34,12 +34,13 @@ PROMPTS_ROOT = PROJECT_ROOT / "prompts"
 
 
 class TestAgentCallsMigrations:
-    def test_full_chain_produces_21_columns(self, tmp_path: Path) -> None:
-        """Migrations 002 and 003 together produce 21 columns.
+    def test_full_chain_produces_25_columns(self, tmp_path: Path) -> None:
+        """Migrations 002, 003, and 004 together produce 25 columns.
 
         Migration 002 creates the table with 16 columns. Migration 003
-        adds 5 provenance columns. A caller inspecting the table after
-        ``MigrationRunner.run()`` sees all 21.
+        adds 5 provenance columns. Migration 004 adds 4 evidence columns.
+        A caller inspecting the table after ``MigrationRunner.run()``
+        sees all 25.
         """
         store = SQLiteStore(tmp_path / "t.db")
         store.open()
@@ -48,9 +49,10 @@ class TestAgentCallsMigrations:
             assert "001_initial" in result.applied
             assert "002_agent_calls" in result.applied
             assert "003_agent_provenance" in result.applied
+            assert "004_agent_provenance_v2" in result.applied
 
             columns = {row["name"] for row in store.query("PRAGMA table_info(agent_calls)")}
-            assert len(columns) == 21
+            assert len(columns) == 25
 
             migration_002_columns = {
                 "call_id",
@@ -80,6 +82,14 @@ class TestAgentCallsMigrations:
                 "model_options",
             }
             assert migration_003_columns <= columns
+
+            migration_004_columns = {
+                "tool_chain",
+                "decision_log",
+                "model_reasoning",
+                "evidence_receipt",
+            }
+            assert migration_004_columns <= columns
 
             indexes = {row["name"] for row in store.query("PRAGMA index_list(agent_calls)")}
             assert "idx_agent_calls_run" in indexes
@@ -112,6 +122,7 @@ class TestWriterPromptV110:
             "skeleton": "def f(): ...",
             "blast_report": "{}",
             "characterization_test": "def test_f(): pass",
+            "function_body": "def f():\n    return 1\n",
             "previous_attempt": "def f(): ...",
             "test_failure": "assert f() == 1 failed",
             "previous_diff": "-def f(): pass\n+def f(): ...",
@@ -129,6 +140,7 @@ class TestWriterPromptV110:
             "skeleton": "def f(): ...",
             "blast_report": "{}",
             "characterization_test": "def test_f(): pass",
+            "function_body": "def f():\n    return 1\n",
         }
         result = render_prompt("writer", "1.0.0", variables, prompts_root=PROMPTS_ROOT)
         assert "Previous attempt feedback" not in result.rendered

@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
+from codeguardian.core.agents import _store_context
 from codeguardian.core.agents._runtime import (
     classify_failure,
     fresh_barrier,
     tracked_model_call,
 )
-from codeguardian.core.agents.telemetry import record_call
+from codeguardian.core.agents.telemetry import record_call, try_record_call
 from codeguardian.core.errors import CodeGuardianError, ErrorCode
 from codeguardian.core.plugins import BudgetTracker, PluginRegistry
 from codeguardian.core.storage import MigrationRunner, SQLiteStore
@@ -43,7 +45,19 @@ class TestMigration003:
         assert "failure_category" in columns
         assert "verdict_reason" in columns
         assert "model_options" in columns
-        assert len(columns) == 21
+
+
+class TestMigration004:
+    def test_agent_calls_has_evidence_columns(self, store: SQLiteStore) -> None:
+        columns = {row["name"] for row in store.query("PRAGMA table_info(agent_calls)")}
+        assert "tool_chain" in columns
+        assert "decision_log" in columns
+        assert "model_reasoning" in columns
+        assert "evidence_receipt" in columns
+
+    def test_total_column_count(self, store: SQLiteStore) -> None:
+        columns = {row["name"] for row in store.query("PRAGMA table_info(agent_calls)")}
+        assert len(columns) == 25
 
 
 class TestClassifyFailure:
@@ -196,6 +210,72 @@ class TestRecordCall:
         row = store.query("SELECT * FROM agent_calls WHERE call_id = ?", (cid,))[0]
         assert row["outcome"] == "refused"
         assert row["refusal_code"] == "target_missing"
+        assert row["failure_category"] is None
+
+    def test_writes_tool_chain(self, store: SQLiteStore) -> None:
+        call_id = record_call(
+            store,
+            role="analyst",
+            tool_chain=[
+                {"tool": "function-body", "input": {"path": "a.py"}, "output_bytes": 42},
+                {"tool": "code-skeleton", "input": {"path": "a.py"}, "output_bytes": 120},
+            ],
+        )
+        row = store.query("SELECT * FROM agent_calls WHERE call_id = ?", (call_id,))[0]
+        chain = json.loads(row["tool_chain"])
+        assert len(chain) == 2
+        assert chain[0]["tool"] == "function-body"
+        assert chain[1]["output_bytes"] == 120
+
+    def test_writes_decision_log(self, store: SQLiteStore) -> None:
+        call_id = record_call(
+            store,
+            role="writer",
+            decision_log=[
+                {
+                    "step": "pre_check",
+                    "candidate": 0,
+                    "verdict": "rejected",
+                    "reason": "signature_drift",
+                },
+                {"step": "pre_check", "candidate": 1, "verdict": "accepted", "reason": None},
+            ],
+        )
+        row = store.query("SELECT * FROM agent_calls WHERE call_id = ?", (call_id,))[0]
+        log = json.loads(row["decision_log"])
+        assert len(log) == 2
+        assert log[0]["verdict"] == "rejected"
+        assert log[0]["reason"] == "signature_drift"
+        assert log[1]["candidate"] == 1
+
+    def test_writes_model_reasoning(self, store: SQLiteStore) -> None:
+        reasoning = "Considered three candidates. Chose the minimal edit."
+        call_id = record_call(store, role="writer", model_reasoning=reasoning)
+        row = store.query("SELECT * FROM agent_calls WHERE call_id = ?", (call_id,))[0]
+        assert row["model_reasoning"] == reasoning
+
+    def test_writes_evidence_receipt(self, store: SQLiteStore) -> None:
+        call_id = record_call(
+            store,
+            role="correctness_verifier",
+            evidence_receipt={
+                "evidence_ids": ["e1", "e2"],
+                "artifacts_checked": ["a.py"],
+                "commands_run": ["pytest a_test.py"],
+            },
+        )
+        row = store.query("SELECT * FROM agent_calls WHERE call_id = ?", (call_id,))[0]
+        receipt = json.loads(row["evidence_receipt"])
+        assert receipt["evidence_ids"] == ["e1", "e2"]
+        assert receipt["commands_run"] == ["pytest a_test.py"]
+
+    def test_evidence_fields_null_when_not_provided(self, store: SQLiteStore) -> None:
+        call_id = record_call(store, role="analyst")
+        row = store.query("SELECT * FROM agent_calls WHERE call_id = ?", (call_id,))[0]
+        assert row["tool_chain"] is None
+        assert row["decision_log"] is None
+        assert row["model_reasoning"] is None
+        assert row["evidence_receipt"] is None
 
 
 class TestFreshBarrier:
@@ -293,3 +373,17 @@ class TestTrackedModelCall:
         )
         assert response.text == "hi"
         assert latency_ms >= 0
+
+
+class TestTryRecordCall:
+    def test_skips_when_no_store_active(self) -> None:
+        assert try_record_call(role="analyst") is None
+
+    def test_writes_when_store_active(self, store: SQLiteStore) -> None:
+        with _store_context.active_store(store):
+            call_id = try_record_call(role="analyst", target_symbol="Session.send")
+        assert call_id is not None
+        rows = store.query("SELECT * FROM agent_calls WHERE call_id = ?", (call_id,))
+        assert len(rows) == 1
+        assert rows[0]["role"] == "analyst"
+        assert rows[0]["target_symbol"] == "Session.send"

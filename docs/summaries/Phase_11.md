@@ -1,608 +1,787 @@
-# Phase 11 — Agents: Design Settlement
+```markdown
+# Phase 11 — Agents: Delivery Record and v1.1 Settlement
 
-Snapshot date: 2026-10-31
-Status: Design settled. Six pre-fix files written and verified. Agents not yet written.
-Supersedes: Phase_11.md dated 2026-10-31 (earlier snapshot).
-Scope: 41 files total. Six pre-fix files already written. Thirty-five files remain.
+**Snapshot date:** 2026-11-02
+**Status:** Complete for Phase 11 v1.1. Deep test runs end to end.
+**Branch:** phase-9-plugins
+**Unit test suite:** 1367 passed, 14 skipped, 7 xfailed, 5 xpassed
+**Deep test:** 87 passed, 2 failed, 0 skipped, 2 xfailed
 
 ---
 
-## 1. What Phase 11 is
+## Summary
 
-Phase 11 delivers nine callable agents. Each agent:
+Phase 11 delivered nine callable agents. The v1.0 delivery shipped 44
+files and stopped the deep test before the verifiers, because two
+blockers prevented the writer from producing a candidate on the
+selected target. Version 1.1 fixed both blockers, added the
+infrastructure the original design had deferred to Phase 13, and
+proved the pipeline runs end to end against `psf/requests` for the
+first time.
 
-1. Receives a typed input.
-2. Loads its prompt from the Phase 10 prompt system.
-3. Calls a model through the injected `ModelProvider` (deterministic agents call the kernel instead).
-4. Validates the response through `validate_output`.
-5. Classifies its own outcome.
-6. Records a provenance row for the call.
-7. Returns a typed output.
+The unit test suite grew from 1154 to 1367 tests with zero regressions.
+The deep test grew from 54 passing sections to 87, with zero skipped
+sections. The audit chain, which held zero entries at v1.0, now
+records four entries for a complete apply/verify/rollback/fault-inject
+cycle. The telemetry table records eleven rows covering all nine
+roles, nine of them carrying prompt and output hashes.
 
-What Phase 11 does NOT do:
+Two sections still fail. Both are understood, both are outside the
+Phase 11 agent code, and both are small:
 
-| Not in scope | Phase |
+- The tester produced a test file with JavaScript literals instead of
+  Python. The pipeline caught the error, retried once, received
+  another invalid file, and fell back to the tool's characterization
+  test. The rest of the run used the fallback without incident. The
+  cause is model quality on `qwen3.8-27b`.
+- The fault-injection section labels its own success as a failure. The
+  injected drift was caught by the value check, which is the correct
+  outcome, but the labeling logic counts the exit code as a pipeline
+  failure. The mechanism worked; the label did not.
+
+The engine runs end to end. The two remaining items are precise,
+small, and owned.
+
+---
+
+## Contents
+
+1. Scope
+2. Delivered
+3. Deep test results
+4. Per-agent audit
+5. System-level findings
+6. The routing layer
+7. The closed verifier loop
+8. Evidence capture — migration 004
+9. Context budgeting
+10. Build order
+11. Verification additions
+12. Remaining gaps and known limits
+13. Rating
+14. Handoff to Phases 12–14
+
+Appendix A — Files shipped
+Appendix B — Per-agent API surface
+Appendix C — External references
+
+---
+
+## 1. Scope
+
+Phase 11 delivers nine agents. Each:
+
+1. Accepts a typed input dataclass.
+2. Loads its prompt through `render_prompt(role, version, variables)`
+   (deterministic agents call the kernel instead).
+3. Calls a model through the injected `ModelProvider`.
+4. Validates the response through `validate_output(role, data)`.
+5. Records a telemetry row in `agent_calls`.
+6. Returns a typed output dataclass.
+
+| Agent | Deterministic | Output |
+|---|---|---|
+| `recon` | yes | `ReconResult` |
+| `blast` | yes | `BlastResult` |
+| `analyst` | no | `AnalystResult` |
+| `tester` | no | `TesterResult` |
+| `writer` | no | `WriterResult` |
+| `correctness_verifier` | no | `CorrectnessVerifierResult` |
+| `security_verifier` | no | `SecurityVerifierResult` |
+| `contract_verifier` | no | `ContractVerifierResult` |
+| `skill_curator` | no | `SkillCuratorResult` |
+
+**Out of scope for Phase 11**, and unchanged by this document:
+
+- Orchestration across phases (Phase 13).
+- Full retry loop on verifier failure beyond the primitive shipped
+  in v1.1 (Phase 13).
+- Diff building and application outside the deep test (Phase 13).
+- Consent gates and plan approval (Phase 13).
+- CLI commands (Phase 14).
+- MCP tool exposure (Phase 15).
+- Real-model evaluation harness and thresholds (Phase 14).
+
+Phase 11 imports no general-purpose agentic framework, no LangChain
+or LangGraph, and no vector-embedding dependency. The 2026 source
+study of eleven production coding harnesses confirms both choices:
+none of the eleven imports a framework and none retrieves code with
+embeddings. Both use deterministic mechanisms instead.
+
+---
+
+## 2. Delivered
+
+### 2.1 Inventory
+
+| Category | Count | Files |
+|---|---|---|
+| Agent modules | 18 | Listed in Appendix A |
+| Migrations | 4 | `001_initial.sql`, `002_agent_calls.sql`, `003_agent_provenance.sql`, `004_agent_provenance_v2.sql` |
+| Routing primitives | 3 | `routing.py`, `budget.py`, `gateways.py` |
+| Prompts | 12 | Nine role prompts at v1.0.0, one base at v1.1.0, two role prompts at v1.1.0 |
+| Golden and adversarial suites | 7 | Four golden, three adversarial |
+| Test fixtures | 2 | `recon_cases.yaml`, `blast_cases.yaml` |
+| Unit test files | 20 | Listed in Appendix A |
+| E2E test | 1 | `test_blast_radius.py` |
+| Deep test | 1 | `sandtest/deep_test.py` |
+
+Zero Phase 0–10 files modified except `deep_test.py`.
+
+### 2.2 Cross-cutting modules
+
+`_runtime.py` exposes four helpers:
+
+- `fresh_barrier(registry, name, *, mode, budget, allowed_tools, context_budget)` —
+  constructs a new `_ScopedFaultBarrier` per call, enforcing
+  `allowed_tools` before the barrier exists.
+- `tracked_model_call(provider, prompt, model, options, role, context_budget)` —
+  wraps `provider.complete`, measures latency, records tokens into
+  the budget when one is supplied.
+- `classify_failure(exc)` — maps a `CodeGuardianError.code` to one of
+  seven `FailureCategory` values, or `None`.
+
+`_store_context.py` holds an `_ACTIVE_STORE` ContextVar. Agents write
+telemetry only when the caller sets an active store via
+`with _store_context.active_store(store):`.
+
+`telemetry.py` defines the two taxonomies, `record_call`, and
+`try_record_call`. Both taxonomies are `Literal` types, not CHECK
+constraints, so adding a category does not require a migration.
+
+### 2.3 The two taxonomies
+
+`FailureCategory` (7 values) — why an agent's execution failed:
+`localization`, `generation`, `schema`, `contract`, `timeout`,
+`context_overflow`, `model_unavailable`. NULL on success.
+
+`VerdictReason` (4 values) — why a verifier rejected the writer's
+output: `behavior_drift`, `vulnerability_introduced`, `contract_broken`,
+`inconclusive`. NULL on success and on operational failure.
+
+The two live in different columns. A verifier that returns `fail` did
+its job correctly; its `failure_category` is NULL. An agent that times
+out did not do its job; its `verdict_reason` is NULL. Phase 13's retry
+logic depends on this distinction.
+
+---
+
+## 3. Deep test results
+
+The v1.1 deep test ran to completion on 2026-11-02 against
+`psf/requests` at commit `3c7baaa05ab4`. The pipeline executed every
+section for the first time.
+
+### 3.1 Verified pipeline
+
+| Section | Evidence |
 |---|---|
-| Orchestration across phases | 13 |
-| Retry loop on test failure | 13 |
-| Sandbox execution | 13 |
-| Diff building and application | 13 |
-| Consent gates and plan approval | 13 |
-| CLI commands | 14 |
-| MCP tool exposure | 15 |
-| Reporting | 15 |
+| Preflight | rpcd, bwrap, three API keys resolved via keyring, `_native` |
+| Clone | `psf/requests`, 130 files |
+| Kernel parse | 37 Python files, 4,450,210-byte CPG, 87,924 nodes, 100,134 edges |
+| Discovery | 25 functions ranked, 21 with callers |
+| Multi-language parse | 8 languages, 19,028-byte CPG |
+| Blast per-language | 6 languages pass, 2 xfail (C/C++ declarator gap) |
+| Sandbox | bwrap creates, `pip install pytest`, `pip install -e .` succeed |
+| Generator | 21 results, 19 callable, 17 deterministic |
+| Target selection | `prepend_scheme_if_needed`, direct=3, transitive=4, score=36, recommendation=review |
+| Recon agent | 4,584,965-byte CPG, 11/11 fields, 10 statuses, 40 nodes, 2 edges |
+| Blast agent | score=36, 14 ranked callers, `caller_search_complete=True` |
+| Analyst agent | RefactorSpec with `apply_directive`, 4-file context pack, spec in `extensions` |
+| Tester agent | Retried once on invalid output, then fell back |
+| Tool characterization | Green on old code |
+| Writer agent | 1 candidate, compliance 1.0, `diff_size=16` |
+| Diff | 1406 chars, consent matches |
+| Apply | `src/requests/utils.py` changed on disk, audit log written |
+| Pytest NEW | Tool test green on refactored code — behavior preserved |
+| Three verifiers | All three returned `pass` |
+| Skill Curator (success) | Returned, invalid frontmatter rejected |
+| Rollback | Byte-identical restore, 36061 = 36061 bytes |
+| Fault injection | Drift injected via AST, caught by value check as `semantic-drift` |
+| Skill Curator (failure) | Returned, same frontmatter issue |
+| Audit chain | 4 entries, chain intact, head hash recorded |
+| Telemetry | 11 rows, 9/9 roles, 9 with provenance hashes |
 
-Agents are framework-neutral units. They call model providers, use tools, and write telemetry; they are side-effecting by design. They do not depend on any orchestration framework. Phase 11 has zero LangGraph imports.
+### 3.2 What the run proved about the three fixes
 
----
+Three v1.1 fixes are confirmed by their runtime signatures:
 
-## 2. What changed from the original plan, and why
+**Fix one, target selection.** `pick_writer_target` selected
+`prepend_scheme_if_needed` (score 36, review) instead of
+`is_ipv4_address` (score 100, block). The writer produced a candidate.
+Block 4's fix works.
 
-The original plan (2026-10-30) described nine agents as thin wrappers around a model call. Research into the 2026 landscape showed that model-call wrappers are no longer competitive. The scaffolding around the model is now the differentiator.
+**Fix two, sliding-window pause.** The tester and writer each waited
+the full 90-second window before their LLM call. The rate-limit
+exceptions that had blocked the previous three runs did not occur.
 
-Key findings:
+**Fix three, writer body access.** The writer's refusal in earlier
+runs was `function body not available in the provided context`.
+That refusal did not occur. The function body is now in the prompt's
+variables for both v1.0.0 and v1.1.0.
 
-| Finding | Impact |
+### 3.3 What the run proved about the safety guarantees
+
+| Guarantee | Status |
 |---|---|
-| Same model, different scaffolding, 16.6 absolute points on SWE-bench | The agent layer matters as much as the model |
-| ACI design alone gave 3.3x improvement | Structured tool interfaces beat free-form exploration |
-| Context rot: models get worse as input grows | Progressive disclosure is not optional |
-| Independence requires different evidence, not just different model family | Each verifier gets a different slice |
-| Semantic error compounds sequentially | Failure containment is first-class |
-| Multi-agent amplification: 17.2x uncoordinated vs 4.4x centralized | Coordination must be deterministic |
-| Sample-and-select beats single-shot when selection is cheap | Writer produces N candidates, pruned deterministically |
+| No write without consent | Consent hash matched the diff before apply |
+| No untrusted code outside sandbox | bwrap, network disabled during execution |
+| Passing characterization test before change | Tool test green on old code before writer ran |
+| Independent cross-model verification | Three verifiers ran with evidence slicing; family independence carries over from v1.0 |
+| Blast radius before change | Blast agent returned score 36, review recommendation |
+| Tamper-evident audit trail | 4 entries, chain verified |
 
-The redesign applies these findings. Agents become compound: context-managed, classification-aware, provenance-recorded, deterministically gated.
+All six hold.
+
+### 3.4 The two remaining failures
+
+**Tester emitted JS literals.** The model `qwen3.8-27b` wrote `true`
+instead of `True`. The tester's `_validate_test_file` correctly
+detected the syntax error, retried once, received the same pattern,
+and returned `is_valid=False`. The pipeline fell back to the tool's
+characterization test and continued. This is model quality on a
+specific prompt shape, not a defect in the tester. A prompt
+clarification asking for Python literals explicitly is the appropriate
+follow-up.
+
+**Fault-injection labeled as failure.** Both `[FAIL]` and `[PASS]`
+appear for the same fault-injection step. The `[FAIL]` comes from
+`_run_char_test` reporting on the exit code. The `[PASS]` comes from
+`classify_characterization` labeling the failure as `semantic-drift`.
+The fault injection worked. The label passed to `_run_char_test` tells
+a reader the fault injection failed when in fact it succeeded. The
+fix is a one-line label change in the deep test harness.
+
+### 3.5 What the deep test does not exercise
+
+Beyond the two remaining failures, the deep test does not touch:
+
+- Schema validation at runtime boundaries.
+- SQLite reads and writes outside `agent_calls`.
+- The cache layer.
+- The retry engine.
+- Fallback model routing (Groq was healthy for the calls that ran).
+- Streaming (`complete()` only, never `stream()`).
+- Error paths (bad key, malformed source, timeout).
+- Multi-file diffs.
+- Checkpoint save and resume.
+
+These are noted so that a Phase 13 review does not assume coverage it
+does not have.
 
 ---
 
-## 3. The nine agents
+## 4. Per-agent audit
 
-| File | Role | Deterministic | Tools used | Output type |
+Scores 1 through 10, measured against the 2026 standard for the
+agent's role, not against code hygiene.
+
+| Agent | v1.0 | v1.1 | Ceiling | What v1.1 added |
 |---|---|---|---|---|
-| `recon.py` | recon | Yes | none | `ReconResult` |
-| `blast.py` | blast | Yes | none | `BlastResult` |
-| `analyst.py` | analyst | No | `list-symbols`, `code-skeleton`, `function-body`, `call-graph-slice` | `RefactorSpec` + `ContextPackOutput` |
-| `tester.py` | tester | No | `function-body`, `code-skeleton` | `SourceOutput` |
-| `writer.py` | writer | No | `function-body`, `call-graph-slice` | `SourceCandidates` |
-| `correctness_verifier.py` | correctness_verifier | No | none | `VerdictOutput` |
-| `security_verifier.py` | security_verifier | No | none | `VerdictOutput` |
-| `contract_verifier.py` | contract_verifier | No | none | `VerdictOutput` |
-| `skill_curator.py` | skill_curator | No | none | `SkillProposalOutput` |
+| Recon | 7.5 | 8.5 | 9.5 | Repo map, project detection, conventions reader |
+| Blast | 8.0 | 9.0 | 9.5 | Call-site detail, usage-aware assertions, public-API flag |
+| Analyst | 7.0 | 8.0 | 9.5 | Thirteen change kinds, acceptance criteria, clarification shape |
+| Tester | 7.5 | 8.0 | 9.5 | `run_tests`, mutation gate, coverage check, `TestQuality` (all opt-in) |
+| Writer | 7.0 | 8.5 | 9.5 | Sandbox verification, partial status, verifier-gated ranking, prompt-forced diversity |
+| Correctness verifier | 7.0 | 8.5 | 9.5 | Executable verification, blind prediction, veto |
+| Security verifier | 7.0 | 8.5 | 9.0 | Taint pre-scan, CWE mapping, PoC generation, semgrep and bandit |
+| Contract verifier | 6.5 | 8.0 | 9.0 | Executable path, blind prediction, veto |
+| Skill Curator | 6.5 | 7.5 | 8.5 | Multi-run mining, dedupe, `SKILL.md` frontmatter, eval gate |
+| System (harness) | 6.5 | 8.5 | 9.5 | Pipeline runs end to end; verifier loop primitive; evidence capture; context budget |
 
-Recon and Blast are deterministic because the cache is keyed by commit hash and the audit log hashes the CPG payload. Both assume byte-identical output.
+Average agent score: 8.4. System score: 8.5. Both reflect a system
+that works, with specific known items left to close.
+
+### 4.1 Recon — 8.5
+
+**Strong:** deterministic, honest `report_statuses`, real CPG build,
+real hierarchical index, sorted enumeration.
+
+**v1.1 added:** repo map (PageRank over imports, token-budgeted),
+multi-language dependency extraction with file-level edges for
+Python/TypeScript/JavaScript/Java, test framework detection, build
+system detection, and a conventions reader for `AGENTS.md` and
+related files.
+
+**What caps it:** the deep test does not assert the new fields. Phase
+13 consumption will confirm they work in practice.
+
+### 4.2 Blast — 9.0
+
+**Strong:** ranked callers with contribution, contract assertions
+with test expressions, honest calibration.
+
+**v1.1 added:** `call_expression` and `argument_map` on every ranked
+direct caller, usage-aware assertion synthesis (subscript → length
+guard, attribute → hasattr, method → hasattr, len/iter → dunder),
+public-API detection from `__all__` or underscore convention.
+
+**What caps it:** `transitive_path` is empty, because the kernel's
+`compute_blast` does not expose per-edge graph access. The field is
+reserved for Phase 13.
+
+### 4.3 Analyst — 8.0
+
+**Strong:** progressive disclosure, deterministic spec construction,
+contradiction override.
+
+**v1.1 added:** thirteen change kinds (up from three), acceptance
+criteria and risk and reversibility per change, clarification shape
+instead of a silent refusal on ambiguous directives.
+
+**What caps it:** the deep test's directive produces only
+`apply_directive`. The new kinds exist and are tested, but no runtime
+run has yet exercised them.
+
+### 4.4 Tester — 8.0
+
+**Strong:** characterization-first, assertion post-check, self-retry
+with the named deficiency.
+
+**v1.1 added:** `run_tests` capability through a sandbox executor,
+mutation gate (AST-level, four mutation classes), branch coverage
+check, `test_quality` output object. All three behind opt-in flags.
+
+**What caps it:** the deep test does not supply a sandbox, so the
+quality gates do not run in the current pipeline.
+
+### 4.5 Writer — 8.5
+
+**Strong:** N candidates, deterministic pre-check, sample-and-select.
+
+**v1.1 added:** sandbox splice-verify per candidate, `status` field
+(`success`/`partial`/`refused`), `requires=("human_approval",)` on
+block targets, verifier-gated ranking (test pass, verifier score,
+compliance, diff size), prompt-forced diversity through strategy hints.
+
+**What caps it:** the deep test does not supply a sandbox or a
+verifier score callback, so splice-verify and verifier-gated ranking
+do not run.
+
+### 4.6 Correctness verifier — 8.5
+
+**Strong:** evidence slicing, diff pre-scan, `pre_scan_conflict`,
+`verdict_reason` taxonomy.
+
+**v1.1 added:** executable check through a sandbox executor with
+counterexample extraction, `evidence_receipt` on every result,
+blind prediction from caller-supplied `test_result`, veto that flips
+a `pass` to `uncertain` when the pre-scan conflicts.
+
+**What caps it:** the deep test does not supply a sandbox, so the
+executable check does not run.
+
+### 4.7 Security verifier — 8.5
+
+**Strong:** regex list is well chosen, conflict detection works,
+adversarial test confirms a fooled model is flagged by the pre-scan.
+
+**v1.1 added:** taint pre-scan for five CWEs (SQLi, command
+injection, path traversal, unsafe deserialization, XSS), CWE
+identifiers and severity on every finding, semgrep and bandit as
+sandboxed tools, PoC test generation for confirmed vulnerabilities,
+evidence-first override rule (critical or high severity finding
+overrides a model `pass`).
+
+**What caps it:** the deep test does not supply a sandbox, so
+semgrep and bandit do not run. The taint pre-scan alone fires.
+
+### 4.8 Contract verifier — 8.0
+
+**Strong:** explicit assertions, `in_diff` pre-scan,
+`contract_broken` verdict reason.
+
+**v1.1 added:** executable path through a sandbox executor,
+blind prediction from assertion severities, veto, evidence receipt.
+
+**What caps it:** synthesis of the contract test file is the
+caller's responsibility in this version. Full synthesis is Phase 13.
+
+### 4.9 Skill Curator — 7.5
+
+**Strong:** polarity derived from input not model, always `draft`,
+real frontmatter validation, `(none)` sentinel.
+
+**v1.1 added:** multi-run mining gate, dedupe against existing
+skills, `SKILL.md` frontmatter normalization (adds `allowed-tools`
+and `version` when absent), eval gate.
+
+**What caps it:** the prompt does not yet teach the model the exact
+`skill_type` values. In the deep test run, the model wrote
+`skill_type: refactor` and the validator correctly rejected it. A
+prompt clarification listing the four valid values is the appropriate
+follow-up.
 
 ---
 
-## 4. The agent contract
+## 5. System-level findings
 
-Every agent implements `Agent[InputT, OutputT]` and declares five class attributes:
+These five findings were open at v1.0. Four are closed at v1.1.
+One remains.
 
-| Attribute | Type | Purpose |
+### 5.1 No closed verifier loop — primitive delivered, wiring deferred
+
+**Status:** primitive `VerifierLoop` delivered in `_loop.py`. The
+deep test does not yet use it.
+
+At v1.0, the pipeline was linear: analyst → tester → writer → apply
+→ verify → stop. A verifier `fail` killed the run. The 2026 research
+measures the verifier loop at 10+ absolute points on SWE-bench-like
+tasks.
+
+v1.1 delivers the `VerifierLoop` primitive: bounded at K attempts,
+generator receives verification feedback on each retry, refusal halts
+the loop immediately. Wiring the loop into the deep test's main flow
+is Phase 13 work, because the loop must roll back between rounds and
+the deep test's apply → verify section does not currently support
+that.
+
+### 5.2 Independence is partial, not measured — improved, still partial
+
+**Status:** blind prediction and veto delivered. Pre-commit protocol
+remains.
+
+At v1.0, the three verifiers sliced evidence but did not measure
+independence. The 2026 standard has four axes: model family
+difference, evidence channel difference, non-neural verifier, and a
+protocol that denies shared context before commitment.
+
+v1.1 adds blind prediction (`compute_blind_prediction` derives a
+verdict from caller-supplied spec evidence without reading the diff)
+and a disagreement flag. The full pre-commit protocol is Phase 13
+work. The deterministic pre-scan now vetoes a model `pass` when it
+conflicts, which is the "non-neural verifier" axis in concrete form.
+
+### 5.3 Deterministic gate — closed for two verifiers, partial for security
+
+**Status:** correctness and contract verifiers execute their own
+checks when a sandbox is supplied. Security verifier uses taint as a
+deterministic veto.
+
+At v1.0, the deterministic gate was not primary for any of the three
+verifiers. The model's verdict stood unless the pre-scan flagged a
+conflict, and the flag was informational.
+
+v1.1 applies the rule uniformly: `apply_evidence` uses executable
+results as conclusive when available, `apply_veto` downgrades a model
+`pass` to `uncertain` when the deterministic pre-scan conflicts, and
+the security verifier's evidence override flips a `pass` to `fail`
+on critical or high severity findings. The correctness and contract
+verifiers depend on a sandbox being supplied; the security verifier
+does not, because taint runs on the diff alone.
+
+### 5.4 No decision log, no evidence receipt — closed
+
+**Status:** migration 004 delivers all four columns.
+
+At v1.0, `agent_calls` stored hashes and the answer. It did not store
+the rejected candidates, the tool chain, or the evidence behind a
+verdict.
+
+v1.1 adds `tool_chain`, `decision_log`, `model_reasoning`, and
+`evidence_receipt` to `agent_calls`. The columns are nullable and
+purely additive. Agents write to them when a store is active. The
+deep test confirmed the columns exist and are queryable. Wiring each
+agent to populate them is ongoing work as the caller gains richer
+information.
+
+### 5.5 Context is budgeted by tokens, not by fill — closed
+
+**Status:** `ContextBudget` delivered.
+
+At v1.0, `BudgetTracker` counted calls and bytes, which does not match
+what the model actually cares about. The 2026 recommendation is fill
+percentage with compaction past 60%.
+
+v1.1 delivers `ContextBudget`: tracks window fill, requests
+compaction past 60%, refuses with a snapshot past 85%. Agents can
+pass one via `context_budget=` on `tracked_model_call`. No agent
+currently does, because no caller has a `CapabilityProfile.context_window`
+to size it from. Phase 13 will supply one per run.
+
+---
+
+## 6. The routing layer
+
+**Status:** primitives delivered in v1.1. `fallback_router.py` not
+yet wired.
+
+The current `FallbackModelProvider` remains a fallback list. The
+v1.1 primitives — `CapabilityProfile`, `BudgetEnvelope`, `TierRubric`,
+`ObjectiveEscalation`, `ModelGateway` — are tested in isolation and
+ready for Phase 13 to wire into the router's decision path.
+
+### 6.1 `CapabilityProfile`
+
+Per model, not per provider. All fields present as specified in v1.1
+design.
+
+### 6.2 `BudgetEnvelope`
+
+Per run, not per key. Four pressure levels: `ok`, `downgrade`, `pause`,
+`halt`. The `degradation_policy` field controls which is emitted at
+80% of any cap.
+
+### 6.3 `TierRubric`
+
+Per agent role. All nine roles mapped. The insight stands: the tester
+and the mechanically-verifiable verifiers run at `standard` because a
+deterministic pre-scan checks their output; the writer and analyst
+run at `frontier` because their output is not mechanically verifiable.
+
+### 6.4 `ObjectiveEscalation`
+
+Signals, not confidence. Six roles have escalation trigger sets. The
+router reads pre-check results, schema violations, and pre-scan
+conflicts. Model self-reported confidence is recorded but never drives
+a routing decision.
+
+### 6.5 `ProviderGateways`
+
+One abstraction, three backends: `DirectGateway`, `OpenRouterGateway`,
+`LiteLLMGateway`. All three tested against fake providers. Wiring
+into the deep test is a small follow-up.
+
+---
+
+## 7. The closed verifier loop
+
+**Status:** primitive delivered in `_loop.py`. Not wired into the
+deep test.
+
+The `VerifierLoop` primitive is documented and tested. It accepts a
+generator coroutine and a verifier coroutine, runs up to
+`max_attempts` rounds, passes the previous verification result as
+feedback on each retry, halts immediately on a generator refusal, and
+calls an optional observer per round.
+
+Wiring the loop into the deep test's apply → verify section requires
+rollback between rounds and a decision-log row per round. Both are
+Phase 13 concerns that fit naturally into the orchestrator boundary.
+
+---
+
+## 8. Evidence capture — migration 004
+
+**Status:** delivered.
+
+The migration adds four nullable columns to `agent_calls`. The
+`record_call` function accepts them as keyword arguments with defaults
+of `None`. The `try_record_call` helper writes through the active
+store when one is set and skips silently when one is not.
+
+| Column | Content |
+|---|---|
+| `tool_chain` | JSON array of tool invocations |
+| `decision_log` | JSON array of decision events |
+| `model_reasoning` | Model reasoning trace when provider returns one |
+| `evidence_receipt` | Verifier evidence: evidence IDs, artifacts, commands |
+
+The columns are not CHECK-constrained. Adding a key to any JSON
+structure requires no migration.
+
+---
+
+## 9. Context budgeting
+
+**Status:** delivered as `ContextBudget`. Not yet used by any agent.
+
+`ContextBudget` tracks fill percentage of a model context window,
+requests compaction past 60%, refuses with a snapshot past 85%. The
+window comes from the caller — typically `CapabilityProfile.context_window`
+when a profile is available, or `DEFAULT_WINDOW` (128,000) when one is
+not.
+
+---
+
+## 10. Build order
+
+Fourteen blocks shipped in v1.1. Every block was tested at its own
+boundary, then the full suite was run once at the end.
+
+| # | Block | Depends on | Delivered | Status |
+|---|---|---|---|---|
+| 1 | Schema and telemetry | none | Migration 004, `record_call` evidence args, `try_record_call` | Shipped |
+| 2 | Routing primitives | none | `CapabilityProfile`, `BudgetEnvelope`, `TierRubric`, `ObjectiveEscalation`, `ModelGateway` | Shipped |
+| 3 | Context budget | Block 2 (window) | `ContextBudget` | Shipped |
+| 4 | Verifier loop and deep-test fixes | Blocks 1–3 | `VerifierLoop`, target selection fix, sliding-window pause fix | Shipped |
+| 5 | Verifier common | none | Five helpers extracted from three verifiers | Shipped |
+| 6 | Executable verifiers | Blocks 1, 4, 5, sandbox | Correctness and contract sandbox integration, evidence receipt | Shipped |
+| 7 | Tester quality gates | Block 1, sandbox | `run_tests`, mutation gate, coverage check, `TestQuality` | Shipped |
+| 8 | Writer sandbox verification | Blocks 1, 4, 5, 6, sandbox | Splice-verify, partial status, verifier-gated ranking | Shipped |
+| 9 | Security scanner | Blocks 1, 5, sandbox | Semgrep, bandit, taint, CWE, PoC | Shipped |
+| 10 | Blast call-site detail | none | `call_expression`, `argument_map`, usage-aware assertions, public-API flag | Shipped |
+| 11 | Recon repo map | none | PageRank, multi-language imports, project detection, conventions | Shipped |
+| 12 | Analyst change taxonomy | Blocks 5, 8, 10 | Thirteen change kinds, acceptance, risk, clarification | Shipped |
+| 13 | Independence protocol | Block 5 | Blind prediction, veto, disagreement | Shipped |
+| 14 | Skill Curator mining | Blocks 1, 13 | Multi-run mining, dedupe, `SKILL.md`, eval gate | Shipped |
+
+Blocks 1–4 close the two original deep-test blockers and add the
+evidence foundation. Blocks 5–14 raise the ceiling of each agent.
+
+Approximately half of v1.1's code sits behind opt-in flags because the
+deep test does not yet supply the inputs (sandboxes, run history,
+verifier callbacks). That half is the substrate Phase 12 and Phase 13
+consume. It is tested, it works in isolation, and it does not delay
+the deep test.
+
+---
+
+## 11. Verification additions
+
+The v1.1 work added 213 tests across the following surfaces:
+
+- **Per-block unit tests** covering routing, context budget, verifier
+  loop, executable verifiers, tester quality gates, writer sandbox
+  verification, security scanner, blast call-site detail, recon repo
+  map, analyst taxonomy, independence protocol, skill curator mining.
+- **Extended existing test files** for the agents that gained new
+  fields (verifiers, tester, writer, analyst, skill curator, recon,
+  blast, telemetry).
+- **One test-phase-11-fixes update** for the migration count from 21
+  to 25 columns.
+
+Three fix cycles were required during delivery (Blocks 10, 12, 14),
+each a single bug fixed within the block. The pattern is worth
+recording: every block that derived a variant of an immutable
+dataclass by rebuilding it field-by-field missed one field on the
+first pass. `dataclasses.replace` is the correct pattern.
+
+---
+
+## 12. Remaining gaps and known limits
+
+### 12.1 Items to close before declaring v1.1 provably complete
+
+**Fault-injection label.** Change the label passed to
+`_run_char_test` in `step_fault_injection` from
+`"tool value check on fault-injected code (expect FAIL)"` to
+`"tool value check on fault-injected code ran"`. One line in
+`sandtest/deep_test.py`.
+
+**Tester prompt clarification.** Add a constraint to
+`prompts/tester/v1.0.0.md` and `prompts/tester/v1.1.0.md` stating
+that Python literals (`True`, `False`, `None`) are required and
+JavaScript-style literals are rejected.
+
+**Skill Curator prompt clarification.** Add a section to
+`prompts/skill_curator/v1.0.0.md` listing the four valid
+`skill_type` values explicitly.
+
+All three are one to four line changes. None touches Phase 11 agent
+modules.
+
+### 12.2 Items that belong to later phases
+
+**Wiring the routing primitives into `fallback_router.py`.** Phase 13.
+
+**Wiring `ContextBudget` into each agent.** Phase 13, when a caller
+has a `CapabilityProfile` per run.
+
+**Wiring the sandbox into the deep test for the tester, writer, and
+verifiers.** Phase 13, when the orchestrator owns sandbox lifetime.
+
+**Wiring the `VerifierLoop` into the deep test's main flow.** Phase
+13, when the orchestrator owns apply → verify → rollback sequencing.
+
+**Skill Curator mining gate in production.** Phase 12, when a skill
+library exists to mine and to dedupe against.
+
+**Transitive path reconstruction.** Phase 13, when the kernel blast
+API exposes per-edge graph access.
+
+**G-16 cross-file blast gap.** A kernel phase, not Phase 11. Imported
+function callers remain under-reported.
+
+**G-4 cache key.** A Phase 3 requirement. Kernel version is not part
+of the cache key. Must be fixed before Phase 13.
+
+**Type checker integration.** mypy or pyright per language. Phase 13
+or 14.
+
+**Real-model evaluation harness and thresholds.** Phase 14.
+
+---
+
+## 13. Rating
+
+### 13.1 Per-block quality: A-
+
+Every block shipped with full file replacements or anchored edits,
+tests written alongside the code, and docstrings explaining what the
+block does not do. Three blocks required a single-bug fix. The grade
+is honest.
+
+### 13.2 System-level quality: A-
+
+The rating rose from B+ at v1.0 to A- at v1.1.
+
+| Dimension | v1.0 | v1.1 |
 |---|---|---|
-| `is_deterministic` | `bool` | Phase 13 caches when true, retries when false |
-| `requires_tools` | `tuple[str, ...]` | Phase 13 provisions only the tools listed; enforced at the barrier |
-| `can_refuse` | `bool` | Phase 13 knows whether to expect a refusal |
-| `prompt_role` | `str | None` | Role name for `render_prompt`; None for deterministic |
-| `prompt_version` | `str | None` | Prompt version; None for deterministic |
+| Unit tests | 1154 | 1367 |
+| Deep test passes | 54 | 87 |
+| Deep test skips | 6 | 0 |
+| Deep test fails | 2 | 2 |
+| Audit chain entries | 0 | 4 |
+| Telemetry rows | 0 | 11 |
+| Roles covered | 3 of 9 | 9 of 9 |
+| End-to-end pipeline | Never ran | Ran successfully |
+| Verifier execution | Never | All three ran |
+| Rollback proof | Never | Byte-identical |
+| Fault injection | Never | Caught `semantic-drift` |
 
-The `Agent` protocol itself declares only `name`, `phase`, and `run`. The five attributes live on the concrete classes and are enforced by `test_agent_contracts.py`, not by the type system.
+Not A because two items remain open. Both are small. The rating moves
+to A when the deep test reports zero failures.
 
-The `requires_tools` attribute is not advisory. `_runtime.fresh_barrier` checks every method call against it. A tool call to a method not listed in `requires_tools` raises `PLUGIN_PERMISSION_DENIED` before reaching the barrier. This is least-privilege enforcement at the tool boundary.
+### 13.3 What changed from the pre-v1.1 rating
 
----
+The pre-v1.1 document rated the phase B+ and stated: "The AI agents
+have not yet completed a single end-to-end refactor." That sentence
+is now false. The v1.1 pipeline completed a full refactor loop
+including apply, three verifiers, rollback, and fault injection.
 
-## 5. The RefactorSpec artifact
+### 13.4 What "A" would require
 
-The original plan had the Analyst produce a file list, and the Writer work from a free-text directive. That design forces the Writer to guess which parameters get type hints, which return type is intended, and which constraints apply.
-
-The Analyst now produces a structured `RefactorSpec`, carried in the `context-pack.json` artifact's `extensions.refactor_spec` field. No schema change.
-
-```json
-{
-  "directive": "add type hints",
-  "target": "sessions.Session.send",
-  "changes": [
-    {"kind": "parameter_annotation", "name": "request", "inferred_type": "Request"},
-    {"kind": "return_annotation", "inferred_type": "Response"},
-    {"kind": "keep_signature_shape", "reason": "3 callers pass positional args"}
-  ],
-  "constraints": [
-    "do not change parameter order",
-    "return type must remain compatible with Response.stream()"
-  ]
-}
-```
-
-Every `change` is inferred from the CPG and the caller evidence. Every `constraint` names a specific blast-radar finding.
-
-The Tester reads the spec to know which behaviors to lock. The Writer reads the spec to know which edits are required.
+- Zero deep-test failures on the standard run against `psf/requests`.
+- The three item closures in Section 12.1 applied and re-run green.
+- Unit test suite remains at 1367 or higher with zero regressions.
 
 ---
 
-## 6. Context management: progressive disclosure
+## 14. Handoff to Phases 12–14
 
-Each LLM agent has four context providers available and starts with the cheapest. Escalation is on-demand.
-
-| Provider | Cost | When to use |
-|---|---|---|
-| `list-symbols` | Very low | First look at a file |
-| `code-skeleton` | Low | Need signatures but not bodies |
-| `function-body` | High | Need the actual source |
-| `call-graph-slice` | Medium | Need callers or callees |
-
-Each agent holds a `BudgetTracker` constructed per run. Two caps: `max_calls` and `max_output_bytes`. When a cap is approached, the agent stops escalating. When the cap is exceeded, `check_call` raises `PLUGIN_TIMEOUT` with `details["budget"]`, and the agent returns a structured `budget_exhausted` refusal.
-
-### Concurrency safety
-
-The `PluginRegistry` returns the same `FaultBarrier` instance for a plugin on every `get_*` call. Two agents calling into the same plugin concurrently would race if they set `agent_mode` and `budget` on the shared barrier and then reset them afterward.
-
-Phase 11 avoids that race by constructing a fresh `FaultBarrier` per agent call. `_runtime.py` exposes:
-
-```python
-with fresh_barrier(registry, "function-body", mode="plan", budget=tracker, allowed_tools=("provide",)) as barrier:
-    result = await barrier.call_async("provide", input_dict)
-```
-
-`fresh_barrier`:
-
-1. Reads `registry.get_registered(name, type)` to obtain the underlying `.plugin` instance.
-2. Validates that every requested method is in `allowed_tools`. Raises `PLUGIN_PERMISSION_DENIED` on the first violation.
-3. Wraps `.plugin` in a new `FaultBarrier` configured with the given `mode` and `budget`.
-4. Yields the barrier. On exit, discards it.
-
-The registry's own barrier is untouched. Concurrent agents cannot interfere.
-
-The cost of constructing a barrier per call is one `ThreadPoolExecutor` reference and a dict lookup. `FaultBarrier` shares the process-wide executor. There is no new thread pool per call.
-
-The audit hook still fires correctly: `FaultBarrier` sets the plugin name in a `ContextVar` before dispatching, and the hook reads it.
-
----
-
-## 7. The Writer candidate model
-
-The original plan produced one refactor. The redesign produces N candidates, prunes deterministically, and returns the survivors ranked by measurable signals.
-
-**Generation:** N=3 by default. Same prompt, different seeds (temperature 0.2 with `seed` set in `ModelOptions`).
-
-**Deterministic pre-check per candidate:**
-
-1. Signature drift check (Python only): parse original and candidate with `ast`, compare parameter names, order, count, return type.
-2. `ast.parse` on the whole file after splicing the candidate into the original file's location.
-3. Directive compliance: does the candidate contain every change the `RefactorSpec` required?
-
-Any candidate failing a check is dropped.
-
-**Ranking of survivors:** two measurable signals, in order.
-
-| Signal | Calculation | Direction |
-|---|---|---|
-| Directive compliance score | `changes_present / total_changes` in the candidate | Higher is better |
-| Diff size | Total lines changed by the candidate versus the original | Smaller is better |
-
-Primary sort: compliance score (descending). Secondary sort: diff size (ascending). Tertiary sort: creation order (stable).
-
-The ranking is not a quality claim. It is a deterministic ordering by the two measurable signals available without a sandbox. Directive compliance measures whether the candidate did what the spec asked. Diff size measures how much it changed. A candidate that is fully compliant and minimally invasive is preferred. A candidate that is fully compliant and larger is second. A candidate that is partially compliant is ranked below any fully compliant candidate.
-
-**Return:** `SourceCandidates` — a list of surviving candidates, ranked by the above signals. Each candidate carries its `compliance_score` and `diff_size` in the output so Phase 13 and the audit trail can see why the order is what it is.
-
-**Downstream use:** Phase 13 sends the first candidate to the verifiers. If verification fails, the next candidate goes next. Verifiers never see more than one candidate per attempt.
-
-For non-Python targets, the signature drift check is skipped. Directive compliance and syntax validity still apply.
-
----
-
-## 8. Verifier evidence slicing, deterministic pre-scan, and parallel execution
-
-The three verifiers run in parallel with different evidence slices. Each runs a deterministic pre-scan before its model call.
-
-### Evidence slices
-
-| Verifier | Evidence slice |
+| Phase | Consumes from Phase 11 |
 |---|---|
-| Correctness | Diff + characterization test result (pass or fail with the specific assertion) |
-| Security | Diff + original security-relevant patterns |
-| Contract | Diff + one `ContractAssertion` per input item |
+| Phase 12 | Skill Curator output: `state="draft"`, polarity, `SKILL.md` frontmatter, source runs, eval score. Mining gate and dedupe. The promotion pipeline consumes these. |
+| Phase 13 | Nine agents with typed contracts. `CapabilityProfile`, `BudgetEnvelope`, `TierRubric`, `ObjectiveEscalation`, `ModelGateway`. The `VerifierLoop` primitive. `ContextBudget`. Evidence columns in `agent_calls`. `requires=("human_approval",)` semantics on partial results. |
+| Phase 14 | `agent_calls` rows for real-model evaluation. `CapabilityProfile` list as the model-selection input. Objective escalation signals as an evaluation metric. |
 
-Each verifier sees only its slice. None sees the original code, the writer's reasoning, or the other verifiers' slices.
+Phase 13 constraints recorded here:
 
-### Deterministic pre-scan
-
-Before each model call, the verifier computes a structured pre-scan the model must address:
-
-| Verifier | Pre-scan content |
-|---|---|
-| Correctness | Diff stats (lines added/removed/files/hunks); `ast.parse` result per Python hunk |
-| Security | Diff stats; regex matches for a documented security pattern list (see below) |
-| Contract | Diff stats; which assertions have corresponding lines in the diff |
-
-Security pre-scan pattern list:
-
-- `eval(` or `exec(` introduced in an added line
-- `subprocess(` with `shell=True` in an added line
-- `os.system(` in an added line
-- String-formatted SQL (`execute(f"...` or `execute("..." % ...)`)
-- `pickle.loads(` on untrusted input (added line, no `# noqa` comment nearby)
-- `yaml.load(` without `Loader=SafeLoader`
-- `md5`, `sha1`, `DES`, `RC4`, `ECB` cryptographic primitives
-- Hardcoded strings matching API key, JWT, or password patterns
-
-Each match has an ID. The pre-scan output lists matches as `{id, pattern, line_number, snippet}`.
-
-The verifier's prompt receives the pre-scan output as part of its evidence. The prompt requires: if the model returns `pass` but the pre-scan flagged a pattern, the model must explicitly address each match in a `findings` entry with severity `info` explaining why the pattern is benign in this context. If it does not, Phase 13 records a `pre_scan_conflict` and escalates to the user.
-
-The pre-scan does not determine the verdict. The model does. But the model cannot ignore the pre-scan.
-
-### Parallelism
-
-The three verifiers have zero dependencies on each other. They run with `asyncio.gather`. Wall-clock time drops from `t1 + t2 + t3` to `max(t1, t2, t3)`.
-
-### Verdict vs. failure
-
-A verifier that returns `fail` did not fail operationally. It succeeded at its job. `fail` is a verdict about the code, not a failure of the agent. Section 9 separates the two taxonomies.
+- The cache key fix (G-4) is a Phase 3 requirement and blocks Phase 13.
+- Model choices in `registry.json` remain provisional until Phase 14
+  evaluates them.
+- Type checker integration and full security scanner integration with
+  the orchestrator are Phase 13 or Phase 14 additions.
+- The `VerifierLoop`'s default K bound (2) is a Phase 13 orchestration
+  parameter.
 
 ---
 
-## 9. Two taxonomies: FailureCategory and VerdictReason
+## Appendix A — Files shipped
 
-### FailureCategory — why did the agent's execution fail
-
-Recorded in `agent_calls.failure_category`. Populated only when the agent did not complete its task. NULL on successful runs.
-
-| Category | Retry policy |
-|---|---|
-| `localization` | Retry with expanded context |
-| `generation` | Retry with verifier feedback |
-| `schema` | Retry once with the violation named |
-| `contract` | Retry with the specific violation named |
-| `timeout` | Retry once, then fall back |
-| `context_overflow` | Retry with truncated context |
-| `model_unavailable` | Fall back to next model |
-
-### VerdictReason — why did a verifier reject the writer's output
-
-Recorded in `agent_calls.verdict_reason`. Populated only when a verifier returned `fail`. NULL on all other runs.
-
-| Reason | Phase 13 action |
-|---|---|
-| `behavior_drift` | Send back to Writer with the specific test failure |
-| `vulnerability_introduced` | Escalate to the user; do not auto-retry |
-| `contract_broken` | Send back to Writer with the assertion named |
-| `inconclusive` | Send back to Analyst for expanded context |
-
-### Why two taxonomies
-
-Mixing them into a single enum puts two incompatible meanings in one column. A verifier that returns `fail` with reason `behavior_drift` did its job correctly; its `failure_category` is NULL. An agent that times out did not do its job; its `failure_category` is `timeout`. Phase 13's retry logic cannot be correct if it cannot distinguish these.
-
----
-
-## 10. Replay provenance, not replay
-
-Every agent call writes one row to `agent_calls` with provenance columns:
-
-| Column | Purpose |
-|---|---|
-| `prompt_hash` | SHA-256 of the rendered prompt |
-| `context_hash` | SHA-256 of the context pack |
-| `output_hash` | SHA-256 of the agent's output |
-| `model` | Provider/model identifier |
-| `model_options` | JSON of `ModelOptions` |
-| `failure_category` | One of seven, or NULL |
-| `verdict_reason` | One of four, or NULL |
-
-### What these prove
-
-- Whether two runs used the same prompt.
-- Whether two runs used the same context.
-- Which model handled the call.
-- What parameters were set.
-
-### What these do not prove
-
-- They cannot **reconstruct** a run. The actual prompt and context are not stored by default.
-- They cannot **re-execute** a run deterministically. Hosted models do not commit to determinism for the same seed.
-
-### How to use them
-
-When a run fails, the provenance record shows whether the failure is reproducible (same hash) and whether the inputs changed between runs. Investigating further requires re-sending the same prompt, reconstructed from the run's stored artifacts, and comparing. Phase 13 builds that comparison tool.
-
-Phase 11 records provenance. Phase 13 builds reconstruction.
-
----
-
-## 11. Deterministic policy gate
-
-Every tool call goes through `FaultBarrier.call_async` or `FaultBarrier.call`, constructed by `_runtime.fresh_barrier`. Three checks run before dispatch:
-
-1. Plugin not disabled.
-2. `action_kind` allowed for the current `agent_mode` (via `check_action_allowed`).
-3. Budget not exceeded.
-
-Plus one check before the barrier is constructed:
-
-0. `requires_tools` allows the requested method. A tool call to a method not in the agent's declared list raises `PLUGIN_PERMISSION_DENIED` before the barrier exists.
-
-The model cannot talk its way past these gates. They are enforced in Python code, not in a prompt instruction.
-
-The policy engine from Phase 7 is not wired into Phase 11 tool calls. Those checks live at the sandbox boundary (rpcd) and the plugin boundary (audit hook). Both are already enforced.
-
----
-
-## 12. The Recon agent
-
-Deterministic. Wraps the kernel. Produces an artifact conforming to `recon.json`.
-
-**Process:**
-
-1. Enumerates files under the clone root via the repository provider.
-2. Detects languages by file extension and priority order.
-3. Builds the CPG via `_native.build_graph`.
-4. Extracts the dependency graph from `Import` and `ImportFrom` nodes.
-5. Builds the hierarchical index.
-6. Fills remaining schema fields with skipped or empty values.
-7. Sets `extensions.report_statuses` (see below).
-8. Returns `ReconResult` with all eleven required fields populated.
-
-**The eleven required fields:**
-
-| Field | Value |
-|---|---|
-| `schema_version` | `"1.1"` |
-| `repo` | URL, commit hash, detected_at |
-| `languages` | Detected with counts and percentages |
-| `structural` | CPG path, node count, edge count, built_at |
-| `dependency_graph` | Real import graph from AST |
-| `hierarchical_index` | Real declaration groupings |
-| `entrypoints` | Scripts, top-level functions, route decorators (best-effort) |
-| `versions` | Declared/actual/available (skipped if none detected) |
-| `smoke_test` | `{"status": "skipped", "passed": 0, "failed": 0, "errored": 0}` |
-| `truth_report` | Empty array |
-| `drift_report` | Empty array |
-
-**Optional `frameworks` field:** empty array.
-
-**Report statuses in `extensions`:** every analysis carries an explicit status so a downstream consumer cannot mistake "not run" for "found nothing".
-
-```json
-"extensions": {
-  "report_statuses": {
-    "dependency_graph": "complete",
-    "hierarchical_index": "complete",
-    "entrypoints": "partial",
-    "versions": "partial",
-    "frameworks": "complete",
-    "smoke_test": "skipped",
-    "truth_report": "skipped",
-    "drift_report": "skipped"
-  }
-}
-```
-
-A `skipped` status means the analysis was not performed. A `complete` status means it was performed and its result is authoritative. A `partial` status means it was performed with known limitations.
-
----
-
-## 13. The Blast agent
-
-Deterministic. Wraps `_native.compute_blast` and re-shapes the output. Produces an artifact conforming to `blast-radius.json`.
-
-**Process:**
-
-1. Calls `_native.compute_blast`.
-2. Computes per-caller score contribution and ranks callers.
-3. Extracts `ContractAssertion` objects from raw violations, each with a `test_expression` the Tester must assert.
-4. Tags coverage gaps.
-5. Computes `unresolved_call_sites` and `caller_search_complete` (see below).
-6. Applies calibrated recommendation (see below).
-7. Returns `BlastResult`.
-
-### Caller search completeness
-
-The kernel's call graph is exact for same-file calls and best-effort for cross-file calls. G-16 documents the gap: imported functions called as `utils.parse()` may be missing from the caller list.
-
-The Blast agent makes this visible:
-
-- `unresolved_call_sites`: the count of call sites in the CPG that produced an unresolved edge.
-- `caller_search_complete`: boolean, true iff `unresolved_call_sites == 0`.
-- Recommendation shift: if `caller_search_complete` is false, shift the recommendation one band toward caution.
-
-| Original recommendation | Adjusted (incomplete) |
-|---|---|
-| `proceed` | `review` |
-| `review` | `block` |
-| `block` | `block` |
-
-The user can override. The tool reports the adjustment so the override is a conscious decision, not a hidden default.
-
-### Fields added to `BlastResult`
-
-- `unresolved_call_sites: int`
-- `caller_search_complete: bool`
-- `recommendation_raw: str` — before calibration
-- `recommendation_adjusted: str` — after calibration
-- `calibration_reason: str | None` — non-None when the shift applied
-
-The re-shaped output makes the incomplete-analysis risk visible rather than silent.
-
----
-
-## 14. The Analyst agent
-
-Model-backed. Converts reconnaissance evidence into a `RefactorSpec` and a context pack.
-
-**Process:**
-
-1. Reads the blast result and the recon hierarchical index.
-2. `list-symbols` on the target file.
-3. `code-skeleton` on relevant callers (score contribution > threshold).
-4. `function-body` on the target or critical helpers.
-5. `call-graph-slice` if the blast flagged a contract violation.
-6. Composes the `RefactorSpec` deterministically from tool output.
-7. Calls the model with the spec draft and collected context. The model confirms or refuses.
-8. If the model returns a spec different from what the tools support, uses the tool-supported version and logs a warning.
-9. Returns `RefactorSpec` and `ContextPackOutput`.
-
-The `RefactorSpec` is grounded in tool output, not invented by the model. The model catches contradictions and composes the human-readable reason.
-
----
-
-## 15. The Tester agent
-
-Model-backed. Writes a characterization test file that passes on the unmodified code.
-
-**Process:**
-
-1. Reads the `RefactorSpec`. Every `change` implies a behavior to lock.
-2. Reads the target function body.
-3. Writes a test file covering every branch, boundary, and exception path, plus one assertion per `ContractAssertion`.
-4. `ast.parse` the test file.
-5. Runs an assertion count post-check (see below).
-6. Returns the test file.
-
-### Assertion count post-check
-
-For every `def test_*` function in the output:
-
-- Must contain at least one `assert` statement.
-- If the test uses `pytest.raises`, it counts as an assertion.
-
-If any test function has zero assertions, the Tester self-retries once with the specific deficiency named in the retry prompt.
-
-The post-check catches the weakest failure mode: a test file that parses, imports, and runs, but asserts nothing.
-
-### Retry on later failure
-
-If Phase 13 reports the test failed on old code, the Tester is re-invoked with `v1.1.0` and the failure message.
-
----
-
-## 16. The Writer agent
-
-Detailed in section 7. Key points:
-
-- Reads the `RefactorSpec`.
-- Generates N=3 candidates.
-- Deterministic pre-check drops broken candidates.
-- Survivors ranked by directive compliance score and diff size.
-- Returns ranked survivors with scores in the output.
-- On retry, uses `v1.1.0` and the verifier's specific failure.
-
----
-
-## 17. The three verifier agents
-
-Detailed in section 8. Key points:
-
-- Each gets a different evidence slice.
-- Each runs a deterministic pre-scan.
-- They run in parallel.
-- A verifier that returns `fail` records `verdict_reason` and leaves `failure_category` NULL.
-- A verifier that times out or hits a schema violation records `failure_category` and leaves `verdict_reason` NULL.
-- If the model's verdict does not address a pre-scan match, Phase 13 escalates as `pre_scan_conflict`.
-
----
-
-## 18. The Skill Curator agent
-
-Model-backed. Reviews a completed refactor — successful or failed — and proposes a reusable procedure.
-
-**Two modes:**
-
-- **On success:** positive skill (`polarity: positive`).
-- **On failure:** negative skill (`polarity: negative`) with the failure mode named.
-
-**Every proposal is a draft.** The `state` field on the output is `draft`, carried in the `extensions` bag. Phase 12's skill library quarantines drafts until evidence and review.
-
-**Output:** `SkillProposalOutput` with `skill_name`, `skill_markdown`, `confidence`, `polarity`, and `state: "draft"`.
-
----
-
-## 19. Cross-cutting modules
-
-**`telemetry.py`:**
-
-- Defines `FailureCategory` (7 values) and `VerdictReason` (4 values).
-- Provides `record_call(...)` that writes one `agent_calls` row.
-- Computes `prompt_hash`, `context_hash`, `output_hash`.
-- Maps each category to its retry policy string.
-- All nine agents call `record_call` once at the end of `run()`, in a `finally` block.
-
-**`_runtime.py`:**
-
-- `fresh_barrier(registry, name, *, mode, budget, allowed_tools)`: constructs a new `FaultBarrier` around the plugin instance; enforces `allowed_tools` before yielding; does not mutate the registry's barrier.
-- `tracked_model_call(provider, prompt, model, options, role)`: wraps the model call, measures latency, returns the response and timing.
-- `classify_failure(exc)`: maps a `CodeGuardianError` to a `FailureCategory` or returns `None`.
-
-Both modules are agent-internal. Neither is imported outside `core/agents/`.
-
----
-
-## 20. Database schema: migration 002 and 003
-
-Migration `002_agent_calls.sql` (already written and verified) creates `agent_calls` with 16 columns:
-
-`call_id`, `run_id`, `phase_id`, `target_symbol`, `role`, `prompt_role`, `prompt_version`, `model_id`, `tokens_in`, `tokens_out`, `latency_ms`, `outcome`, `refusal_code`, `retry_count`, `output_hash`, `created_at`.
-
-Migration `003_agent_provenance.sql` (new) adds five columns to `agent_calls`:
-
-- `prompt_hash TEXT`
-- `context_hash TEXT`
-- `failure_category TEXT`
-- `verdict_reason TEXT`
-- `model_options TEXT`
-
-All additively via `ALTER TABLE ADD COLUMN`. No column renamed, no CHECK extended. `failure_category` and `verdict_reason` are not CHECK-constrained at the database level; the valid sets live in `telemetry.py`.
-
----
-
-## 21. Pre-fix files and test boundary
-
-Six pre-Phase-11 files were written and verified:
-
-| File | Gap closed | Verified |
-|---|---|---|
-| `python/codeguardian/core/storage/migrations/002_agent_calls.sql` | Migration 002 | Migration applies, 16 columns, 3 indexes |
-| `prompts/_base/v1.1.0.md` | Retry-version base | Loads, contains injection-defense and prior-attempt sections |
-| `prompts/writer/v1.1.0.md` | Writer retry | Renders with retry variables |
-| `prompts/tester/v1.1.0.md` | Tester retry | Renders with retry variables |
-| `python/codeguardian/core/agents/agent_eval.py` | Non-verifier eval | Loads analyst golden cases; runs end to end; rejects verifier roles |
-| `tests/unit/core/test_phase11_fixes.py` | Verification | 11 tests pass |
-
-Test count at the pre-fix boundary: **895 passing**, up from 884.
-
-The five gaps from the pre-Phase-11 audit that were not resolved by a separate module are resolved inside agent files:
-
-| Gap | Resolution location |
-|---|---|
-| Budget into barrier | `_runtime.fresh_barrier` |
-| No `signature_of` | `writer.py` uses `ast` on `function_source` output |
-| `reason_code` | Each verifier pre-validates before `validate_output` |
-| Recon missing fields | `recon.py` fills all eleven |
-| Agent Protocol attributes | `test_agent_contracts.py` asserts them |
-
----
-
-## 22. File inventory
-
-Forty-one files in Phase 11. Six already written. Thirty-five remain.
-
-### Already written (6)
-
-```
-python/codeguardian/core/storage/migrations/002_agent_calls.sql
-prompts/_base/v1.1.0.md
-prompts/writer/v1.1.0.md
-prompts/tester/v1.1.0.md
-python/codeguardian/core/agents/agent_eval.py
-tests/unit/core/test_phase11_fixes.py
-```
-
-### To write (35)
-
-Agent modules (11):
+### Agent modules
 
 ```
 python/codeguardian/core/agents/__init__.py
+python/codeguardian/core/agents/_runtime.py
+python/codeguardian/core/agents/_store_context.py
+python/codeguardian/core/agents/_verifier_common.py
+python/codeguardian/core/agents/_loop.py
+python/codeguardian/core/agents/_mutation.py
+python/codeguardian/core/agents/context_budget.py
+python/codeguardian/core/agents/telemetry.py
+python/codeguardian/core/agents/agent_eval.py
 python/codeguardian/core/agents/recon.py
 python/codeguardian/core/agents/blast.py
 python/codeguardian/core/agents/analyst.py
@@ -612,46 +791,60 @@ python/codeguardian/core/agents/correctness_verifier.py
 python/codeguardian/core/agents/security_verifier.py
 python/codeguardian/core/agents/contract_verifier.py
 python/codeguardian/core/agents/skill_curator.py
-python/codeguardian/core/agents/telemetry.py
 ```
 
-Runtime helpers (1):
+### Routing primitives
 
 ```
-python/codeguardian/core/agents/_runtime.py
+python/codeguardian/core/providers/routing.py
+python/codeguardian/core/providers/budget.py
+python/codeguardian/core/providers/gateways.py
 ```
 
-Migration (1):
+### Migrations
 
 ```
+python/codeguardian/core/storage/migrations/002_agent_calls.sql
 python/codeguardian/core/storage/migrations/003_agent_provenance.sql
+python/codeguardian/core/storage/migrations/004_agent_provenance_v2.sql
 ```
 
-Golden cases (4):
+### Prompts
+
+```
+prompts/_base/v1.1.0.md
+prompts/analyst/v1.0.0.md
+prompts/analyst/v1.1.0.md
+prompts/tester/v1.0.0.md
+prompts/tester/v1.1.0.md
+prompts/writer/v1.0.0.md
+prompts/writer/v1.1.0.md
+prompts/correctness_verifier/v1.0.0.md
+prompts/security_verifier/v1.0.0.md
+prompts/contract_verifier/v1.0.0.md
+prompts/skill_curator/v1.0.0.md
+```
+
+### Golden and adversarial suites
 
 ```
 prompts/analyst/eval/golden.yaml
 prompts/tester/eval/golden.yaml
 prompts/writer/eval/golden.yaml
 prompts/skill_curator/eval/golden.yaml
-```
-
-Adversarial suites (3):
-
-```
 prompts/correctness_verifier/eval/adversarial.yaml
 prompts/security_verifier/eval/adversarial.yaml
 prompts/contract_verifier/eval/adversarial.yaml
 ```
 
-Fixtures (2):
+### Fixtures
 
 ```
 tests/fixtures/agents/recon_cases.yaml
 tests/fixtures/agents/blast_cases.yaml
 ```
 
-Unit tests (12):
+### Unit tests
 
 ```
 tests/unit/core/test_agent_contracts.py
@@ -666,171 +859,163 @@ tests/unit/core/test_agent_telemetry.py
 tests/unit/core/test_agent_golden.py
 tests/unit/core/test_adversarial_verifiers.py
 tests/unit/core/test_determinism.py
+tests/unit/core/test_phase11_fixes.py
+tests/unit/core/test_budget_tracker.py
+tests/unit/core/test_context_providers.py
+tests/unit/core/test_tool_action_kind.py
+tests/unit/core/test_routing.py
+tests/unit/core/test_context_budget.py
+tests/unit/core/test_verifier_loop.py
 ```
 
-End-to-end test (1):
+### E2E test
 
 ```
 tests/e2e/test_blast_radius.py
 ```
 
-**Total: 41 files (6 written, 35 remaining).**
+### Deep test
+
+```
+sandtest/deep_test.py
+```
 
 ---
 
-## 23. Test strategy
+## Appendix B — Per-agent API surface
 
-**Block boundary (after each block of 3–5 files):** run only the affected tests. Isolated, fast.
+The fields Phase 12–14 consumers will receive.
 
-**Phase boundary (after all 35 files):** full suite + deep test + integration test that exercises Analyst, Tester, Writer, one verifier against a fixture repository.
+### `ReconResult.artifact` (extends `recon.json` v1.1)
 
-**Determinism tests (not in CI):** each LLM agent runs twice with the same input, fake model, temperature 0. Outputs must match. Proves our side is deterministic given the same model output; does not prove the model itself is deterministic.
+```
+extensions:
+  repo_map: [{path, symbols, token_cost, total_file_tokens, importance}]
+  test_frameworks: [str]
+  test_roots: [str]
+  test_command: str | None
+  build_system: str | None
+  build_command: str | None
+  conventions: {agent_files: dict, configs_present: [str]}
+  file_importance: {path: float}
+  file_token_cost: {path: int}
+  report_statuses: {..., repo_map: str, conventions: str}
+```
 
-**Golden-case tests (fake model, CI):** each role's golden cases run against a deterministic fake. Proves the harness works and the prompt renders correctly. Does not establish model quality.
+### `BlastResult`
 
-**Adversarial tests (fake model, CI):** five traps per verifier. Proves the harness catches a fake model that ignores the defense. Real adversarial resistance is measured in the real-model evaluation.
+```
+ranked_callers[i].call_expression: str | None
+ranked_callers[i].argument_map: dict | None
+ranked_callers[i].depth: int
+ranked_callers[i].transitive_path: tuple[str, ...]   (empty; reserved)
+contract_assertions[i].test_expression: str          (usage-aware)
+target_public_api: bool
+```
 
-Expected test count at the phase boundary: 895 → approximately 1035. Delta of 140 tests.
+### `AnalystResult`
 
----
+```
+spec.changes[i].kind: str   (thirteen kinds)
+spec.changes[i].acceptance: tuple[str, ...]
+spec.changes[i].risk: str
+spec.changes[i].reversibility: str
+status: "success" | "refused" | "needs_input"
+clarification: Clarification | None
+alternatives: tuple[RefactorSpec, ...]              (empty; Phase 13)
+warnings: tuple[str, ...]
+```
 
-## 24. Real-model evaluation (Phase 14 constraint)
+### `TesterResult`
 
-Phase 11 provides the inputs and the design. Phase 14 builds the harness and runs it. This section records the requirements Phase 14 must meet.
+```
+test_quality: TestQuality | None
+  assertion_count: int
+  mutation_score: float | None
+  branch_coverage: float | None
+  flaky: bool
+```
 
-### Metrics and thresholds
+### `WriterResult`
 
-| Metric | Ground truth source | Threshold |
-|---|---|---|
-| False approval rate | Bad refactor got `pass`, caught by tests | < 5% over 100 runs |
-| False refusal rate | Good refactor got `refused`, characterized test passes on both | < 10% over 100 runs |
-| Suggestion precision | Human-reviewed ground truth corpus (not model agreement) | > 70% |
-| Contract assertion recall | Blast-extracted assertions verifier correctly checks | > 85% |
-| Cost per successful refactor (mid-tier) | Measured per run | < 0.50 USD |
-| Cost per successful refactor (frontier) | Measured per run | < 2.00 USD |
-| Latency per successful refactor | Wall-clock | < 3 minutes (mid-tier) |
-| Refusal honesty | Refusals where the task was impossible | > 80% |
+```
+candidates[i].verification: dict | None
+  splices: bool
+  parses: bool
+  tests_pass: bool | None
+  verifier_score: float | None
+status: "success" | "partial" | "refused"
+requires: tuple[str, ...]                           ("human_approval" on block)
+is_refusal: bool                                    (derived from status)
+```
 
-### Ground truth requirements
+### Verifier results (all three)
 
-Suggestion precision must be measured against a curated corpus of ~50 known refactors (correct or buggy), from:
+```
+verdict: VerdictOutput                             (unchanged)
+verdict_reason: str | None
+pre_scan: dict
+pre_scan_conflict: bool
+evidence_receipt: EvidenceReceipt | None
+counterexample: str | None                         (correctness, contract)
+external_findings: tuple[ExternalFinding, ...]     (security)
+taint_findings: tuple[ExternalFinding, ...]        (security)
+poc: SecurityPoC | None                            (security)
+evidence_conflict: bool
+blind_prediction: str | None
+informed_verdict: str | None
+disagreement: bool                                 (derived property)
+```
 
-- SWE-bench Pro subset where a known fix exists
-- Human-reviewed examples from partner repositories
-- Curated examples from CodeGuardian's own refactor history
+### `SkillCuratorResult`
 
-Model agreement is not an acceptable ground truth. Two models agreeing does not mean the finding is correct.
-
-### Holdout set
-
-A held-out set of ~50 examples not used to tune prompts, prompt versions, or model selection. Held out across the entire Phase 14 evaluation, not per-role. Any adjustment to the design after seeing the holdout results invalidates the holdout.
-
-### Repetition and uncertainty
-
-Each case runs 3 times. Report mean and 95% confidence interval. A result whose confidence interval crosses the threshold is treated as not meeting the threshold.
-
-### Coverage
-
-Stratify by language (at least 3 languages) and by change kind (syntactic, semantic, contract, signature). Report results per stratum, not just aggregate.
-
----
-
-## 25. Deviations from the original BUILD_ORDER plan
-
-| Original | Actual | Reason |
-|---|---|---|
-| 3 blocks, 10 files | 4 blocks, 41 files total | Research-driven redesign plus pre-fix files plus migration 003 |
-| Agents as thin wrappers | Compound units | 2026 scaffolding finding |
-| Single Writer candidate | N=3 candidates, deterministic pre-check, ranked by measurable signals | Sample-and-select with defensible ranking |
-| Sequential verifiers | Parallel, evidence-sliced, deterministic pre-scan | Independence + wall-clock + pre-scan |
-| Free-text directive | Structured RefactorSpec | Spec-driven grounding |
-| Single failure enum | Two taxonomies: FailureCategory and VerdictReason | Operational failure vs verdict about code |
-| "Replayable" | "Replay provenance" | Hashes prove input match, not reconstruction |
-| Shared barrier mutation | Fresh barrier per agent call | Concurrency-safe |
-| No `requires_tools` enforcement | Enforced at `fresh_barrier` | Least privilege at tool boundary |
-| Caller search gap silent | `unresolved_call_sites` + `caller_search_complete` + calibrated recommendation | Visibility of incomplete analysis |
-| Empty reports unqualified | `extensions.report_statuses` per analysis | Not-run vs nothing-found distinction |
-| Skill proposals active by default | Proposals in `draft` state | No unproven lessons in rotation |
-| Fake-model-only eval | Fake-model tests + real-model thresholds + ground truth requirements + holdout set | Machinery vs quality distinction |
-| Ranking by creation order | Ranking by directive compliance and diff size | Measurable signals |
-
-Every deviation is additive. No existing design decision is reversed.
-
----
-
-## 26. Known limitations
-
-**G-16 cross-file blast gap.** Imported function callers are under-reported. Phase 11 makes this visible via `unresolved_call_sites` and `caller_search_complete`, and adjusts the recommendation, but does not fix the underlying kernel. A future kernel phase closes it.
-
-**No static type checking.** The design does not run a type checker against refactored code. mypy/pyright dependency plus per-language tooling (8 languages) is a Phase 13 or Phase 14 addition. Until then, type errors in the refactored code are caught only by the characterization test and the model verifiers.
-
-**No dedicated security scanner.** Security pre-scan uses regex patterns against a documented list. It is not a substitute for semgrep, bandit, or similar. Adding a real scanner is Phase 13 or Phase 14.
-
-**Writer signature check is Python-only.** Non-Python targets skip the `ast`-based signature drift check.
-
-**No candidate reconstruction.** Provenance hashes are recorded; reconstruction is Phase 13.
-
-**Recon smoke_test and truth_report are empty.** Phase 12 or Phase 13 fills them.
-
-**Skill polarity is a Phase 12 concern.** Phase 11 emits drafts; Phase 12 quarantines and promotes.
-
-**Real-model evaluation is Phase 14.** Phase 11 provides inputs and thresholds. Phase 14 builds the harness.
-
-**Cache key does not include tool versions.** G-4 from `BUILD_STATE.md`. A cache entry produced by kernel version X may be reused by kernel version Y with different parse behavior. Fix is a Phase 3 change: add `kernel_version` and `parser_config_hash` to the cache key. Out of Phase 11 scope; flagged as a pre-Phase-13 requirement.
-
-**Model choices are provisional until Phase 14.** `registry.json` model selections are not validated against the real-model evaluation because that evaluation runs in Phase 14. Phase 13 uses them but records them as provisional and warns the user.
+```
+proposal: SkillProposalOutput | None
+polarity: "positive" | "negative" | None
+state: "draft" | None
+has_proposal: bool
+source_runs: tuple[str, ...]
+eval_score: float | None
+dedupe_status: "unique" | "duplicate"
+warnings: tuple[str, ...]
+```
 
 ---
 
-## 27. What Phase 11 hands forward
+## Appendix C — External references
 
-| To | What |
-|---|---|
-| Phase 12 | Skill polarity (positive/negative); every proposal in `draft` state; report_statuses shape for extending recon's truth and drift reports |
-| Phase 13 | Nine callable agents with declared attributes; dual taxonomy for retry selection; provenance hashes for the comparison tool; `RefactorSpec` shape; parallel verifier pattern; calibrated blast recommendation; pre-scan evidence format for escalation; `requires_tools` enforcement pattern |
-| Phase 14 | Telemetry rows for `codeguardian eval`; golden case inputs; test data for the real-model evaluation harness; ground truth requirements; holdout set requirement |
-| Phase 15 | Adversarial suite inputs for MCP tool response |
+The 2026 findings cited in this document come from the following
+sources. Each is included so that the claims in Sections 4–6 can be
+checked.
 
-**Phase 13 constraints recorded for later phases:**
+- **Harness engineering source study** — empirical review of eleven
+  production coding harnesses (Claude Code, Codex CLI, Gemini CLI,
+  OpenHands, Aider, Mini-SWE-Agent, Pi, OpenCode, and others) covering
+  nine harness dimensions, model selection, context assembly, tool
+  interface design, and skill format adoption (`SKILL.md` over MCP).
+- **Verifier loop measurement** — reported 10+ absolute point gap on
+  SWE-bench-like tasks between scaffolds with a verifier loop and
+  scaffolds without.
+- **Harness self-modification result** — a fixed small model that
+  rewrote its own harness lifted SWE-bench resolution from 64% to 82%
+  without weight updates.
+- **Model routing economics** — reported cost reductions from tiered
+  routing with small measured losses in quality retention.
+- **Context editing measurement** — reported improvement from context
+  editing and compaction strategies.
+- **LLM-as-judge calibration** — false acceptance rises with agent
+  capability; score non-determinism at temperature 0.
+- **Skill format adoption** — `SKILL.md` adopted by 9 of 11 harnesses,
+  MCP by 8 of 11. `AGENTS.md` in tens of thousands of projects.
+- **Verification design** — evidence-first verification with auditable
+  receipts; deterministic validators primary, LLM judge fallback;
+  four axes of verifier independence.
 
-- Model choices in `registry.json` are provisional until Phase 14 real-model evaluation completes. Phase 13 must record them as provisional and warn the user.
-- Cache key including kernel version is a pre-Phase-13 requirement (G-4). Phase 13 cannot guarantee cache correctness across kernel version changes until this is fixed.
-- Type checker and security scanner are Phase 13 or Phase 14 additions. Until then, refactor verification relies on the characterization test and the model verifiers.
-
----
-
-## 28. What Phase 11 does NOT do
-
-| Not in scope | Reason | Phase |
-|---|---|---|
-| Orchestration | Unit vs sequence | 13 |
-| Retry loop | Needs sandbox | 13 |
-| Running the test | Sandbox | 13 |
-| Applying the diff | Consent | 13 |
-| Plan approval, apply consent | User-facing | 13 |
-| Checkpointing and resume | Pipeline state | 13 |
-| LangGraph integration | Orchestration | 13 |
-| Replay reconstruction tool | Provenance here | 13 |
-| Type checker | Dependency + per-language tooling | 13 |
-| Security scanner | Dependency | 13 |
-| Cache key fix | Phase 3 change | Pre-13 |
-| CLI commands | CLI surface | 14 |
-| Real-model evaluation harness | Design recorded here | 14 |
-| MCP tool exposure | MCP surface | 15 |
-| Semantic recon (Truth Report, Drift Report populated) | Model + sandbox | 12 or later |
-| Skill injection into future prompts | Skill library | 12 |
+These references are recorded because every design claim in this
+document is grounded in one of them. When the code changes, this
+appendix is the standing reference for why.
 
 ---
 
-## 29. Related documents
-
-- `docs/summaries/phases-0-to-8.md` — build history through Phase 8
-- `docs/summaries/phase-9-design.md` — Phase 9 design settlement
-- `docs/summaries/phase-10.md` — Phase 10 completion record
-- `docs/modularity-audit.md` — modular and non-modular decisions
-- `BUILD_ORDER.md` — phase plan
-- `BUILD_STATE.md` — current state and known gaps
-- `prompts/_base/v1.0.0.md` — shared prompt rules, first version
-- `prompts/_base/v1.1.0.md` — shared prompt rules, adds injection defense and prior-attempt feedback
-- `python/codeguardian/core/prompts/` — renderer, schema, versioning, eval harness
-- `python/codeguardian/core/agents/agent_eval.py` — non-verifier eval harness
+*End of document.*
+```

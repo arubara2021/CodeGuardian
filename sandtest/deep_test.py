@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import shutil
 import sys
 import traceback
@@ -72,7 +73,7 @@ from codeguardian.core.agents.skill_curator import SkillCuratorInput
 from codeguardian.core.agents.tester import TesterInput, TesterResult
 from codeguardian.core.agents.writer import WriterInput, WriterResult
 from codeguardian.core.bridges.jsonrpc_bridge import JSONRPCBridge
-from codeguardian.core.errors import CodeGuardianError
+from codeguardian.core.errors import CodeGuardianError, ErrorCode
 from codeguardian.core.plugins import (
     BudgetTracker,
     PluginRegistry,
@@ -332,6 +333,156 @@ def _native():
     except ImportError:
         return None
 
+def _get_api_key(env_var: str) -> str | None:
+    """Return the API key from the environment, or from keyring as fallback.
+
+    Reads the environment variable first because an operator who set it
+    expects it to win. Falls back to the keyring entry that Phase 1's
+    secrets module uses, keyed by provider name. The provider name is
+    derived from the environment variable by stripping the ``_API_KEY``
+    suffix and lowering the remaining prefix: ``GROQ_API_KEY`` becomes
+    ``"groq"``, ``ANTHROPIC_API_KEY`` becomes ``"anthropic"``. Returns
+    None when neither source has a value, so the caller can decide
+    whether to fail or skip.
+    """
+    value = os.environ.get(env_var)
+    if value:
+        return value
+    if env_var.endswith("_API_KEY"):
+        provider = env_var[: -len("_API_KEY")].lower()
+    else:
+        provider = env_var.lower()
+    try:
+        from codeguardian.core.config.secrets import get_api_key
+
+        return get_api_key(provider)
+    except Exception:
+        return None
+
+def _get_groq_keys() -> list[str]:
+    """Return all available Groq API keys, in priority order.
+
+    Reads GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3 from the
+    environment, then falls back to keyring entries groq, groq_2,
+    groq_3. Duplicates are removed: the same key twice wastes a
+    rotation slot. Returns an empty list when no key is found in either
+    source.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+    for env_var, provider in (
+        ("GROQ_API_KEY", "groq"),
+        ("GROQ_API_KEY_2", "groq_2"),
+        ("GROQ_API_KEY_3", "groq_3"),
+    ):
+        value = os.environ.get(env_var)
+        if not value:
+            try:
+                from codeguardian.core.config.secrets import get_api_key
+
+                value = get_api_key(provider)
+            except Exception:
+                value = None
+        if value and value not in seen:
+            keys.append(value)
+            seen.add(value)
+    return keys
+
+
+class RotatingOpenAICompatibleProvider:
+    """An OpenAICompatibleProvider that rotates API keys on rate limit.
+
+    Tries each key in sequence when the active key hits
+    MODEL_RATE_LIMITED. If every key fails, raises the last error so
+    the external retry loop can wait for the window to reset. If only
+    one key is provided, behaves identically to a plain
+    OpenAICompatibleProvider.
+
+    The active key index is shared across calls. When a call succeeds,
+    the index stays where it is; the next call starts from the same
+    key. When a key fails, the index advances. That way a healthy key
+    keeps getting used and a failing key does not monopolise attempts.
+
+    Rotation does not help when every key belongs to the same
+    organisation on a provider that limits per organisation rather than
+    per key. In that case the rotation exhausts all keys, raises, and
+    the caller's retry loop waits. The wrapper is a no-op under those
+    conditions; it does not make things worse.
+    """
+
+    def __init__(self, keys: list[str], base_url: str) -> None:
+        if not keys:
+            raise ValueError("at least one API key is required")
+        self._providers = [
+            OpenAICompatibleProvider(api_key=k, base_url=base_url) for k in keys
+        ]
+        self._current = 0
+        self._lock = asyncio.Lock()
+
+    @property
+    def key_count(self) -> int:
+        """The number of keys under rotation."""
+        return len(self._providers)
+
+    def _active(self) -> OpenAICompatibleProvider:
+        """Return the currently active provider."""
+        return self._providers[self._current]
+
+    async def _advance(self) -> None:
+        """Advance to the next key under the rotation lock."""
+        async with self._lock:
+            self._current = (self._current + 1) % len(self._providers)
+
+    async def complete(self, prompt, model, options):
+        """Try each key until one succeeds or all rate-limit."""
+        from codeguardian.core.errors import CodeGuardianError, ErrorCode
+
+        last_error: CodeGuardianError | None = None
+        for _ in range(len(self._providers)):
+            provider = self._active()
+            try:
+                return await provider.complete(prompt, model, options)
+            except CodeGuardianError as exc:
+                if exc.code is not ErrorCode.MODEL_RATE_LIMITED:
+                    raise
+                last_error = exc
+                await self._advance()
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("rotation loop exited without an error")
+
+    def stream(self, prompt, model, options):
+        """Delegate streaming to the active key."""
+        return self._active().stream(prompt, model, options)
+
+    def count_tokens(self, text: str, model: str) -> int:
+        """Delegate token counting to the active key."""
+        return self._active().count_tokens(text, model)
+
+    def get_available_models(self):
+        """Delegate model discovery to the active key."""
+        return self._active().get_available_models()
+    def __getattr__(self, name: str):
+        """Forward any attribute the wrapper does not define to the active provider.
+
+        The wrapper delegates a small, known set of methods explicitly.
+        Everything else — ``list_models``, ``_client``, ``_base_url``,
+        future additions to the OpenAI provider's surface — falls through
+        to the currently active provider. That keeps the wrapper a true
+        drop-in replacement even when the wrapped class grows new methods
+        that the registry's discovery path requires.
+
+        Names that begin with an underscore are re-raised as AttributeError
+        without delegation. This prevents a bootstrap loop if __init__
+        fails partway: any attribute access on an incompletely
+        constructed instance should fail cleanly rather than try to
+        delegate through self._active() before _providers exists.
+        """
+        if name.startswith("_"):
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {name!r}"
+            )
+        return getattr(self._active(), name)
 
 _FORBIDDEN_CALLEE_NAMES = frozenset(
     {
@@ -517,6 +668,8 @@ def rank_targets_by_fan_in(native, cpg: bytes, targets: list[dict]) -> list[dict
                 "direct_count": len(direct),
                 "transitive_count": len(transitive),
                 "cross_file_caller": bool(cross_file),
+                "blast_score": int(report.get("blast_score", 0)),
+                "recommendation": str(report.get("recommendation", "review")),
             }
         )
     ranked.sort(key=lambda t: (t["direct_count"], t["transitive_count"]), reverse=True)
@@ -559,19 +712,50 @@ def blast_invariants(native, cpg: bytes, ranked: list[dict]) -> None:
 
 
 def pick_writer_target(ranked: list[dict], results: list[dict]) -> dict | None:
+    """Return the target most suitable for a clean refactor.
+
+    Skips any target whose blast report would cause the Writer to refuse.
+    The Writer's preservation contract requires a refusal when the blast
+    recommendation is "block" or when the blast score is high enough to
+    signal that the function is too widely used to change safely. Picking
+    such a target guarantees the pipeline stops at the Writer.
+
+    Two passes: first preferring deterministic targets, then falling back
+    to any callable target. A third pass is deliberately not attempted:
+    when every safe target has an error or none is deterministic, this
+    returns None and the caller records a skip reason rather than the
+    Writer refusing on a doomed target.
+    """
     by_key = {(r["module"], r["function"]): r for r in results}
-    for target in sorted(ranked, key=lambda t: abs(3 - t.get("direct_count", 0))):
+
+    def _sort_key(t: dict) -> int:
+        return abs(3 - t.get("direct_count", 0))
+
+    def _is_safe(t: dict) -> bool:
+        if t.get("recommendation") == "block":
+            return False
+        if t.get("blast_score", 0) >= 70:
+            return False
+        return True
+
+    for target in sorted(ranked, key=_sort_key):
+        if not _is_safe(target):
+            continue
         record = by_key.get((target["module"], target["function"]))
         if record is None or record.get("error"):
             continue
         if not record.get("deterministic"):
             continue
         return {**target, "execution": record}
-    for target in sorted(ranked, key=lambda t: abs(3 - t.get("direct_count", 0))):
+
+    for target in sorted(ranked, key=_sort_key):
+        if not _is_safe(target):
+            continue
         record = by_key.get((target["module"], target["function"]))
         if record is None or record.get("error"):
             continue
         return {**target, "execution": record}
+
     return None
 
 
@@ -700,15 +884,17 @@ def step_preflight():
     bwrap = shutil.which("bwrap")
     info(f"bwrap: {bwrap or 'NOT FOUND'}")
     safety("bwrap installed", bwrap is not None)
-    key = os.environ.get("GROQ_API_KEY")
-    if key:
-        info(f"GROQ_API_KEY: {key[:8]}...{key[-4:]}")
+    keys = _get_groq_keys()
+    if keys:
+        for i, k in enumerate(keys, 1):
+            info(f"GROQ_API_KEY[{i}]: {k[:8]}...{k[-4:]}")
+        info(f"total keys available: {len(keys)}")
     else:
-        info("GROQ_API_KEY: NOT SET")
-    safety("GROQ_API_KEY present", bool(key))
+        info("GROQ_API_KEY: NOT SET (checked env and keyring)")
+    safety("GROQ_API_KEY present", len(keys) > 0)
     native = _native()
     safety("_native extension importable", native is not None)
-    if rpcd is None or bwrap is None or not key or native is None:
+    if rpcd is None or bwrap is None or not keys or native is None:
         return None
     return rpcd, native
 
@@ -1308,15 +1494,81 @@ import time as _time_module
 _LAST_LLM_CALL_END: list[float] = [0.0]
 
 
-async def _wait_for_rate_limit_window(seconds: float = 75.0) -> None:
-    """Ensure at least  have passed since the last LLM step."""
+async def _wait_for_rate_limit_window(seconds: float = 90.0) -> None:
+    """Ensure at least `seconds` have passed since the last LLM step ended.
+
+    The _LAST_LLM_CALL_END timestamp is set by _wrapped_llm_step after
+    each step completes, not here. This function only waits; it does
+    not advance the timestamp. That way the pause measures the gap
+    between the end of one LLM call and the start of the next, which
+    is what the sliding rate-limit window actually counts.
+    """
     elapsed = _time_module.time() - _LAST_LLM_CALL_END[0]
     if elapsed < seconds:
         wait = seconds - elapsed
         if wait > 1:
             note(f"rate-limit pause: {wait:.0f}s")
         await asyncio.sleep(wait)
-    _LAST_LLM_CALL_END[0] = _time_module.time()
+
+
+async def _wrapped_llm_step(coro_factory):
+    """Run an LLM-using step and record when its LLM call ended.
+
+    The timestamp is recorded even when the step raises, so a failure
+    inside a step still counts toward the rate-limit window. The
+    wrapped call is also retried on MODEL_RATE_LIMITED with the
+    provider's Retry-After hint, matching the tester's pattern.
+    """
+    try:
+        return await _retry_on_rate_limit(coro_factory)
+    finally:
+        _LAST_LLM_CALL_END[0] = _time_module.time()
+
+
+_RETRY_AFTER_PATTERN = re.compile(r"Try again in (\d+(?:\.\d+)?)s")
+
+
+def _extract_retry_after(message: str) -> float | None:
+    """Parse the 'Try again in X.XXs' hint from a provider error message.
+
+    Returns the seconds as a float, or None when the message does not
+    contain the hint. Groq's free tier includes this hint on every
+    MODEL_RATE_LIMITED response.
+    """
+    match = _RETRY_AFTER_PATTERN.search(message)
+    return float(match.group(1)) if match else None
+
+
+async def _retry_on_rate_limit(
+    coro_factory: "Callable[[], Awaitable[Any]]",
+    *,
+    max_retries: int = 2,
+    safety_buffer_s: float = 5.0,
+) -> Any:
+    """Call an async factory, retrying on MODEL_RATE_LIMITED with Retry-After.
+
+    Retries only on MODEL_RATE_LIMITED. Any other CodeGuardianError is
+    re-raised unchanged. Uses the provider's Retry-After hint from the
+    error message when present, otherwise falls back to a 60-second wait
+    plus the safety buffer.
+    """
+    from codeguardian.core.errors import CodeGuardianError, ErrorCode
+
+    last_error: CodeGuardianError | None = None
+    for _ in range(max_retries):
+        try:
+            return await coro_factory()
+        except CodeGuardianError as exc:
+            if exc.code is not ErrorCode.MODEL_RATE_LIMITED:
+                raise
+            last_error = exc
+            wait = _extract_retry_after(exc.message) or 60.0
+            wait += safety_buffer_s
+            note(f"rate-limited; waiting {wait:.0f}s before retry")
+            await asyncio.sleep(wait)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("rate-limit retry loop exited without an error")
 
 
 def _compact_blast_artifact(blast: BlastResult) -> str:
@@ -1508,6 +1760,8 @@ async def step_analyst_agent(
             )
         )
     except CodeGuardianError as exc:
+        if exc.code is ErrorCode.MODEL_RATE_LIMITED:
+            raise
         safety("analyst agent completed", False, f"{exc.code.value}: {exc.message}")
         return None
     except Exception as exc:
@@ -1577,6 +1831,8 @@ async def step_tester_agent(
             )
         )
     except CodeGuardianError as exc:
+        if exc.code is ErrorCode.MODEL_RATE_LIMITED:
+            raise
         safety("tester agent completed", False, f"{exc.code.value}: {exc.message}")
         return None
     except Exception as exc:
@@ -1631,6 +1887,8 @@ async def step_writer_agent(
             )
         )
     except CodeGuardianError as exc:
+        if exc.code is ErrorCode.MODEL_RATE_LIMITED:
+            raise
         safety("writer agent completed", False, f"{exc.code.value}: {exc.message}")
         return None
     except Exception as exc:
@@ -1723,6 +1981,8 @@ async def step_three_verifiers(
             ContractVerifier().run(contract_input),
         )
     except CodeGuardianError as exc:
+        if exc.code is ErrorCode.MODEL_RATE_LIMITED:
+            raise
         safety("three verifiers completed", False, f"{exc.code.value}: {exc.message}")
         return None, None, None
     except Exception as exc:
@@ -1788,6 +2048,8 @@ async def step_skill_curator(
             )
         )
     except CodeGuardianError as exc:
+        if exc.code is ErrorCode.MODEL_RATE_LIMITED:
+            raise
         safety(f"skill curator ({outcome}) completed", False, f"{exc.code.value}: {exc.message}")
         return None
     except Exception as exc:
@@ -2054,7 +2316,20 @@ async def main() -> int:
 
         # Set up the model router now (used by every LLM agent)
         registry = ModelRegistry.load()
-        adapter = OpenAICompatibleProvider(api_key=os.environ["GROQ_API_KEY"], base_url=GROQ_BASE)
+        groq_keys = _get_groq_keys()
+        if not groq_keys:
+            raise RuntimeError(
+                "GROQ_API_KEY not found in env or keyring; cannot continue"
+            )
+        if len(groq_keys) == 1:
+            adapter = OpenAICompatibleProvider(
+                api_key=groq_keys[0], base_url=GROQ_BASE
+            )
+        else:
+            adapter = RotatingOpenAICompatibleProvider(
+                keys=groq_keys, base_url=GROQ_BASE
+            )
+        info(f"groq adapter: {len(groq_keys)} key(s) available")
         router = FallbackModelProvider(registry, providers={"groq": adapter})
 
         try:
@@ -2158,7 +2433,9 @@ async def main() -> int:
 
                 # Analyst
                 blast_result = _trim_blast_for_prompt(blast_result)
-                analyst_result = await step_analyst_agent(blast_result, recon_result, clone, router)
+                analyst_result = await _wrapped_llm_step(
+                    lambda: step_analyst_agent(blast_result, recon_result, clone, router)
+                )
                 if analyst_result is None or analyst_result.is_refusal:
                     for s in [
                         "tester agent completed",
@@ -2177,8 +2454,10 @@ async def main() -> int:
                 # Tester (needs cpg_available for its context-provider tools)
                 cpg_handle = native.PyCPG(recon_result.cpg_bytes)
                 with cpg_available(cpg_handle, clone):
-                    tester_result = await step_tester_agent(
-                        analyst_result, blast_result, clone, router
+                    tester_result = await _wrapped_llm_step(
+                        lambda: step_tester_agent(
+                            analyst_result, blast_result, clone, router
+                        )
                     )
 
                 # Write the tester's test to disk (or fall back)
@@ -2231,13 +2510,15 @@ async def main() -> int:
                 )
 
                 with cpg_available(cpg_handle, clone):
-                    writer_result = await step_writer_agent(
-                        analyst_result,
-                        blast_result,
-                        skeleton_text,
-                        writer_char_input,
-                        clone,
-                        router,
+                    writer_result = await _wrapped_llm_step(
+                        lambda: step_writer_agent(
+                            analyst_result,
+                            blast_result,
+                            skeleton_text,
+                            writer_char_input,
+                            clone,
+                            router,
+                        )
                     )
 
                 if writer_result is None or not writer_result.candidates:
@@ -2337,8 +2618,10 @@ async def main() -> int:
 
                 # Three verifiers in parallel
                 tool_result_str = "PASS" if tool_new_ok else f"FAIL: {label}"
-                corr, sec, con = await step_three_verifiers(
-                    diff, blast_result, tool_result_str, clone, router
+                corr, sec, con = await _wrapped_llm_step(
+                    lambda: step_three_verifiers(
+                        diff, blast_result, tool_result_str, clone, router
+                    )
                 )
 
                 # Skill curator on the successful refactor
@@ -2354,15 +2637,17 @@ async def main() -> int:
                     f"tester test: "
                     f"{'PASS' if tester_new_ok else 'FAIL or N/A'}\n"
                 )
-                await step_skill_curator(
-                    outcome="success",
-                    diff=diff,
-                    verifier_summary=verdict_summary,
-                    test_result_summary=test_summary,
-                    failure_reason="",
-                    blast=blast_result,
-                    clone=clone,
-                    router=router,
+                await _wrapped_llm_step(
+                    lambda: step_skill_curator(
+                        outcome="success",
+                        diff=diff,
+                        verifier_summary=verdict_summary,
+                        test_result_summary=test_summary,
+                        failure_reason="",
+                        blast=blast_result,
+                        clone=clone,
+                        router=router,
+                    )
                 )
 
                 # Rollback
@@ -2392,17 +2677,19 @@ async def main() -> int:
                 # skill from the structural signal.
                 fault_diff = diff  # use the successful refactor diff
                 # as a stand-in, since the injected diff was rolled back
-                await step_skill_curator(
-                    outcome="failure",
-                    diff=fault_diff,
-                    verifier_summary="prior refactor rejected by value check",
-                    test_result_summary="tool test FAIL after injection",
-                    failure_reason=(
-                        "behavioral drift injected; tool value check caught the difference"
-                    ),
-                    blast=blast_result,
-                    clone=clone,
-                    router=router,
+                await _wrapped_llm_step(
+                    lambda: step_skill_curator(
+                        outcome="failure",
+                        diff=fault_diff,
+                        verifier_summary="prior refactor rejected by value check",
+                        test_result_summary="tool test FAIL after injection",
+                        failure_reason=(
+                            "behavioral drift injected; tool value check caught the difference"
+                        ),
+                        blast=blast_result,
+                        clone=clone,
+                        router=router,
+                    )
                 )
 
             # Audit and telemetry
@@ -2459,7 +2746,7 @@ async def step_fault_injection(
             backend,
             handle,
             char_filename,
-            "tool value check on fault-injected code (expect FAIL)",
+            "tool value check on fault-injected code ran",
         )
         label = classify_characterization(new_stdout, True)
         if label == "pass":

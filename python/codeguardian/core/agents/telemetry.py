@@ -13,6 +13,15 @@ constraint that predates this finer taxonomy. record_call derives the
 outcome from the failure_category when the caller does not supply one.
 The mapping is best-fit, not exact; downstream consumers that need
 precision should read failure_category and prefer it when present.
+
+Migration 004 adds four evidence columns (tool_chain, decision_log,
+model_reasoning, evidence_receipt). They are optional, nullable, and
+additive: agents that have nothing to record pass None and the row is
+written unchanged. The TypedDicts ToolChainEntry, DecisionLogEntry,
+and EvidenceReceipt describe the shapes those columns expect. The
+helper try_record_call writes through the active store when one is
+set and skips silently when one is not, so agents do not need to
+know whether telemetry is wired up in the current context.
 """
 
 from __future__ import annotations
@@ -20,10 +29,10 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal, TypedDict
 
 from codeguardian.core.storage.sqlite_store import SQLiteStore
 
@@ -31,9 +40,13 @@ from ._runtime import FailureCategory
 
 __all__ = [
     "RETRY_POLICY_BY_CATEGORY",
+    "DecisionLogEntry",
+    "EvidenceReceipt",
     "FailureCategory",
+    "ToolChainEntry",
     "VerdictReason",
     "record_call",
+    "try_record_call",
 ]
 
 
@@ -43,6 +56,56 @@ VerdictReason = Literal[
     "contract_broken",
     "inconclusive",
 ]
+
+
+class ToolChainEntry(TypedDict):
+    """One tool invocation recorded during an agent call.
+
+    Attributes:
+        tool: The tool or plugin name.
+        input: The tool input as a JSON-serialisable mapping.
+        output_bytes: The size of the tool's output, in bytes.
+    """
+
+    tool: str
+    input: dict[str, object]
+    output_bytes: int
+
+
+class DecisionLogEntry(TypedDict):
+    """One decision event recorded during an agent call.
+
+    Attributes:
+        step: The stage that made the decision (pre_check, verifier,
+            escalation, refusal, and so on).
+        candidate: The zero-based candidate index, or None when the
+            decision applies to the call as a whole.
+        verdict: The decision outcome (accepted, rejected, escalated,
+            and so on).
+        reason: A short machine-readable reason, or None when the
+            verdict is self-explanatory.
+    """
+
+    step: str
+    candidate: int | None
+    verdict: str
+    reason: str | None
+
+
+class EvidenceReceipt(TypedDict):
+    """The evidence that supports a verifier's verdict.
+
+    Attributes:
+        evidence_ids: Stable identifiers for the evidence items the
+            verifier examined.
+        artifacts_checked: File paths or artifact names the verifier
+            read.
+        commands_run: Commands the verifier executed, in order.
+    """
+
+    evidence_ids: list[str]
+    artifacts_checked: list[str]
+    commands_run: list[str]
 
 
 RETRY_POLICY_BY_CATEGORY: MappingProxyType[FailureCategory, str] = MappingProxyType(
@@ -58,12 +121,12 @@ RETRY_POLICY_BY_CATEGORY: MappingProxyType[FailureCategory, str] = MappingProxyT
 )
 
 
-# Best-fit mapping from the seven categories to the five outcome
-# strings enforced by migration 002's CHECK constraint. The category
-# column carries the precise reason; the outcome column carries the
-# closest coarse bucket. Two categories share schema_violation and
-# three share timeout because the earlier CHECK does not distinguish
-# them; the finer distinction lives in failure_category.
+# Best-fit mapping from the seven categories to the five outcome strings
+# enforced by migration 002's CHECK constraint. The category column
+# carries the precise reason; the outcome column carries the closest
+# coarse bucket. Two categories share schema_violation and three share
+# timeout because the earlier CHECK does not distinguish them; the
+# finer distinction lives in failure_category.
 _OUTCOME_BY_CATEGORY: MappingProxyType[FailureCategory, str] = MappingProxyType(
     {
         "localization": "schema_violation",
@@ -110,12 +173,16 @@ def record_call(
     context: str | None = None,
     output: str | None = None,
     model_options: Mapping[str, object] | None = None,
+    tool_chain: Sequence[ToolChainEntry] | None = None,
+    decision_log: Sequence[DecisionLogEntry] | None = None,
+    model_reasoning: str | None = None,
+    evidence_receipt: EvidenceReceipt | None = None,
 ) -> str:
     """Write one agent_calls row and return its call_id.
 
     Args:
         store: The open SQLiteStore to write into. Migrations 001, 002,
-            and 003 must have been applied.
+            003, and 004 must have been applied.
         role: One of the nine agent roles. Enforced by a CHECK
             constraint on the table.
         outcome: One of the five values permitted by migration 002's
@@ -130,7 +197,7 @@ def record_call(
         call_id: Pre-generated ID. When None, a UUID4 is generated.
         run_id: Optional locator. None for isolated eval runs.
         phase_id: Optional locator. None for isolated eval runs.
-        target_symbol: The target being worked on, e.g.
+        target_symbol: The target being worked on, for example
             ``"Session.send"``.
         prompt_role: The prompt role. Usually equal to ``role``.
         prompt_version: The prompt version used.
@@ -144,6 +211,14 @@ def record_call(
         output: The agent's output. Hashed, not stored.
         model_options: The ModelOptions fields (temperature,
             max_tokens, seed) serialised as JSON.
+        tool_chain: The ordered tool invocations made during this
+            call. Serialised as JSON.
+        decision_log: The ordered decision events recorded during this
+            call. Serialised as JSON.
+        model_reasoning: The model's reasoning trace, when the
+            provider returns one. Stored as plain text.
+        evidence_receipt: The evidence that supported a verifier's
+            verdict. Serialised as JSON.
 
     Returns:
         The call_id that was written.
@@ -151,8 +226,9 @@ def record_call(
     Raises:
         CodeGuardianError: ``SYS_INTERNAL`` from the store on any
             SQLite failure, including a CHECK constraint violation
-            (invalid role, invalid outcome, invalid verdict_reason
-            values are not CHECK-constrained so those pass through).
+            (invalid role, invalid outcome). The verdict_reason and
+            failure_category values are not CHECK-constrained, so
+            unrecognised values pass through unchanged.
     """
     if call_id is None:
         call_id = str(uuid.uuid4())
@@ -167,8 +243,9 @@ def record_call(
             tokens_in, tokens_out, latency_ms, outcome,
             refusal_code, retry_count, output_hash, created_at,
             prompt_hash, context_hash, failure_category,
-            verdict_reason, model_options
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            verdict_reason, model_options, tool_chain,
+            decision_log, model_reasoning, evidence_receipt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             call_id,
@@ -192,6 +269,44 @@ def record_call(
             failure_category,
             verdict_reason,
             json.dumps(dict(model_options), sort_keys=True) if model_options is not None else None,
+            json.dumps([dict(entry) for entry in tool_chain], sort_keys=True)
+            if tool_chain is not None
+            else None,
+            json.dumps([dict(entry) for entry in decision_log], sort_keys=True)
+            if decision_log is not None
+            else None,
+            model_reasoning,
+            json.dumps(dict(evidence_receipt), sort_keys=True)
+            if evidence_receipt is not None
+            else None,
         ),
     )
     return call_id
+
+
+def try_record_call(**kwargs: Any) -> str | None:
+    """Record a call when an active store is present, else skip.
+
+    Convenience wrapper around ``record_call`` for agents that should
+    write telemetry when a store is set (a full pipeline run) and skip
+    silently when one is not (isolated eval and unit test contexts).
+
+    The active store is read from the ``_store_context`` ContextVar.
+    The import is local to avoid a module-level cycle between
+    ``telemetry`` and ``_store_context`` inside the agents package.
+
+    Args:
+        **kwargs: Forwarded verbatim to ``record_call``. The ``store``
+            argument is supplied by this function and must not be
+            passed by the caller.
+
+    Returns:
+        The call_id when a store was present, or None when the write
+        was skipped.
+    """
+    from codeguardian.core.agents import _store_context
+
+    store = _store_context.get_active_store()
+    if store is None:
+        return None
+    return record_call(store, **kwargs)

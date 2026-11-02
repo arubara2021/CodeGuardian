@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("codeguardian._native")
+from dataclasses import replace
 
 from codeguardian import _native
+from codeguardian.core.agents._verifier_common import ExecutionOutcome
 from codeguardian.core.agents.analyst import RefactorChange, RefactorSpec
 from codeguardian.core.agents.blast import BlastResult
 from codeguardian.core.agents.writer import (
@@ -271,3 +273,164 @@ class TestPreCheckFunctions:
             _SOURCE, "def parse(a, b, c):\n    return a\n    x = 1\n    y = 2\n"
         )
         assert small < large
+
+
+class FakeExecutableSandbox:
+    """SandboxExecutor with write_file that returns queued outcomes."""
+
+    def __init__(self) -> None:
+        self._files: dict[str, str] = {}
+        self._queue: list[tuple[int, str, str]] = []
+        self.calls: list[list[str]] = []
+
+    def write_file(self, path: str, content: str) -> None:
+        self._files[path] = content
+
+    def run(self, argv: list[str], *, timeout_s: float = 120.0) -> ExecutionOutcome:
+        self.calls.append(list(argv))
+        if self._queue:
+            exit_code, stdout, stderr = self._queue.pop(0)
+            return ExecutionOutcome(exit_code=exit_code, stdout=stdout, stderr=stderr)
+        return ExecutionOutcome(exit_code=0, stdout="", stderr="")
+
+    def queue_result(self, exit_code: int, stdout: str = "", stderr: str = "") -> None:
+        self._queue.append((exit_code, stdout, stderr))
+
+    def files(self) -> dict[str, str]:
+        return dict(self._files)
+
+
+def _block_blast() -> BlastResult:
+    """Return a blast result with recommendation_adjusted set to block."""
+    return replace(_make_blast(), recommendation_adjusted="block")
+
+
+class TestWriterStatus:
+    async def test_success_status_and_empty_requires(self, workspace, registry) -> None:
+        provider = FakeProvider([_VALID_CANDIDATE, _VALID_CANDIDATE, _VALID_CANDIDATE])
+        root, cpg = workspace
+        with cpg_available(cpg, root):
+            result = await WriterAgent().run(_make_input(workspace, registry, provider))
+        assert result.status == "success"
+        assert result.is_refusal is False
+        assert result.requires == ()
+
+    async def test_partial_status_and_human_approval_requires(self, workspace, registry) -> None:
+        provider = FakeProvider([_VALID_CANDIDATE, _VALID_CANDIDATE, _VALID_CANDIDATE])
+        inp = replace(
+            _make_input(workspace, registry, provider),
+            blast=_block_blast(),
+        )
+        root, cpg = workspace
+        with cpg_available(cpg, root):
+            result = await WriterAgent().run(inp)
+        assert result.status == "partial"
+        assert result.is_refusal is False
+        assert result.requires == ("human_approval",)
+        assert len(result.candidates) == 3
+
+    async def test_refused_status_when_no_survivors(self, workspace, registry) -> None:
+        invalid = "def parse(raw:\n    return None\n"
+        provider = FakeProvider([invalid, invalid, invalid])
+        root, cpg = workspace
+        with cpg_available(cpg, root):
+            result = await WriterAgent().run(_make_input(workspace, registry, provider))
+        assert result.status == "refused"
+        assert result.is_refusal is True
+        assert result.requires == ()
+        assert result.candidates == ()
+
+
+class TestWriterSandboxVerification:
+    async def test_passing_test_sets_tests_pass_true(self, workspace, registry) -> None:
+        provider = FakeProvider([_VALID_CANDIDATE])
+        executor = FakeExecutableSandbox()
+        executor.queue_result(exit_code=0, stdout="1 passed")
+        inp = replace(
+            _make_input(workspace, registry, provider),
+            n_candidates=1,
+            sandbox_executor=executor,
+            characterization_test_path="test_parse.py",
+        )
+        root, cpg = workspace
+        with cpg_available(cpg, root):
+            result = await WriterAgent().run(inp)
+        assert result.candidates[0].verification is not None
+        assert result.candidates[0].verification["tests_pass"] is True
+        assert result.candidates[0].verification["splices"] is True
+        assert result.candidates[0].verification["parses"] is True
+        assert len(executor.calls) == 1
+
+    async def test_failing_test_sets_tests_pass_false(self, workspace, registry) -> None:
+        provider = FakeProvider([_VALID_CANDIDATE])
+        executor = FakeExecutableSandbox()
+        executor.queue_result(exit_code=1, stderr="AssertionError: 1 != 2")
+        inp = replace(
+            _make_input(workspace, registry, provider),
+            n_candidates=1,
+            sandbox_executor=executor,
+            characterization_test_path="test_parse.py",
+        )
+        root, cpg = workspace
+        with cpg_available(cpg, root):
+            result = await WriterAgent().run(inp)
+        assert result.candidates[0].verification is not None
+        assert result.candidates[0].verification["tests_pass"] is False
+
+    async def test_no_sandbox_leaves_verification_defaults(self, workspace, registry) -> None:
+        provider = FakeProvider([_VALID_CANDIDATE])
+        inp = replace(
+            _make_input(workspace, registry, provider),
+            n_candidates=1,
+        )
+        root, cpg = workspace
+        with cpg_available(cpg, root):
+            result = await WriterAgent().run(inp)
+        assert result.candidates[0].verification is not None
+        assert result.candidates[0].verification["tests_pass"] is None
+        assert result.candidates[0].verification["verifier_score"] is None
+
+    async def test_verifier_gated_ranking_prefers_passing(self, workspace, registry) -> None:
+        partial = "def parse(raw: str):\n    return raw.strip()\n"
+        full = _VALID_CANDIDATE
+        provider = FakeProvider([partial, full, full])
+        executor = FakeExecutableSandbox()
+        executor.queue_result(exit_code=0)
+        executor.queue_result(exit_code=1)
+        executor.queue_result(exit_code=1)
+        inp = replace(
+            _make_input(workspace, registry, provider),
+            sandbox_executor=executor,
+            characterization_test_path="test_parse.py",
+        )
+        root, cpg = workspace
+        with cpg_available(cpg, root):
+            result = await WriterAgent().run(inp)
+        assert len(result.candidates) == 3
+        assert result.candidates[0].verification["tests_pass"] is True
+        assert result.candidates[0].source == partial
+
+
+class TestWriterVerifierScore:
+    async def test_verifier_score_influences_ranking(self, workspace, registry) -> None:
+        partial = "def parse(raw: str):\n    return raw.strip()\n"
+        full = _VALID_CANDIDATE
+
+        def score_fn(source: str) -> float:
+            if source == partial:
+                return 90.0
+            return 50.0
+
+        provider = FakeProvider([partial, full])
+        inp = replace(
+            _make_input(workspace, registry, provider),
+            n_candidates=2,
+            verifier_score_fn=score_fn,
+        )
+        root, cpg = workspace
+        with cpg_available(cpg, root):
+            result = await WriterAgent().run(inp)
+        assert len(result.candidates) == 2
+        assert result.candidates[0].source == partial
+        assert result.candidates[0].verification["verifier_score"] == 90.0
+        assert result.candidates[1].verification["verifier_score"] == 50.0

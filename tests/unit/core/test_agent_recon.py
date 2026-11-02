@@ -245,3 +245,278 @@ async def test_missing_clone_root_raises(
             )
         )
     assert exc_info.value.code is ErrorCode.FILE_NOT_FOUND
+
+
+class TestRepoMap:
+    async def test_repo_map_populated(self, clone_root: Path, tmp_path: Path) -> None:
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=clone_root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        repo_map = result.artifact["extensions"]["repo_map"]
+        assert isinstance(repo_map, list)
+        assert len(repo_map) >= 1
+        for entry in repo_map:
+            assert "path" in entry
+            assert "importance" in entry
+            assert "symbols" in entry
+            assert "token_cost" in entry
+            assert "total_file_tokens" in entry
+
+    async def test_repo_map_respects_token_budget(self, clone_root: Path, tmp_path: Path) -> None:
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=clone_root,
+                cpg_output_dir=tmp_path / "cpg",
+                repo_map_token_budget=5,
+            )
+        )
+        repo_map = result.artifact["extensions"]["repo_map"]
+        assert len(repo_map) >= 1
+        if len(repo_map) > 1:
+            total = sum(e["token_cost"] for e in repo_map)
+            assert total <= 5
+
+    async def test_repo_map_target_file_scores_higher(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "target.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+        (root / "a.py").write_text("from target import helper\n", encoding="utf-8")
+        (root / "b.py").write_text("from target import helper\n", encoding="utf-8")
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        importance = {
+            entry["path"]: entry["importance"]
+            for entry in result.artifact["extensions"]["repo_map"]
+        }
+        assert importance["target.py"] > importance["a.py"]
+        assert importance["target.py"] > importance["b.py"]
+
+
+class TestMultiLanguageImports:
+    async def test_typescript_relative_import_resolved(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "c.ts").write_text(
+            "export function helper(): number {\n    return 1;\n}\n",
+            encoding="utf-8",
+        )
+        (root / "d.ts").write_text(
+            "import { helper } from './c';\n"
+            "export function run(): number {\n    return helper();\n}\n",
+            encoding="utf-8",
+        )
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        edges = result.artifact["dependency_graph"]["edges"]
+        assert any(e["from"] == "d.ts" and e["to"] == "c.ts" for e in edges), edges
+
+    async def test_java_import_resolved_by_basename(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "Foo.java").write_text(
+            "public class Foo {\n    public static int helper() { return 1; }\n}\n",
+            encoding="utf-8",
+        )
+        (root / "Bar.java").write_text(
+            "import Foo;\n"
+            "public class Bar {\n"
+            "    public static int run() { return Foo.helper(); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        edges = result.artifact["dependency_graph"]["edges"]
+        assert any(e["from"] == "Bar.java" and e["to"] == "Foo.java" for e in edges), edges
+
+    async def test_mixed_repo_has_both_edges(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "a.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+        (root / "b.py").write_text("from a import helper\n", encoding="utf-8")
+        (root / "c.ts").write_text(
+            "export function x(): number {\n    return 1;\n}\n",
+            encoding="utf-8",
+        )
+        (root / "d.ts").write_text("import { x } from './c';\n", encoding="utf-8")
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        edges = result.artifact["dependency_graph"]["edges"]
+        assert any(e["from"] == "b.py" and e["to"] == "a.py" for e in edges)
+        assert any(e["from"] == "d.ts" and e["to"] == "c.ts" for e in edges)
+
+
+class TestProjectDetection:
+    async def test_pytest_detected_from_pyproject(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "pyproject.toml").write_text(
+            '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
+            encoding="utf-8",
+        )
+        (root / "main.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        ext = result.artifact["extensions"]
+        assert "pytest" in ext["test_frameworks"]
+        assert ext["test_command"] == "pytest"
+
+    async def test_jest_detected_from_package_json(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "package.json").write_text(
+            '{"devDependencies": {"jest": "^29.0.0"}}', encoding="utf-8"
+        )
+        (root / "main.js").write_text("function f() { return 1; }\n", encoding="utf-8")
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        ext = result.artifact["extensions"]
+        assert "jest" in ext["test_frameworks"]
+
+    async def test_cargo_detected_from_cargo_toml(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "Cargo.toml").write_text('[package]\nname = "test"\n', encoding="utf-8")
+        (root / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        ext = result.artifact["extensions"]
+        assert ext["build_system"] == "cargo"
+        assert "cargo test" in ext["test_frameworks"]
+        assert ext["test_command"] == "cargo test"
+
+    async def test_no_indicators_returns_empty(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "main.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        ext = result.artifact["extensions"]
+        assert ext["test_frameworks"] == []
+        assert ext["test_command"] is None
+        assert ext["build_system"] is None
+
+
+class TestConventions:
+    async def test_agents_md_read(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "AGENTS.md").write_text(
+            "# Conventions\n\nUse black for formatting.\n",
+            encoding="utf-8",
+        )
+        (root / "main.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        conventions = result.artifact["extensions"]["conventions"]
+        assert "AGENTS.md" in conventions["agent_files"]
+        assert "Use black" in conventions["agent_files"]["AGENTS.md"]
+
+    async def test_configs_detected(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / ".eslintrc.json").write_text("{}", encoding="utf-8")
+        (root / "tsconfig.json").write_text("{}", encoding="utf-8")
+        (root / "main.js").write_text("function f() { return 1; }\n", encoding="utf-8")
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        configs = result.artifact["extensions"]["conventions"]["configs_present"]
+        assert ".eslintrc.json" in configs
+        assert "tsconfig.json" in configs
+
+
+class TestReportStatusesExtensions:
+    async def test_new_statuses_present(self, clone_root: Path, tmp_path: Path) -> None:
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=clone_root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        statuses = result.artifact["extensions"]["report_statuses"]
+        assert "repo_map" in statuses
+        assert "conventions" in statuses
+        assert statuses["repo_map"] in ("complete", "partial", "skipped")
+        assert statuses["conventions"] in ("complete", "partial", "skipped")

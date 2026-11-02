@@ -14,6 +14,7 @@ from codeguardian.core.agents import analyst as analyst_module
 from codeguardian.core.agents.analyst import (
     AnalystAgent,
     AnalystInput,
+    Clarification,
 )
 from codeguardian.core.agents.blast import BlastResult
 from codeguardian.core.agents.recon import ReconResult
@@ -231,7 +232,7 @@ class TestRefactorSpec:
             )
         )
         kinds = [c.kind for c in result.spec.changes]
-        assert "apply_directive" in kinds
+        assert "rename_symbol" in kinds
         assert "parameter_annotation" not in kinds
         assert "return_annotation" not in kinds
 
@@ -347,3 +348,240 @@ class TestRefusal:
         assert result.is_refusal is True
         assert result.context_pack_artifact is None
         assert "budget" in result.context_pack.reason.lower()
+
+
+class TestChangeKindDetection:
+    async def test_rename_produces_rename_symbol(self, workspace, registry) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="rename raw to data",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        kinds = [c.kind for c in result.spec.changes]
+        assert "rename_symbol" in kinds
+
+    async def test_extract_produces_extract_function(self, workspace, registry) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="extract the inner loop into a helper",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        kinds = [c.kind for c in result.spec.changes]
+        assert "extract_function" in kinds
+
+    async def test_add_docstring_produces_add_docstring(self, workspace, registry) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="add a docstring",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        kinds = [c.kind for c in result.spec.changes]
+        assert "add_docstring" in kinds
+
+    async def test_add_guard_produces_add_guard(self, workspace, registry) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="add a guard clause for null input",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        kinds = [c.kind for c in result.spec.changes]
+        assert "add_guard" in kinds
+
+    async def test_type_hints_directive_still_produces_apply_directive(
+        self, workspace, registry
+    ) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="add type hints",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        kinds = [c.kind for c in result.spec.changes]
+        assert "apply_directive" in kinds
+        assert "parameter_annotation" in kinds
+        assert "return_annotation" in kinds
+
+    async def test_type_hints_parameter_does_not_trigger_add_parameter(
+        self, workspace, registry
+    ) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="add type hints to every parameter and the return type",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        kinds = [c.kind for c in result.spec.changes]
+        assert "add_parameter" not in kinds
+        assert "change_return_type" not in kinds
+        assert "apply_directive" in kinds
+
+
+class TestChangeMetadata:
+    async def test_change_carries_acceptance_criteria(self, workspace, registry) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="rename raw to data",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        change = next(c for c in result.spec.changes if c.kind == "rename_symbol")
+        assert len(change.acceptance) > 0
+
+    async def test_change_carries_risk(self, workspace, registry) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="rename raw to data",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        change = next(c for c in result.spec.changes if c.kind == "rename_symbol")
+        assert change.risk in ("low", "medium", "high")
+
+    async def test_change_carries_reversibility(self, workspace, registry) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="rename raw to data",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        change = next(c for c in result.spec.changes if c.kind == "rename_symbol")
+        assert change.reversibility in ("easy", "medium", "hard")
+
+
+class TestClarification:
+    async def test_ambiguous_directive_produces_needs_input(self, workspace, registry) -> None:
+        provider = FakeProvider([])
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="improve it",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        assert result.status == "needs_input"
+        assert result.needs_input is True
+        assert result.is_refusal is False
+        assert result.is_usable is False
+
+    async def test_clarification_has_question_and_options(self, workspace, registry) -> None:
+        provider = FakeProvider([])
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="optimize",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        assert result.clarification is not None
+        assert isinstance(result.clarification, Clarification)
+        assert len(result.clarification.question) > 0
+        assert len(result.clarification.options) > 0
+        assert result.clarification.default is not None
+
+    async def test_needs_input_has_no_context_pack_artifact(self, workspace, registry) -> None:
+        provider = FakeProvider([])
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="improve",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        assert result.context_pack_artifact is None
+        assert result.context_pack.files == ()
+
+    async def test_single_word_unmatched_directive_needs_input(self, workspace, registry) -> None:
+        provider = FakeProvider([])
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="adjust",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        assert result.status == "needs_input"
+        assert result.clarification is not None
+
+    async def test_known_kind_single_word_still_plans(self, workspace, registry) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="docstring",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        assert result.status == "success"
+        assert result.is_usable is True
+
+
+class TestAlternatives:
+    async def test_alternatives_empty_by_default(self, workspace, registry) -> None:
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        result = await AnalystAgent().run(
+            _make_input(
+                workspace=workspace,
+                directive="add type hints",
+                registry=registry,
+                provider=provider,
+            )
+        )
+        assert result.alternatives == ()

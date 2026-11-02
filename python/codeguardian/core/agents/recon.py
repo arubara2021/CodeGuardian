@@ -1,19 +1,36 @@
 """Recon agent.
 
 Deterministic. Reads source files from a clone root, builds the Code
-Property Graph, extracts the dependency graph from Python imports,
-builds the hierarchical symbol index, detects entrypoints, and returns
-an artifact conforming to ``recon.json``.
+Property Graph, extracts the dependency graph from imports in every
+supported language, builds the hierarchical symbol index, detects
+entrypoints, builds a PageRank-ordered repo map under a token budget,
+detects the project's test framework and build system, and reads the
+project's convention files.
 
-The eleven required fields are all present. Fields whose analysis is
-outside Phase 11 scope (smoke test, truth report, drift report) carry
-an explicit status in ``extensions.report_statuses`` so a downstream
-consumer cannot mistake "not analyzed" for "no findings".
+The eleven required fields are all present on the artifact. Fields
+whose analysis is outside Phase 11 scope (smoke test, truth report,
+drift report) carry an explicit status in ``extensions.report_statuses``
+so a downstream consumer cannot mistake "not analyzed" for "no
+findings".
+
+Multi-language import resolution is best-effort. Python imports are
+resolved by AST against the file set. TypeScript and JavaScript
+relative imports are resolved by joining the importing file's
+directory with the module path and trying extensions. Java imports are
+resolved by matching the imported class's basename against file
+basenames anywhere in the repo, which is correct for single-file-per-
+class projects and approximate otherwise. Go and Rust imports are
+extracted but not resolved; the module path semantics of those two
+languages do not map cleanly to file-level edges without a compiler's
+view of the workspace. The ``dependency_graph`` status reflects this:
+it is ``complete`` for Python-only repos and ``partial`` otherwise.
 """
 
 from __future__ import annotations
 
 import ast
+import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -85,16 +102,75 @@ _TIER: dict[str, str] = {
     "cpp": "best-effort",
 }
 
+_CONVENTION_FILES: tuple[str, ...] = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".cursorrules",
+    "CONVENTIONS.md",
+)
+
+_CONFIG_INDICATORS: tuple[str, ...] = (
+    "pyproject.toml",
+    "setup.cfg",
+    "setup.py",
+    "tox.ini",
+    "mypy.ini",
+    "pyrightconfig.json",
+    ".ruff.toml",
+    "ruff.toml",
+    ".eslintrc",
+    ".eslintrc.js",
+    ".eslintrc.json",
+    "eslint.config.js",
+    ".prettierrc",
+    ".prettierrc.json",
+    "tsconfig.json",
+    "package.json",
+    "go.mod",
+    "Cargo.toml",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+)
+
+
+_TS_JS_IMPORT_FROM_RE = re.compile(r"""^\s*import\s+[^'"]*?from\s+['"]([^'"]+)['"]""", re.MULTILINE)
+_TS_JS_IMPORT_BARE_RE = re.compile(r"""^\s*import\s+['"]([^'"]+)['"]""", re.MULTILINE)
+_TS_JS_REQUIRE_RE = re.compile(r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)""")
+
+_JAVA_IMPORT_RE = re.compile(r"^\s*import\s+(?:static\s+)?([\w.]+)\s*;", re.MULTILINE)
+
+_GO_SINGLE_IMPORT_RE = re.compile(r'^\s*import\s+"([^"]+)"', re.MULTILINE)
+_GO_BLOCK_IMPORT_RE = re.compile(r"^\s*import\s*\((.*?)^\s*\)", re.MULTILINE | re.DOTALL)
+_GO_IMPORT_LINE_RE = re.compile(r'^\s*(?:\w+\s+)?"([^"]+)"', re.MULTILINE)
+
+_RUST_USE_RE = re.compile(r"^\s*use\s+([\w:]+)", re.MULTILINE)
+
 
 @dataclass(frozen=True, slots=True)
 class ReconInput:
-    """Input to the recon agent."""
+    """Input to the recon agent.
+
+    Attributes:
+        repo_url: The repository URL for the artifact's ``repo`` section.
+        provider: The provider name for the artifact's ``repo`` section.
+        commit_hash: The commit hash; used for the CPG output filename.
+        clone_root: The local clone root.
+        cpg_output_dir: The directory the CPG file is written to.
+        repo_map_token_budget: Token budget for the repo map. A file
+            that would push the running total over this budget is not
+            added unless it is the first entry. Defaults to 8000.
+        conventions_token_budget: Token budget for the combined content
+            of every convention file read. Defaults to 2000.
+    """
 
     repo_url: str
     provider: str
     commit_hash: str
     clone_root: Path
     cpg_output_dir: Path
+    repo_map_token_budget: int = 8000
+    conventions_token_budget: int = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,8 +211,8 @@ class ReconAgent:
 
         Raises:
             CodeGuardianError: With code FILE_NOT_FOUND when the clone
-                root is not a directory; with SYS_NOT_IMPLEMENTED when
-                the native kernel is unavailable.
+                root is not a directory or contains no source files;
+                SYS_NOT_IMPLEMENTED when the kernel is unavailable.
         """
         try:
             from codeguardian import _native
@@ -176,8 +252,26 @@ class ReconAgent:
         hierarchical_index = _build_hierarchical_index(cpg_bytes, files)
         entrypoints = _build_entrypoints(files)
 
+        file_importance = _compute_pagerank(files, dependency_graph)
+        repo_map = _build_repo_map(
+            files=files,
+            hierarchical_index=hierarchical_index,
+            file_importance=file_importance,
+            token_budget=input.repo_map_token_budget,
+        )
+        file_token_cost = {rel: max(1, len(source) // 4) for rel, _lang, source in files}
+        test_setup = _detect_test_setup(input.clone_root, files)
+        build_system, build_command = _detect_build_system(input.clone_root)
+        conventions = _read_conventions(input.clone_root, input.conventions_token_budget)
+
         dependency_status = (
             "complete" if all(lang == "python" for _, lang, _ in files) else "partial"
+        )
+        repo_map_status = "complete" if repo_map else "skipped"
+        conventions_status = (
+            "complete"
+            if conventions["agent_files"] or conventions["configs_present"]
+            else "skipped"
         )
 
         artifact: dict[str, Any] = {
@@ -213,7 +307,18 @@ class ReconAgent:
                     "smoke_test": "skipped",
                     "truth_report": "skipped",
                     "drift_report": "skipped",
-                }
+                    "repo_map": repo_map_status,
+                    "conventions": conventions_status,
+                },
+                "repo_map": repo_map,
+                "test_frameworks": test_setup["test_frameworks"],
+                "test_roots": test_setup["test_roots"],
+                "test_command": test_setup["test_command"],
+                "build_system": build_system,
+                "build_command": build_command,
+                "conventions": conventions,
+                "file_importance": {rel: round(score, 6) for rel, score in file_importance.items()},
+                "file_token_cost": file_token_cost,
             },
         }
 
@@ -237,8 +342,8 @@ def _enumerate_source_files(
 ) -> list[tuple[str, str, str]]:
     """Return (relative_path, language, source) per source file, sorted.
 
-    Sorting ensures the CPG build order is deterministic across runs on
-    the same input.
+    Sorting ensures the CPG build order and the repo map order are
+    deterministic across runs on the same input.
     """
     results: list[tuple[str, str, str]] = []
     for path in clone_root.rglob("*"):
@@ -300,20 +405,21 @@ def _build_structural_section(
 def _build_dependency_graph(
     files: list[tuple[str, str, str]],
 ) -> dict[str, Any]:
-    """Return the dependency graph extracted from Python imports.
+    """Return the file-level dependency graph.
 
-    Only Python files contribute edges. The schema permits an empty
-    edge list; a repository with no Python files produces nodes only.
+    Extraction is per-language. Resolution to file-level edges is done
+    for Python, TypeScript, JavaScript, and Java. Go and Rust imports
+    are extracted by ``_extract_imports`` but not resolved to edges;
+    their module path semantics do not map cleanly to file paths
+    without a compiler's view of the workspace.
     """
     nodes = [{"id": rel, "type": "file", "language": language} for rel, language, _ in files]
     files_set = {rel for rel, _, _ in files}
     edges: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for rel, language, source in files:
-        if language != "python":
-            continue
-        for module, _name in _extract_python_imports(source):
-            target = _resolve_python_import(module, files_set)
+        for module in _extract_imports(language, source):
+            target = _resolve_import(language, module, rel, files_set)
             if target is None or target == rel:
                 continue
             key = (rel, target)
@@ -322,6 +428,37 @@ def _build_dependency_graph(
             seen.add(key)
             edges.append({"from": rel, "to": target, "kind": "import"})
     return {"nodes": nodes, "edges": edges}
+
+
+def _extract_imports(language: str, source: str) -> list[str]:
+    """Return the import module strings for a source file."""
+    if language == "python":
+        return [module for module, _name in _extract_python_imports(source)]
+    if language in ("typescript", "javascript"):
+        return _extract_ts_js_imports(source)
+    if language == "java":
+        return _extract_java_imports(source)
+    if language == "go":
+        return _extract_go_imports(source)
+    if language == "rust":
+        return _extract_rust_imports(source)
+    return []
+
+
+def _resolve_import(
+    language: str,
+    module: str,
+    source_path: str,
+    files_set: set[str],
+) -> str | None:
+    """Resolve an import module string to a file path, or None."""
+    if language == "python":
+        return _resolve_python_import(module, files_set)
+    if language in ("typescript", "javascript"):
+        return _resolve_ts_js_import(module, source_path, files_set)
+    if language == "java":
+        return _resolve_java_import(module, files_set)
+    return None
 
 
 def _extract_python_imports(source: str) -> list[tuple[str, str]]:
@@ -347,6 +484,39 @@ def _extract_python_imports(source: str) -> list[tuple[str, str]]:
     return result
 
 
+def _extract_ts_js_imports(source: str) -> list[str]:
+    """Return module specifiers from ES6 imports and CommonJS requires."""
+    result: list[str] = []
+    for match in _TS_JS_IMPORT_FROM_RE.finditer(source):
+        result.append(match.group(1))
+    for match in _TS_JS_IMPORT_BARE_RE.finditer(source):
+        result.append(match.group(1))
+    for match in _TS_JS_REQUIRE_RE.finditer(source):
+        result.append(match.group(1))
+    return result
+
+
+def _extract_java_imports(source: str) -> list[str]:
+    """Return fully qualified class names from Java import statements."""
+    return [match.group(1) for match in _JAVA_IMPORT_RE.finditer(source)]
+
+
+def _extract_go_imports(source: str) -> list[str]:
+    """Return import paths from Go single-line and grouped imports."""
+    result: list[str] = []
+    for match in _GO_SINGLE_IMPORT_RE.finditer(source):
+        result.append(match.group(1))
+    for block in _GO_BLOCK_IMPORT_RE.finditer(source):
+        for match in _GO_IMPORT_LINE_RE.finditer(block.group(1)):
+            result.append(match.group(1))
+    return result
+
+
+def _extract_rust_imports(source: str) -> list[str]:
+    """Return module paths from Rust ``use`` statements."""
+    return [match.group(1) for match in _RUST_USE_RE.finditer(source)]
+
+
 def _resolve_python_import(module: str, files_set: set[str]) -> str | None:
     """Resolve a dotted Python module to a file path in ``files_set``."""
     base = module.replace(".", "/")
@@ -354,6 +524,59 @@ def _resolve_python_import(module: str, files_set: set[str]) -> str | None:
         if candidate in files_set:
             return candidate
     return None
+
+
+def _resolve_ts_js_import(
+    module: str,
+    source_path: str,
+    files_set: set[str],
+) -> str | None:
+    """Resolve a TypeScript or JavaScript import against the file set.
+
+    Only relative specifiers (``./`` and ``../``) are resolved. Bare
+    specifiers name npm packages and are not part of the repo.
+    """
+    if not module.startswith((".", "/")):
+        return None
+    base_dir = "/".join(source_path.split("/")[:-1])
+    rel = module[2:] if module.startswith("./") else module.lstrip("/")
+    candidate_dir = _normalize_path_join(base_dir, rel)
+    for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+        for suffix in (ext, f"/index{ext}"):
+            candidate = f"{candidate_dir}{suffix}"
+            if candidate in files_set:
+                return candidate
+    return None
+
+
+def _resolve_java_import(module: str, files_set: set[str]) -> str | None:
+    """Resolve a Java import to a file path by class basename.
+
+    The imported class's simple name is matched against every Java file
+    whose basename equals ``<ClassName>.java``. This is correct for
+    single-file-per-class projects and approximate otherwise.
+    """
+    last = module.rsplit(".", 1)[-1]
+    target_file = f"{last}.java"
+    matches = sorted(
+        rel for rel in files_set if rel == target_file or rel.endswith(f"/{target_file}")
+    )
+    return matches[0] if matches else None
+
+
+def _normalize_path_join(base: str, rel: str) -> str:
+    """Join two POSIX-like path fragments and normalise ``..`` segments."""
+    parts = (base.split("/") if base else []) + rel.split("/")
+    out: list[str] = []
+    for part in parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if out:
+                out.pop()
+            continue
+        out.append(part)
+    return "/".join(out)
 
 
 def _build_hierarchical_index(
@@ -404,30 +627,12 @@ def _build_entrypoints(
         for node in tree.body:
             if isinstance(node, ast.If):
                 if _is_main_guard(node):
-                    entrypoints.append(
-                        {
-                            "file": rel,
-                            "line": node.lineno,
-                            "type": "script",
-                        }
-                    )
+                    entrypoints.append({"file": rel, "line": node.lineno, "type": "script"})
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if node.name == "main":
-                    entrypoints.append(
-                        {
-                            "file": rel,
-                            "line": node.lineno,
-                            "type": "function",
-                        }
-                    )
+                    entrypoints.append({"file": rel, "line": node.lineno, "type": "function"})
             elif isinstance(node, ast.ClassDef) and node.name == "main":
-                entrypoints.append(
-                    {
-                        "file": rel,
-                        "line": node.lineno,
-                        "type": "class",
-                    }
-                )
+                entrypoints.append({"file": rel, "line": node.lineno, "type": "class"})
     return entrypoints
 
 
@@ -447,6 +652,230 @@ def _is_main_guard(node: ast.If) -> bool:
     )
 
 
+def _compute_pagerank(
+    files: list[tuple[str, str, str]],
+    dependency_graph: dict[str, Any],
+    iterations: int = 20,
+    damping: float = 0.85,
+) -> dict[str, float]:
+    """Return PageRank importance per file over the import graph.
+
+    The import graph is directed: an edge ``from -> to`` means the
+    source file imports the target file. PageRank over the reversed
+    graph makes a file that many files import score higher than a file
+    that imports many files.
+
+    The algorithm runs ``iterations`` power iterations. For a graph of
+    a few hundred nodes the loop is imperceptible; for a graph of tens
+    of thousands of nodes the caller should reduce ``iterations``.
+    """
+    nodes = [rel for rel, _, _ in files]
+    if not nodes:
+        return {}
+
+    out_edges: dict[str, set[str]] = {n: set() for n in nodes}
+    node_set = set(nodes)
+    for edge in dependency_graph.get("edges", []):
+        src = edge.get("from")
+        dst = edge.get("to")
+        if src in node_set and dst in node_set and src != dst:
+            out_edges[src].add(dst)
+
+    incoming: dict[str, list[str]] = {n: [] for n in nodes}
+    out_degree: dict[str, int] = {}
+    for src, targets in out_edges.items():
+        out_degree[src] = len(targets)
+        for dst in targets:
+            incoming[dst].append(src)
+
+    n = len(nodes)
+    ranks: dict[str, float] = dict.fromkeys(nodes, 1.0 / n)
+    base = (1.0 - damping) / n
+    for _ in range(iterations):
+        new_ranks: dict[str, float] = {}
+        for node in nodes:
+            total = 0.0
+            for src in incoming[node]:
+                degree = out_degree.get(src, 0)
+                if degree > 0:
+                    total += ranks[src] / degree
+            new_ranks[node] = base + damping * total
+        ranks = new_ranks
+    return ranks
+
+
+def _build_repo_map(
+    files: list[tuple[str, str, str]],
+    hierarchical_index: dict[str, list[str]],
+    file_importance: dict[str, float],
+    token_budget: int,
+) -> list[dict[str, Any]]:
+    """Return the repo map: top files by PageRank, under a token budget.
+
+    Each entry contains the file's path, its PageRank importance, its
+    symbol list from the hierarchical index, an estimated token cost
+    for the entry, and the estimated total token cost of the file's
+    source. Token estimation uses four characters per token. The first
+    entry is always included even when it exceeds the budget; subsequent
+    entries are added while the running total plus the entry's cost
+    stays at or under the budget.
+    """
+    source_by_path = {rel: src for rel, _, src in files}
+    ranked = sorted(
+        file_importance.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+
+    result: list[dict[str, Any]] = []
+    used_tokens = 0
+    for path, importance in ranked:
+        symbols = hierarchical_index.get(path, [])
+        symbol_chars = sum(len(symbol) + 1 for symbol in symbols) + len(path) + 1
+        entry_tokens = max(1, symbol_chars // 4)
+        if result and used_tokens + entry_tokens > token_budget:
+            break
+        result.append(
+            {
+                "path": path,
+                "importance": round(importance, 6),
+                "symbols": list(symbols),
+                "token_cost": entry_tokens,
+                "total_file_tokens": max(1, len(source_by_path.get(path, "")) // 4),
+            }
+        )
+        used_tokens += entry_tokens
+    return result
+
+
+def _detect_test_setup(
+    clone_root: Path,
+    files: list[tuple[str, str, str]],
+) -> dict[str, Any]:
+    """Return detected test frameworks, roots, and a primary command."""
+    frameworks: list[str] = []
+
+    pyproject = _safe_read(clone_root / "pyproject.toml")
+    if pyproject and ("[tool.pytest" in pyproject or "pytest" in pyproject):
+        frameworks.append("pytest")
+    if (
+        (clone_root / "pytest.ini").is_file() or (clone_root / "conftest.py").is_file()
+    ) and "pytest" not in frameworks:
+        frameworks.append("pytest")
+    if (clone_root / "tox.ini").is_file() and "pytest" not in frameworks:
+        frameworks.append("pytest")
+
+    package_json = _safe_read(clone_root / "package.json")
+    if package_json:
+        try:
+            pkg = json.loads(package_json)
+        except json.JSONDecodeError:
+            pkg = {}
+        dev = pkg.get("devDependencies") or {}
+        deps = pkg.get("dependencies") or {}
+        for name in ("jest", "vitest", "mocha"):
+            if name in dev or name in deps:
+                frameworks.append(name)
+
+    if (clone_root / "go.mod").is_file():
+        frameworks.append("go test")
+    if (clone_root / "Cargo.toml").is_file():
+        frameworks.append("cargo test")
+
+    test_roots: list[str] = []
+    for rel, _lang, _src in files:
+        parts = rel.split("/")
+        if not parts:
+            continue
+        top = parts[0]
+        if top in ("tests", "test", "__tests__") and top not in test_roots:
+            test_roots.append(top)
+
+    if "pytest" in frameworks:
+        command = "pytest"
+    elif "jest" in frameworks:
+        command = "npm test"
+    elif "vitest" in frameworks:
+        command = "npx vitest"
+    elif "go test" in frameworks:
+        command = "go test ./..."
+    elif "cargo test" in frameworks:
+        command = "cargo test"
+    else:
+        command = None
+
+    return {
+        "test_frameworks": sorted(frameworks),
+        "test_roots": sorted(test_roots),
+        "test_command": command,
+    }
+
+
+def _detect_build_system(clone_root: Path) -> tuple[str | None, str | None]:
+    """Return (build_system, build_command) for the dominant build file."""
+    if (clone_root / "pyproject.toml").is_file():
+        return "pep-517", "python3 -m build"
+    if (clone_root / "setup.py").is_file():
+        return "setuptools", "python3 setup.py build"
+    if (clone_root / "package.json").is_file():
+        return "npm", "npm run build"
+    if (clone_root / "go.mod").is_file():
+        return "go-modules", "go build ./..."
+    if (clone_root / "Cargo.toml").is_file():
+        return "cargo", "cargo build --release"
+    if (clone_root / "pom.xml").is_file():
+        return "maven", "mvn package"
+    if (clone_root / "build.gradle").is_file() or (clone_root / "build.gradle.kts").is_file():
+        return "gradle", "gradle build"
+    return None, None
+
+
+def _read_conventions(
+    clone_root: Path,
+    token_budget: int,
+) -> dict[str, Any]:
+    """Read convention files and record which config files are present.
+
+    Convention files are read up to a combined token budget, which
+    prevents a very large ``AGENTS.md`` from crowding out the repo map
+    in a downstream prompt. Config indicators are recorded as presence
+    only; their content is not read here.
+    """
+    conventions: dict[str, Any] = {
+        "agent_files": {},
+        "configs_present": [],
+    }
+    char_budget = max(1, token_budget * 4)
+    used_chars = 0
+    for name in _CONVENTION_FILES:
+        path = clone_root / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        remaining = char_budget - used_chars
+        if remaining <= 0:
+            break
+        snippet = text[:remaining]
+        if not snippet:
+            continue
+        conventions["agent_files"][name] = snippet
+        used_chars += len(snippet)
+    for name in _CONFIG_INDICATORS:
+        if (clone_root / name).exists():
+            conventions["configs_present"].append(name)
+    return conventions
+
+
+def _safe_read(path: Path) -> str:
+    """Read a text file, returning empty on any read error."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
 def _now_iso() -> str:
     """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(UTC).isoformat()
@@ -460,13 +889,7 @@ def _record(
     output: str | None,
     failure_category: str | None,
 ) -> None:
-    """Best-effort telemetry write.
-
-    Telemetry is recorded when a store is reachable via the run context
-    set by the caller. When no store is configured, the record is
-    skipped silently: recon must not fail because telemetry is not
-    wired up yet.
-    """
+    """Best-effort telemetry write."""
     from codeguardian.core.agents.telemetry import record_call
 
     store = _active_store()
@@ -483,12 +906,7 @@ def _record(
 
 
 def _active_store() -> Any:
-    """Return the active SQLiteStore for telemetry, or None.
-
-    Phase 13 provides the store via a context var when it wires agents
-    into a pipeline. During isolated Phase 11 tests, no store is set
-    and telemetry is skipped.
-    """
+    """Return the active SQLiteStore for telemetry, or None."""
     from codeguardian.core.agents import _store_context
 
     return _store_context.get_active_store()

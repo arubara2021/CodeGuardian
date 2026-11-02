@@ -46,7 +46,10 @@ from codeguardian.interfaces.model import (
     ModelResponse,
 )
 
+from .context_budget import ContextBudget
+
 __all__ = [
+    "ContextBudget",
     "FailureCategory",
     "classify_failure",
     "fresh_barrier",
@@ -110,7 +113,9 @@ def classify_failure(exc: BaseException) -> FailureCategory | None:
 class _ScopedFaultBarrier(FaultBarrier):
     """A FaultBarrier that rejects method names outside allowed_tools.
 
-    Used only by fresh_barrier. Private to this module.
+    Used only by fresh_barrier. Private to this module. The optional
+    context_budget is stored for the caller's later use; the barrier
+    does not enforce it in this block.
     """
 
     def __init__(
@@ -123,6 +128,7 @@ class _ScopedFaultBarrier(FaultBarrier):
         agent_mode: AgentMode | None = None,
         budget: BudgetTracker | None = None,
         allowed_tools: frozenset[str],
+        context_budget: ContextBudget | None = None,
     ) -> None:
         super().__init__(
             plugin=plugin,
@@ -133,6 +139,7 @@ class _ScopedFaultBarrier(FaultBarrier):
             budget=budget,
         )
         self._allowed_tools = allowed_tools
+        self.context_budget = context_budget
 
     def _check_allowed(self, method_name: str) -> None:
         if method_name not in self._allowed_tools:
@@ -168,6 +175,7 @@ def fresh_barrier(
     mode: AgentMode | None = None,
     budget: BudgetTracker | None = None,
     allowed_tools: tuple[str, ...] = (),
+    context_budget: ContextBudget | None = None,
 ) -> Iterator[_ScopedFaultBarrier]:
     """Yield a FaultBarrier scoped to ``allowed_tools`` for one call.
 
@@ -223,6 +231,7 @@ def fresh_barrier(
         agent_mode=mode,
         budget=budget,
         allowed_tools=allowed,
+        context_budget=context_budget,
     )
     try:
         yield barrier
@@ -238,6 +247,7 @@ async def tracked_model_call(
     model: str,
     options: ModelOptions,
     role: str,
+    context_budget: ContextBudget | None = None,
 ) -> tuple[ModelResponse, int]:
     """Call ``provider.complete`` and return the response and latency.
 
@@ -254,6 +264,11 @@ async def tracked_model_call(
         role: The role this call is for. Passed for consistency with
             the ModelProvider.complete signature; available to
             instrumented callers that route by role.
+        context_budget: When supplied, the response's input and output
+            token counts are recorded into the budget after the call
+            returns. The budget is not checked here; the calling agent
+            is responsible for querying it before the next call.
+
 
     Returns:
         A tuple of (response, latency_ms).
@@ -264,4 +279,9 @@ async def tracked_model_call(
     start = time.perf_counter()
     response = await provider.complete(prompt, model, options)
     latency_ms = int((time.perf_counter() - start) * 1000)
+    if context_budget is not None:
+        context_budget.record(
+            tokens_in=response.tokens_in,
+            tokens_out=response.tokens_out,
+        )
     return response, latency_ms

@@ -1,6 +1,6 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://codeguardian.dev/schemas/skill/v1.0.json",
+    "$id": "https://codeguardian.dev/schemas/skill/v1.1.json",
     "title": "Skill Frontmatter",
     "type": "object",
     "required": [
@@ -58,7 +58,10 @@
                 "active",
                 "stale",
                 "archived",
-                "draft"
+                "draft",
+                "trial",
+                "stable",
+                "retired"
             ]
         },
         "created_at": {
@@ -68,6 +71,99 @@
         "last_used_at": {
             "type": "string",
             "format": "date-time"
+        },
+        "prerequisites": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]+$"
+            },
+            "description": "Skill names that must be available for this skill to be usable. Optional. Absent means no prerequisites."
+        },
+        "provides": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "description": "Capability labels this skill provides. Optional. Used by the graph to connect skills to task requirements without naming a specific skill."
+        },
+        "consumes": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "description": "Capability labels this skill expects to be available. Optional."
+        },
+        "supersedes": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]+$"
+            },
+            "description": "Skill names this skill replaces. Optional. Used by governance to retire superseded skills."
+        },
+        "provenance": {
+            "type": "object",
+            "description": "Provenance information persisted with the skill. Optional. Admission evidence lives in the skill_provenance table, not here.",
+            "required": [
+                "source_runs",
+                "authored_by",
+                "commit_hash"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "source_runs": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "authored_by": {
+                    "type": "string",
+                    "enum": [
+                        "skill_curator",
+                        "human"
+                    ]
+                },
+                "commit_hash": {
+                    "type": "string"
+                },
+                "license": {
+                    "type": "string"
+                }
+            }
+        },
+        "permission_manifest": {
+            "type": "object",
+            "description": "Permissions any executable asset referenced by this skill is allowed to exercise. Optional. Absent means inherit the plugin defaults.",
+            "required": [
+                "filesystem",
+                "network"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "filesystem": {
+                    "type": "string",
+                    "enum": [
+                        "none",
+                        "sandbox_only",
+                        "read_only",
+                        "full"
+                    ]
+                },
+                "network": {
+                    "type": "boolean"
+                },
+                "process_spawn": {
+                    "type": "boolean"
+                },
+                "env_read": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
         },
         "extensions": {
             "type": "object",

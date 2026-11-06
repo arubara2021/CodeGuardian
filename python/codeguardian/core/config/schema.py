@@ -39,6 +39,22 @@ from .defaults import (
     DEFAULT_SANDBOX_CPU_CORES,
     DEFAULT_SANDBOX_MEMORY_MB,
     DEFAULT_SANDBOX_PROCESS_LIMIT,
+    DEFAULT_SKILLS_ADMISSION_STRICT,
+    DEFAULT_SKILLS_DEDUPE_THRESHOLD,
+    DEFAULT_SKILLS_EVOLVER_ENABLED,
+    DEFAULT_SKILLS_GRAPH_ENABLED,
+    DEFAULT_SKILLS_MAX_ACTIVE_SKILLS,
+    DEFAULT_SKILLS_NEGATIVE_STORE_ENABLED,
+    DEFAULT_SKILLS_PPR_ENABLED,
+    DEFAULT_SKILLS_PPR_HOPS,
+    DEFAULT_SKILLS_PPR_TIMEOUT_MS,
+    DEFAULT_SKILLS_RECON_BLAST_FILTER_ENABLED,
+    DEFAULT_SKILLS_RERANKER_ENABLED,
+    DEFAULT_SKILLS_RERANKER_TIMEOUT_MS,
+    DEFAULT_SKILLS_RETIRE_AFTER_RUNS,
+    DEFAULT_SKILLS_RETIRE_THRESHOLD,
+    DEFAULT_SKILLS_RETRIEVAL_TOKEN_BUDGET,
+    DEFAULT_SKILLS_TRIAL_RUNS_BEFORE_ACTIVE,
 )
 
 __all__ = [
@@ -58,6 +74,7 @@ __all__ = [
     "ProviderConfig",
     "ProvidersConfig",
     "SandboxConfig",
+    "SkillsConfig",
     "StorageConfig",
     "validate",
 ]
@@ -130,6 +147,26 @@ def _require_int(value: Any, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         _fail(path, f"expected an integer, got {type(value).__name__}")
     return value
+
+
+def _require_float(value: Any, path: str) -> float:
+    """Return the value if it is a number, otherwise raise.
+
+    Integers are accepted and converted to float, because a config
+    file may legitimately express ``1`` where ``1.0`` is expected. A
+    boolean is rejected for the same reason as in ``_require_int``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _fail(path, f"expected a number, got {type(value).__name__}")
+    return float(value)
+
+
+def _require_probability(value: Any, path: str) -> float:
+    """Return the value if it is a number in the inclusive range 0 to 1."""
+    number = _require_float(value, path)
+    if not (0.0 <= number <= 1.0):
+        _fail(path, f"expected a number between 0 and 1, got {number}")
+    return number
 
 
 def _require_positive_int(value: Any, path: str) -> int:
@@ -273,6 +310,35 @@ class SandboxConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillsConfig:
+    """The ``[skills]`` table.
+
+    Added in Phase 12 v2. Every feature flag defaults to ``false`` so
+    that an upgrade from Phase 12 v1 without a configuration edit
+    produces the exact behavior of the flat retrieval path. Timeouts
+    and thresholds carry conservative defaults taken from the
+    retrieval and governance literature; every field is overridable.
+    """
+
+    graph_enabled: bool = DEFAULT_SKILLS_GRAPH_ENABLED
+    ppr_enabled: bool = DEFAULT_SKILLS_PPR_ENABLED
+    ppr_hops: int = DEFAULT_SKILLS_PPR_HOPS
+    ppr_timeout_ms: int = DEFAULT_SKILLS_PPR_TIMEOUT_MS
+    reranker_enabled: bool = DEFAULT_SKILLS_RERANKER_ENABLED
+    reranker_timeout_ms: int = DEFAULT_SKILLS_RERANKER_TIMEOUT_MS
+    negative_store_enabled: bool = DEFAULT_SKILLS_NEGATIVE_STORE_ENABLED
+    admission_strict: bool = DEFAULT_SKILLS_ADMISSION_STRICT
+    dedupe_threshold: float = DEFAULT_SKILLS_DEDUPE_THRESHOLD
+    max_active_skills: int = DEFAULT_SKILLS_MAX_ACTIVE_SKILLS
+    retire_threshold: float = DEFAULT_SKILLS_RETIRE_THRESHOLD
+    retire_after_runs: int = DEFAULT_SKILLS_RETIRE_AFTER_RUNS
+    trial_runs_before_active: int = DEFAULT_SKILLS_TRIAL_RUNS_BEFORE_ACTIVE
+    retrieval_token_budget: int = DEFAULT_SKILLS_RETRIEVAL_TOKEN_BUDGET
+    recon_blast_filter_enabled: bool = DEFAULT_SKILLS_RECON_BLAST_FILTER_ENABLED
+    evolver_enabled: bool = DEFAULT_SKILLS_EVOLVER_ENABLED
+
+
+@dataclass(frozen=True, slots=True)
 class MCPServerConfig:
     """One MCP server entry in the ``[mcp].servers`` array.
 
@@ -326,6 +392,7 @@ class Config:
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     exclusions: ExclusionsConfig = field(default_factory=ExclusionsConfig)
 
@@ -337,6 +404,7 @@ _TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "providers",
         "storage",
         "sandbox",
+        "skills",
         "mcp",
         "exclusions",
     }
@@ -354,6 +422,26 @@ _STORAGE_KEYS: frozenset[str] = frozenset(
 )
 _SANDBOX_KEYS: frozenset[str] = frozenset(
     {"memory_limit_mb", "cpu_limit_cores", "process_limit", "network_during_deps"}
+)
+_SKILLS_KEYS: frozenset[str] = frozenset(
+    {
+        "graph_enabled",
+        "ppr_enabled",
+        "ppr_hops",
+        "ppr_timeout_ms",
+        "reranker_enabled",
+        "reranker_timeout_ms",
+        "negative_store_enabled",
+        "admission_strict",
+        "dedupe_threshold",
+        "max_active_skills",
+        "retire_threshold",
+        "retire_after_runs",
+        "trial_runs_before_active",
+        "retrieval_token_budget",
+        "recon_blast_filter_enabled",
+        "evolver_enabled",
+    }
 )
 _MCP_KEYS: frozenset[str] = frozenset({"servers"})
 _MCP_SERVER_KEYS: frozenset[str] = frozenset({"name", "command", "args", "url"})
@@ -520,6 +608,95 @@ def _sandbox_from_dict(data: Mapping[str, Any], path: str) -> SandboxConfig:
     )
 
 
+def _skills_from_dict(data: Mapping[str, Any], path: str) -> SkillsConfig:
+    mapping = _require_mapping(data, path)
+    _reject_unknown(mapping, path, _SKILLS_KEYS)
+
+    graph_enabled = _require_bool(
+        mapping.get("graph_enabled", DEFAULT_SKILLS_GRAPH_ENABLED),
+        f"{path}.graph_enabled",
+    )
+    ppr_enabled = _require_bool(
+        mapping.get("ppr_enabled", DEFAULT_SKILLS_PPR_ENABLED),
+        f"{path}.ppr_enabled",
+    )
+    ppr_hops = _require_positive_int(
+        mapping.get("ppr_hops", DEFAULT_SKILLS_PPR_HOPS),
+        f"{path}.ppr_hops",
+    )
+    ppr_timeout_ms = _require_positive_int(
+        mapping.get("ppr_timeout_ms", DEFAULT_SKILLS_PPR_TIMEOUT_MS),
+        f"{path}.ppr_timeout_ms",
+    )
+    reranker_enabled = _require_bool(
+        mapping.get("reranker_enabled", DEFAULT_SKILLS_RERANKER_ENABLED),
+        f"{path}.reranker_enabled",
+    )
+    reranker_timeout_ms = _require_positive_int(
+        mapping.get("reranker_timeout_ms", DEFAULT_SKILLS_RERANKER_TIMEOUT_MS),
+        f"{path}.reranker_timeout_ms",
+    )
+    negative_store_enabled = _require_bool(
+        mapping.get("negative_store_enabled", DEFAULT_SKILLS_NEGATIVE_STORE_ENABLED),
+        f"{path}.negative_store_enabled",
+    )
+    admission_strict = _require_bool(
+        mapping.get("admission_strict", DEFAULT_SKILLS_ADMISSION_STRICT),
+        f"{path}.admission_strict",
+    )
+    dedupe_threshold = _require_probability(
+        mapping.get("dedupe_threshold", DEFAULT_SKILLS_DEDUPE_THRESHOLD),
+        f"{path}.dedupe_threshold",
+    )
+    max_active_skills = _require_positive_int(
+        mapping.get("max_active_skills", DEFAULT_SKILLS_MAX_ACTIVE_SKILLS),
+        f"{path}.max_active_skills",
+    )
+    retire_threshold = _require_probability(
+        mapping.get("retire_threshold", DEFAULT_SKILLS_RETIRE_THRESHOLD),
+        f"{path}.retire_threshold",
+    )
+    retire_after_runs = _require_positive_int(
+        mapping.get("retire_after_runs", DEFAULT_SKILLS_RETIRE_AFTER_RUNS),
+        f"{path}.retire_after_runs",
+    )
+    trial_runs_before_active = _require_positive_int(
+        mapping.get("trial_runs_before_active", DEFAULT_SKILLS_TRIAL_RUNS_BEFORE_ACTIVE),
+        f"{path}.trial_runs_before_active",
+    )
+    retrieval_token_budget = _require_positive_int(
+        mapping.get("retrieval_token_budget", DEFAULT_SKILLS_RETRIEVAL_TOKEN_BUDGET),
+        f"{path}.retrieval_token_budget",
+    )
+    recon_blast_filter_enabled = _require_bool(
+        mapping.get("recon_blast_filter_enabled", DEFAULT_SKILLS_RECON_BLAST_FILTER_ENABLED),
+        f"{path}.recon_blast_filter_enabled",
+    )
+    evolver_enabled = _require_bool(
+        mapping.get("evolver_enabled", DEFAULT_SKILLS_EVOLVER_ENABLED),
+        f"{path}.evolver_enabled",
+    )
+
+    return SkillsConfig(
+        graph_enabled=graph_enabled,
+        ppr_enabled=ppr_enabled,
+        ppr_hops=ppr_hops,
+        ppr_timeout_ms=ppr_timeout_ms,
+        reranker_enabled=reranker_enabled,
+        reranker_timeout_ms=reranker_timeout_ms,
+        negative_store_enabled=negative_store_enabled,
+        admission_strict=admission_strict,
+        dedupe_threshold=dedupe_threshold,
+        max_active_skills=max_active_skills,
+        retire_threshold=retire_threshold,
+        retire_after_runs=retire_after_runs,
+        trial_runs_before_active=trial_runs_before_active,
+        retrieval_token_budget=retrieval_token_budget,
+        recon_blast_filter_enabled=recon_blast_filter_enabled,
+        evolver_enabled=evolver_enabled,
+    )
+
+
 def _mcp_server_from_dict(data: Mapping[str, Any], path: str) -> MCPServerConfig:
     mapping = _require_mapping(data, path)
     _reject_unknown(mapping, path, _MCP_SERVER_KEYS)
@@ -629,6 +806,11 @@ def validate(raw: Mapping[str, Any] | None) -> Config:
         if "sandbox" in mapping
         else SandboxConfig()
     )
+    skills = (
+        _skills_from_dict(mapping["skills"], "config.skills")
+        if "skills" in mapping
+        else SkillsConfig()
+    )
     mcp = _mcp_from_dict(mapping["mcp"], "config.mcp") if "mcp" in mapping else MCPConfig()
     exclusions = (
         _exclusions_from_dict(mapping["exclusions"], "config.exclusions")
@@ -642,6 +824,7 @@ def validate(raw: Mapping[str, Any] | None) -> Config:
         providers=providers,
         storage=storage,
         sandbox=sandbox,
+        skills=skills,
         mcp=mcp,
         exclusions=exclusions,
     )

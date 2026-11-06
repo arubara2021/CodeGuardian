@@ -347,6 +347,11 @@ class SkillStore:
         not just the ``SKILL.md`` file, so any auxiliary files a future
         version adds are cleaned up as well.
 
+        Feedback rows are deleted before the skill row because
+        ``skill_feedback.skill_name`` has a foreign key to
+        ``skills.name`` with no ``ON DELETE`` clause. Without the
+        pre-delete, a skill that has ever been used cannot be removed.
+
         Args:
             name: The skill name.
 
@@ -375,6 +380,8 @@ class SkillStore:
                     old["trigger_text"] or "",
                 ),
             )
+
+        self._sqlite.execute("DELETE FROM skill_feedback WHERE skill_name = ?", (name,))
         self._sqlite.execute("DELETE FROM skills WHERE name = ?", (name,))
         self._sqlite.execute("DELETE FROM skill_embeddings WHERE name = ?", (name,))
 
@@ -729,60 +736,83 @@ class SkillStore:
         *,
         quiet: bool = False,
     ) -> None:
-        """Insert or replace a row in ``skills`` and sync ``skills_fts``.
+        """Insert or update a row in ``skills`` and sync ``skills_fts``.
 
-        The FTS5 external-content table does not auto-update. Before
+        When the row already exists, this method uses ``UPDATE`` instead
+        of the ``DELETE`` followed by ``INSERT`` pattern that was used
+        before Phase 12 v2. The old pattern fails the foreign key
+        constraint from ``skill_feedback.skill_name`` whenever the skill
+        has any feedback rows, which is exactly the state that
+        ``SkillLibrary.set_skill_state``, ``SkillLibrary.promote_skill``,
+        and ``SkillLibrary.archive_skill`` reach after
+        ``record_feedback`` has run once. ``UPDATE`` mutates the row in
+        place, so the foreign key is never checked against a delete and
+        the rowid remains stable for the FTS index.
+
+        The FTS5 external content table does not auto-update. Before
         replacing the ``skills`` row, the old FTS entry is deleted using
-        the old column values. After inserting the new row, a new FTS
-        entry is added using the new rowid. Skipping the delete half
-        would leave stale entries in the index.
+        the old column values. After the update, a new FTS entry is
+        added using the current rowid. Skipping the delete half would
+        leave stale entries in the index.
 
         When ``quiet`` is True, the FTS delete step is skipped. This is
         used by ``rebuild_index``, which issues a full FTS rebuild at
         the end and does not need incremental sync.
         """
-        if not quiet:
-            existing = self._sqlite.query(
-                "SELECT rowid, name, description, trigger_text FROM skills WHERE name = ?",
-                (name,),
-            )
-            if existing:
-                old = existing[0]
-                self._sqlite.execute(
-                    "INSERT INTO skills_fts(skills_fts, rowid, name, description, trigger_text) "
-                    "VALUES ('delete', ?, ?, ?, ?)",
-                    (
-                        old["rowid"],
-                        old["name"],
-                        old["description"] or "",
-                        old["trigger_text"] or "",
-                    ),
-                )
-            self._sqlite.execute("DELETE FROM skills WHERE name = ?", (name,))
-
-        self._sqlite.execute(
-            """
-            INSERT INTO skills
-                (name, path, description, trigger_text, skill_type, language,
-                 effectiveness, total_uses, total_successes, state,
-                 created_at, last_used_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                name,
-                str(skill_path),
-                frontmatter.get("description", ""),
-                frontmatter.get("trigger", ""),
-                frontmatter.get("skill_type", ""),
-                frontmatter.get("language", ""),
-                float(frontmatter.get("effectiveness", _DEFAULT_EFFECTIVENESS)),
-                int(frontmatter.get("total_uses", 0)),
-                int(frontmatter.get("total_successes", 0)),
-                frontmatter.get("state", "active"),
-                frontmatter.get("created_at", _now_iso()),
-                frontmatter.get("last_used_at"),
-            ),
+        existing = self._sqlite.query(
+            "SELECT rowid, name, description, trigger_text FROM skills WHERE name = ?",
+            (name,),
         )
+
+        if not quiet and existing:
+            old = existing[0]
+            self._sqlite.execute(
+                "INSERT INTO skills_fts(skills_fts, rowid, name, description, trigger_text) "
+                "VALUES ('delete', ?, ?, ?, ?)",
+                (
+                    old["rowid"],
+                    old["name"],
+                    old["description"] or "",
+                    old["trigger_text"] or "",
+                ),
+            )
+
+        field_values = (
+            str(skill_path),
+            frontmatter.get("description", ""),
+            frontmatter.get("trigger", ""),
+            frontmatter.get("skill_type", ""),
+            frontmatter.get("language", ""),
+            float(frontmatter.get("effectiveness", _DEFAULT_EFFECTIVENESS)),
+            int(frontmatter.get("total_uses", 0)),
+            int(frontmatter.get("total_successes", 0)),
+            frontmatter.get("state", "active"),
+            frontmatter.get("created_at", _now_iso()),
+            frontmatter.get("last_used_at"),
+        )
+
+        if existing:
+            self._sqlite.execute(
+                """
+                UPDATE skills SET
+                    path = ?, description = ?, trigger_text = ?, skill_type = ?,
+                    language = ?, effectiveness = ?, total_uses = ?,
+                    total_successes = ?, state = ?, created_at = ?, last_used_at = ?
+                WHERE name = ?
+                """,
+                (*field_values, name),
+            )
+        else:
+            self._sqlite.execute(
+                """
+                INSERT INTO skills
+                    (name, path, description, trigger_text, skill_type, language,
+                     effectiveness, total_uses, total_successes, state,
+                     created_at, last_used_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (name, *field_values),
+            )
 
         if not quiet:
             new = self._sqlite.query(

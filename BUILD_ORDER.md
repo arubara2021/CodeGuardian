@@ -28,6 +28,8 @@ A block contains four or five files that belong together. Blocks are not split i
 
 **Exception — Phase 9.** Phase 9 merges the originally-planned Phase 9 (plugin metadata) with the originally-planned Phase 9.5 (runtime grammar loading) into one phase. To keep the merged phase buildable in coherent increments, some Phase 9 blocks group more than five files or fewer than four. The exception is recorded per block in the Phase 9 section and is not a precedent for other phases.
 
+**Exception — Phase 12 v2.** Phase 12's six blocks (five, five, five, four, four, four files respectively) are within the four-to-five range. The two verification-time Rule 1 escalations recorded in §17 are not part of the planned blocks; they are fixes that emerged during block-boundary testing and are recorded in the phase section for audit trail purposes only.
+
 ### Rule 3 — Test at phase boundaries, not block boundaries
 
 After a phase is written, the whole phase is tested. Not after each block. Not after each file. Once per phase.
@@ -53,32 +55,32 @@ The integration script grows by one section per phase. Phase 2 runs integration 
 ## 3. The Phase-Boundary Workflow
 
 ```
-┌────────────────────────────────────────────────────────┐
-│ Phase N                                                │
-│                                                        │
-│   1. Write every block in phase N, in order.           │
-│      Do not test after each block.                     │
-│                                                        │
-│   2. Run the phase isolation test.                     │
-│      pytest tests/unit/ tests/contracts/ -k <phaseN>   │
-│                                                        │
-│   3. Run the chain test.                               │
-│      pytest tests/                                     │
-│                                                        │
-│   4. Run the cross-phase integration script.           │
-│      python scripts/integration_phase.py --through N   │
-│                                                        │
-│   5. If all three are green, phase N is done.          │
-│      If any is red, fix the phase and re-run.          │
-└────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ Phase N                                                  │
+│                                                          │
+│   1. Write every block in phase N, in order.             │
+│      Do not test after each block.                       │
+│                                                          │
+│   2. Run the phase isolation test.                       │
+│      pytest tests/unit/ tests/contracts/ -k <phaseN>     │
+│                                                          │
+│   3. Run the chain test.                                 │
+│      pytest tests/                                       │
+│                                                          │
+│   4. Run the cross-phase integration script.             │
+│      python scripts/integration_phase.py --through N     │
+│                                                          │
+│   5. If all three are green, phase N is done.            │
+│      If any is red, fix the phase and re-run.            │
+└──────────────────────────────────────────────────────────┘
                        │
                        ▼
-┌────────────────────────────────────────────────────────┐
-│ Phase N+1                                              │
-│                                                        │
-│   Same as above, but the integration script now        │
-│   covers phases 0 through N+1.                         │
-└────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ Phase N+1                                                │
+│                                                          │
+│   Same as above, but the integration script now          │
+│   covers phases 0 through N+1.                           │
+└──────────────────────────────────────────────────────────┘
 ```
 
 Every phase boundary is a **commit point**. The phase's code is committed only after all three tests pass.
@@ -96,16 +98,16 @@ flowchart TB
     P4["Phase 4 — Code Interfaces<br/>B-020 to B-022"]
     P5["Phase 5 — Bridges<br/>B-023 to B-025"]
     P6["Phase 6 — Rust Kernel<br/>B-026 to B-030"]
-    P7["Phase 7 — Rust Engines<br/>B-032 to B-037"]
+    P7["Phase 7 — Rust Engines<br/>B-031 to B-037"]
     P8["Phase 8 — Providers<br/>B-038 to B-041"]
     P9["Phase 9 — Plugins<br/>B-042 to B-049"]
     P10["Phase 10 — Prompts<br/>B-050"]
     P11["Phase 11 — Agents<br/>B-051 to B-053"]
-    P12["Phase 12 — Skills Module<br/>B-054 to B-055"]
-    P13["Phase 13 — Orchestrator<br/>B-056 to B-059"]
-    P14["Phase 14 — CLI<br/>B-060 to B-066"]
-    P15["Phase 15 — MCP and Reporters<br/>B-067 to B-071"]
-    P16["Phase 16 — Full Assembly<br/>B-072 to B-074"]
+    P12["Phase 12 — Skills Module v2<br/>B-054 to B-059"]
+    P13["Phase 13 — Orchestrator<br/>B-060 to B-063"]
+    P14["Phase 14 — CLI<br/>B-064 to B-070"]
+    P15["Phase 15 — MCP and Reporters<br/>B-071 to B-075"]
+    P16["Phase 16 — Full Assembly<br/>B-076 to B-078"]
 
     P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8
     P8 --> P9 --> P10 --> P11 --> P12 --> P13 --> P14 --> P15 --> P16
@@ -608,7 +610,7 @@ Repository providers, model providers, the apply provider, and the Python sandbo
 
 **Merged phase.** This phase replaces what was originally planned as Phase 9 (plugin metadata and discovery) plus Phase 9.5 (runtime grammar loading). It delivers a plugin system that can add a new programming language to the kernel without recompiling the binary, enforce plugin permissions at the Python level, isolate plugin hangs with timeouts, negotiate interface versions with N / N-1 compatibility, and prove plugin behavior through behavioral contract tests.
 
-The complete design settlement — the seven weaknesses, the eight blocks, the exact file list, the behavioral assertions, the audit hook event table, the version negotiation rules, and the three explicit residuals — is recorded in `docs/summaries/phase-9-design.md`. That document is the authoritative specification for this phase. This section is the build order that follows from it.
+The complete design settlement is recorded in `docs/summaries/phase-9-design.md`. That document is the authoritative specification for this phase. This section is the build order that follows from it.
 
 **Merged-scope note.** Some blocks in this phase group more than five files or fewer than four. That is intentional. The plugin infrastructure is one coherent unit, but it is too large to fit in a single block; the eight blocks below are the smallest coherent subdivisions that still produce a buildable intermediate state.
 
@@ -618,7 +620,7 @@ The complete design settlement — the seven weaknesses, the eight blocks, the e
 |---|---|
 | `schemas/plugin-manifest.json` | Schema v1.2 — adds `capabilities`, `blast_scope`, `kernel_extensible`, `grammar_path` |
 
-This block runs first. The schema is the contract every subsequent block validates against. It is a rewrite of the Phase 2 file, adding four optional fields with safe defaults so v1.1 manifests still validate.
+This block runs first. The schema is the contract every subsequent block validates against.
 
 ### Block B-043 — Rust Kernel Runtime Grammar Loading
 
@@ -632,8 +634,6 @@ This block runs first. The schema is the contract every subsequent block validat
 | `rust/crates/codeguardian-kernel/src/lib.rs` | Rewrite — export grammar_loader module and new public functions |
 | `rust/crates/codeguardian-pyo3/src/kernel.rs` | Rewrite — add `load_grammar` and `list_languages` PyO3 functions |
 
-This block changes the kernel. It is the only block in Phase 9 that touches compiled Rust code. After it lands, third-party plugins can add new languages.
-
 ### Block B-044 — Python Plugin Infrastructure
 
 | File | Purpose |
@@ -646,7 +646,7 @@ This block changes the kernel. It is the only block in Phase 9 that touches comp
 | `python/codeguardian/core/plugins/permissions.py` | `sys.addaudithook` permission enforcement |
 | `python/codeguardian/core/plugins/registry.py` | Central registry, plugin loading, contract test invocation |
 
-Seven files. This block replaces what the earlier plan split across B-042, B-043, and part of B-046.
+Seven files.
 
 ### Block B-045 — Bundled Language Plugins
 
@@ -663,7 +663,7 @@ Seven files. This block replaces what the earlier plan split across B-042, B-043
 | `python/codeguardian/plugins_bundled/languages/c/plugin.py` | C language plugin |
 | `python/codeguardian/plugins_bundled/languages/cpp/plugin.py` | C++ language plugin |
 
-Ten files. Each plugin declares `reliability_tier`, `blast_scope`, and `kernel_extensible: false` because all eight languages are already compiled into the kernel. C and C++ ship at `best-effort` tier until G-15 (declarator chain) is fixed. Every language declares `blast_scope: "same-file"` until G-16 (cross-file resolution) is fixed.
+Ten files.
 
 ### Block B-046 — Bundled Tool Plugins
 
@@ -671,7 +671,7 @@ Ten files. Each plugin declares `reliability_tier`, `blast_scope`, and `kernel_e
 |---|---|
 | `python/codeguardian/plugins_bundled/tools/__init__.py` | Tool plugin package init |
 | `python/codeguardian/plugins_bundled/tools/ast_grep/plugin.py` | ast-grep subprocess wrapper |
-| `python/codeguardian/plugins_bundled/tools/code_analysis/plugin.py` | In-process structural analysis (cyclomatic complexity, dead code) |
+| `python/codeguardian/plugins_bundled/tools/code_analysis/plugin.py` | In-process structural analysis |
 
 Three files.
 
@@ -690,10 +690,10 @@ Two files.
 |---|---|
 | `tests/contracts/test_language_contract.py` | Behavioral assertions for every language plugin |
 | `tests/contracts/test_tool_contract.py` | Behavioral assertions for every tool plugin |
-| `tests/contracts/test_verifier_contract.py` | Verifier contract via fake test verifier (real verifiers Phase 11) |
+| `tests/contracts/test_verifier_contract.py` | Verifier contract via fake test verifier |
 | `tests/contracts/test_reporter_contract.py` | Behavioral assertions for every reporter plugin |
 
-Four files. Every assertion is behavioral (`parse` produces nodes, `call` output validates against schema, `report` parses as declared format) rather than shape-only.
+Four files.
 
 ### Block B-049 — Integration Tests
 
@@ -711,15 +711,13 @@ Two files.
 
 **Phase 9 total: 8 blocks, 36 files.**
 
-**Merged-scope honest note.** The original BUILD_ORDER planned Phase 9 at 6 blocks and 25 files, with a separate Phase 9.5 for runtime grammar loading. That plan was consolidated: this phase delivers what the original plan split across two phases. Total file count rises from 25 to 36. The extra 11 files are `grammar_loader.rs` plus its kernel rewrites (2 files beyond the original kernel skeleton), `permissions.py`, eight bundled language plugin files beyond the original two (Python and TypeScript), and two integration test files.
-
 **What Phase 9 does not deliver (documented residuals):**
 
 | Residual | Phase that fixes it |
 |---|---|
 | Permission enforcement against C extensions | Phase 13+ (WASM or OS capability model) |
-| Plugin process crash isolation | Phase 13 (orchestrator owns plugin lifetimes) |
-| End-to-end pipeline proof of plugins | Phase 11 (agents) + Phase 13 (orchestrator) |
+| Plugin process crash isolation | Phase 13 |
+| End-to-end pipeline proof of plugins | Phase 11 + Phase 13 |
 | MCP dynamic tool discovery | Phase 15 |
 | User-facing plugin CLI | Phase 14 |
 
@@ -785,34 +783,115 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 
 ---
 
-## 17. Phase 12 — Skills Module
+## 17. Phase 12 — Skills Module v2
 
-### Block B-054 — Skill Library
+**Merged and expanded phase.** This phase replaces the original Phase 12 settlement — a flat hybrid retriever over Markdown, six files, two blocks — with a six-layer lifecycle-managed procedural memory system: 27 planned files across six blocks, plus two verification-time Rule 1 escalations. The design settlement is recorded in `docs/summaries/Phase_12.md` Part II. That document is the authoritative specification for this phase.
 
-| File | Purpose |
-|---|---|
-| `python/codeguardian/core/skills/__init__.py` | Skills package init |
-| `python/codeguardian/core/skills/library.py` | Skill library operations |
-| `python/codeguardian/core/skills/indexer.py` | FTS5 indexing |
-| `python/codeguardian/core/skills/retriever.py` | Semantic retrieval |
-| `python/codeguardian/core/skills/embeddings.py` | Vector embeddings |
+**Why the expansion.** The 2026 research literature showed that the flat design degrades silently at scale. Implicit skill routing — letting the agent choose while it works — collapses from 73.6% recall at zero distractors to 27.4% at 1,000 distractors, with 51.6% of turns loading nothing at all. Dependency-aware traversal measurably improves reward and reduces tokens. Skill libraries are the highest attack-success vector in production (69.4%). The v2 design adds a typed skill graph, a four-stage retrieval chain with fallbacks, a separate negative-knowledge tier, a governance gate, and a security layer — all additive, all flag-gated, all derived and rebuildable.
 
-### Block B-055 — Skill Tests
+**Totals.** 6 blocks, 27 planned files, plus 2 verification-time Rule 1 escalations. All six blocks are within the four-to-five-file range, so the Phase 9 merged-scope exception does not apply here. The two escalations are recorded in Block B-057 (where they were discovered) for audit trail purposes only.
+
+### Block B-054 — Foundation
 
 | File | Purpose |
 |---|---|
-| `tests/unit/core/test_skills.py` | Tests for the skill library |
+| `python/codeguardian/core/skills/types.py` | Frozen dataclasses: `SkillNode`, `SkillEdge`, `EdgeKind`, `RetrievalBundle`, `RetrievalItem`, `NegativeRecord`, `AdmissionVerdict`, `ProvenancePin`, `ProjectCard` |
+| `schemas/skill.json` | Schema v1.1 — six new optional fields (`prerequisites`, `provides`, `consumes`, `supersedes`, `provenance`, `permission_manifest`); state enum expanded to include `trial`, `stable`, `retired`; existing six required fields untouched |
+| `python/codeguardian/core/config/defaults.py` | 16 new `DEFAULT_SKILLS_*` constants; every feature flag defaults `false` |
+| `python/codeguardian/core/config/schema.py` | `SkillsConfig` dataclass plus `_skills_from_dict` validation; wired into `Config` and `validate` |
+| `python/codeguardian/core/storage/migrations/005_skill_graph.sql` | Creates `skill_graph_nodes`, `skill_graph_edges`, `negative_knowledge`, `skill_provenance`, `skill_admission_log`. `IF NOT EXISTS` throughout. No `ALTER` on existing tables. |
+
+**Block boundary test:** module imports; `schemas/skill.json` validates as draft 2020-12; every existing example `SKILL.md` validates against v1.1 without edit; migration `005` applies on a fresh database and creates the five tables; config validates with and without the `[skills]` table.
+
+### Block B-055 — Storage Primitives
+
+| File | Purpose |
+|---|---|
+| `python/codeguardian/core/skills/provenance.py` | Build, persist, load, verify `ProvenancePin` records |
+| `python/codeguardian/core/skills/security.py` | Admission scanner (regex + Unicode codepoint checks); permission intersection at invocation; audit-hook extension |
+| `python/codeguardian/core/skills/negative.py` | Typed failure record CRUD; adopt/reject protocol; forgetting curve; per-skill cap |
+| `python/codeguardian/core/skills/graph.py` | Deterministic frontmatter-to-edges builder; cycle detection; semantic edge threshold |
+| `python/codeguardian/core/skills/graph_store.py` | CRUD for `skill_graph_nodes` and `skill_graph_edges`; `drop_and_rebuild` from Markdown directory |
+
+**Block boundary test:** each module imports; provenance round-trips through the DB; scanner blocks every documented pattern (prompt injection, invisible Unicode, shell substitution, exfiltration verb targeting a URL) and warns on every documented suspicion (external URL, conditional instruction, long line, base64); negative CRUD works and decay applies; graph builder produces deterministic edge IDs; rebuild from a real Markdown directory populates the tables.
+
+### Block B-056 — Retrieval Pipeline
+
+| File | Purpose |
+|---|---|
+| `python/codeguardian/core/skills/ppr.py` | Reverse-weighted Personalized PageRank, bounded hops, hard timeout, deterministic output |
+| `python/codeguardian/core/skills/hydrator.py` | Budget-aware hydration; prerequisite-before-dependent ordering; truncation marker with strategy |
+| `python/codeguardian/core/skills/reranker.py` | Optional local MiniLM cross-encoder; flag-gated; timeout-bounded; degrades to passthrough on any failure |
+| `python/codeguardian/core/skills/retrieval.py` | Public `retrieve_for_prompt` entry; five-stage orchestration (project filter, seed, PPR, rerank, hydrate) with fallbacks at every stage; flag-off produces byte-identical output to v1 |
+| `python/codeguardian/core/skills/evolver.py` | Shadow-sidecar graph evolution from `agent_calls` traces; explicit promotion; discard |
+
+**Block boundary test:** PPR propagates score from dependents to prerequisites (not the reverse); hydrator respects budget and priority order; reranker degrades on missing model; retrieval pipeline with all flags off produces byte-identical output to the v1 `SkillRetriever`; evolver candidate writes never touch the serving graph.
+
+### Block B-057 — Governance and Wiring
+
+| File | Purpose |
+|---|---|
+| `python/codeguardian/core/skills/governor.py` | Admission gate (security scan, strict warning promotion, eval score, dedupe, active cap); lifecycle state machine (draft → trial → active → stable → retired, with v1 alias handling for stale and archived); fitness retirement |
+| `python/codeguardian/core/skills/library.py` | Add `governor()`, `negative()`, `graph()`, `evolver()`, `retrieval()` accessors and `set_skill_state`; route `add_skill` through admission when `admission_strict` is on; existing v1 methods preserve their signatures and behavior |
+| `python/codeguardian/core/skills/indexer.py` | Add `rebuild_graph()` and `apply_forgetting_curve()`; existing `rebuild_missing_embeddings` and `decay_stale_skills` unchanged |
+| `python/codeguardian/core/skills/__init__.py` | Export 19 public names |
+
+**Verification-time Rule 1 escalations.** During Block B-057 verification, two pre-existing bugs surfaced and were fixed. Both are recorded in `BUILD_STATE.md` under Phase 12 v2:
+
+| File | Nature |
+|---|---|
+| `python/codeguardian/core/storage/skill_store.py` | `_upsert_skill_row` was DELETE-then-INSERT, which failed the `skill_feedback.skill_name` foreign key once a skill had any feedback. Changed to UPDATE-when-exists. The same fix covers `promote_skill`, `archive_skill`, and `remove`. Pre-existing Phase 3 bug exposed by `record_load_outcome`. |
+| `python/codeguardian/core/storage/migrations/006_skill_states.sql` | The `skills.state` CHECK constraint from migration 001 could not accept `trial`, `stable`, `retired`. SQLite cannot ALTER a CHECK constraint, so the migration rebuilds the table with rowids preserved and FTS rebuilt. Foreign key enforcement is disabled for the duration and restored to its previous value at the end. Forward-only, idempotent. |
+
+**Block boundary test:** governor admission accepts clean skills and rejects malicious bodies, strict-warning findings, low eval scores, duplicate descriptions, and over-cap admissions; state transitions honor the state machine (legal transitions succeed, illegal transitions return `False`); retirement fires below the fitness floor after the minimum run count; library accessors return cached singleton instances; indexer's new methods handle missing sources gracefully; package `__init__` exports every name.
+
+### Block B-058 — Tests Part 1
+
+| File | Purpose |
+|---|---|
+| `tests/unit/core/test_skill_graph.py` | Builder determinism; edge taxonomy; missing-target warnings; semantic threshold; cycle detection |
+| `tests/unit/core/test_ppr.py` | Seed handling; hop bounds; direction correctness; capability filtering; timeout non-raise; deterministic ordering |
+| `tests/unit/core/test_retrieval_pipeline.py` | Flag-off byte-identical delegation; empty-library `threshold_empty`; draft filtering; stage recording; project filter narrowing; reranker passthrough |
+| `tests/unit/core/test_hydrator.py` | Budget enforcement; priority order; truncation strategy labels; missing-body handling; custom token counters |
+
+**Block boundary test:** `pytest tests/unit/core/test_skill_graph.py tests/unit/core/test_ppr.py tests/unit/core/test_retrieval_pipeline.py tests/unit/core/test_hydrator.py -v`
+
+### Block B-059 — Tests Part 2
+
+| File | Purpose |
+|---|---|
+| `tests/unit/core/test_negative.py` | CRUD; adopt/reject; forgetting curve; per-skill cap; provenance round-trip |
+| `tests/unit/core/test_governor.py` | Every admission rejection path; every legal transition; state aliases; `record_load_outcome` lifecycle advancement; retirement |
+| `tests/unit/core/test_skill_security.py` | Every block pattern; every warning pattern; permission intersection; `skill_scope` enforcement under real file operations; audit-hook idempotence |
+| `tests/unit/core/test_evolver.py` | Sidecar round-trip; shadow isolation (candidates never touch the serving graph until promotion); promotion weight threshold; partial promotion; existing-node preservation |
 
 **Phase boundary test:**
-- Isolation: `pytest tests/unit/core/test_skills.py -v`
-- Chain: `pytest tests/`
-- Integration: store a skill, retrieve it by semantic similarity, and rebuild the index from Markdown
+- Isolation: `pytest tests/unit/core/test_skill_graph.py tests/unit/core/test_ppr.py tests/unit/core/test_retrieval_pipeline.py tests/unit/core/test_hydrator.py tests/unit/core/test_negative.py tests/unit/core/test_governor.py tests/unit/core/test_skill_security.py tests/unit/core/test_evolver.py -v`
+- Chain: `PYTHONPATH=python python3 -m pytest tests/ -q` — 1547 passed, 14 skipped, 7 xfailed, 5 xpassed
+- `ruff check python/codeguardian/ tests/` — `All checks passed!`
+- Integration: `library.retrieval().retrieve(...)` returns a `RetrievalBundle` with the correct stages recorded; `library.governor().admit(...)` rejects malicious bodies; graph rebuild from a real directory produces the expected node and edge counts; flag-off equals v1 byte-identically
+
+**Phase 12 v2 total: 6 blocks, 27 planned files, 2 verification-time Rule 1 escalations, 29 files touched total.**
+
+**What Phase 12 v2 does not deliver (documented residuals):**
+
+| Residual | Target phase |
+|---|---|
+| Agentic multi-hop retrieval (SkillGATE-style) | Future |
+| WASM-sandboxed skill execution | Future |
+| Cross-repo skill transfer / per-repo scoped skills | Phase 13+ |
+| Reranker proving itself on real workloads | Phase 13 |
+| Dependency version and test framework filter in Stage 0 | Phase 13 |
+| Fitness `−λ·cost` term (needs per-skill cost column) | Future |
+| Evolver shadow tables (v2 uses a sidecar JSON file) | Phase 13+ |
+| Automatic negative-knowledge decay (v2 is manual) | Phase 13 scheduler |
+| Richer provenance evidence (JSON blob vs reconstructed columns) | Future |
 
 ---
 
 ## 18. Phase 13 — Orchestrator
 
-### Block B-056 — Orchestrator Core
+### Block B-060 — Orchestrator Core
 
 | File | Purpose |
 |---|---|
@@ -822,13 +901,13 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/orchestrator/verification_prompt.py` | Per-run verification prompt |
 | `python/codeguardian/core/orchestrator/checkpointing.py` | Resume from last checkpoint |
 
-### Block B-057 — Orchestrator Implementation
+### Block B-061 — Orchestrator Implementation
 
 | File | Purpose |
 |---|---|
 | `python/codeguardian/core/orchestrator/langgraph_orchestrator.py` | Full pipeline implementation |
 
-### Block B-058 — Telemetry
+### Block B-062 — Telemetry
 
 | File | Purpose |
 |---|---|
@@ -837,7 +916,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/telemetry/tracing.py` | LangSmith trace correlation |
 | `python/codeguardian/core/telemetry/langsmith.py` | LangSmith integration |
 
-### Block B-059 — Orchestrator Tests
+### Block B-063 — Orchestrator Tests
 
 | File | Purpose |
 |---|---|
@@ -852,11 +931,13 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 - Chain: `pytest tests/`
 - Integration: run the full pipeline on a fixture repository, kill the process mid-run, resume, and verify the state is consistent
 
+**Phase 13 must build the orchestrator as a phase graph, not a hardcoded sequence.** This is the modularity-audit §7 recommendation. If the orchestrator is hardcoded as an eight-phase pipeline, v2 (greenfield, upgrade) will require a full pipeline refactor. If it interprets a `PhaseGraph` object, v2 adds new graph definitions only.
+
 ---
 
 ## 19. Phase 14 — CLI
 
-### Block B-060 — CLI Entry Point and Commands Part 1
+### Block B-064 — CLI Entry Point and Commands Part 1
 
 | File | Purpose |
 |---|---|
@@ -866,7 +947,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/cli/commands/run.py` | `codeguardian run` |
 | `python/codeguardian/cli/commands/recon.py` | `codeguardian recon` |
 
-### Block B-061 — CLI Commands Part 2
+### Block B-065 — CLI Commands Part 2
 
 | File | Purpose |
 |---|---|
@@ -876,7 +957,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/cli/commands/serve.py` | `codeguardian serve` |
 | `python/codeguardian/cli/commands/config.py` | `codeguardian config` |
 
-### Block B-062 — CLI Views
+### Block B-066 — CLI Views
 
 | File | Purpose |
 |---|---|
@@ -887,7 +968,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/cli/views/diff_view.py` | Diff preview |
 | `python/codeguardian/cli/views/verify_view.py` | Verification report |
 
-### Block B-063 — CLI UI Components
+### Block B-067 — CLI UI Components
 
 | File | Purpose |
 |---|---|
@@ -897,7 +978,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/cli/ui/prompts.py` | prompt_toolkit input |
 | `python/codeguardian/cli/ui/progress.py` | Progress bars |
 
-### Block B-064 — CLI Output Modes
+### Block B-068 — CLI Output Modes
 
 | File | Purpose |
 |---|---|
@@ -906,14 +987,14 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/cli/output/json.py` | JSON output |
 | `python/codeguardian/cli/output/sarif.py` | SARIF output |
 
-### Block B-065 — CLI Tests Part 1
+### Block B-069 — CLI Tests Part 1
 
 | File | Purpose |
 |---|---|
 | `tests/unit/cli/__init__.py` | CLI test package init |
 | `tests/unit/cli/test_commands.py` | Command tests |
 
-### Block B-066 — CLI Tests Part 2
+### Block B-070 — CLI Tests Part 2
 
 | File | Purpose |
 |---|---|
@@ -925,11 +1006,13 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 - Chain: `pytest tests/`
 - Integration: run every CLI command end-to-end with `--json` and verify schema conformance of every output
 
+**Phase 14 CLI includes the skill commands surfaced by Phase 12 v2:** `codeguardian skill list` (lifecycle states), `codeguardian skill show <name>` (record plus provenance), `codeguardian skill promote <name>` (`draft → trial`), `codeguardian skill retire <name>`, `codeguardian skill rejected` (reads `skill_admission_log`), `codeguardian skill graph <name>` (neighbors from `skill_graph_edges`).
+
 ---
 
 ## 20. Phase 15 — MCP and Reporters
 
-### Block B-067 — MCP Client
+### Block B-071 — MCP Client
 
 | File | Purpose |
 |---|---|
@@ -937,14 +1020,14 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/mcp/client.py` | Dynamic MCP client |
 | `python/codeguardian/core/mcp/transports.py` | stdio and streamable HTTP transports |
 
-### Block B-068 — MCP Server
+### Block B-072 — MCP Server
 
 | File | Purpose |
 |---|---|
 | `python/codeguardian/core/mcp/server.py` | MCP server |
 | `python/codeguardian/core/mcp/tools.py` | Exposed tool definitions |
 
-### Block B-069 — Reporters
+### Block B-073 — Reporters
 
 | File | Purpose |
 |---|---|
@@ -954,7 +1037,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/reporting/blast_summary.py` | Blast radius summary |
 | `python/codeguardian/core/reporting/run_summary.py` | Run summary |
 
-### Block B-070 — Reporter Output Formats
+### Block B-074 — Reporter Output Formats
 
 | File | Purpose |
 |---|---|
@@ -963,7 +1046,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `python/codeguardian/core/reporting/markdown_reporter.py` | Markdown reporter |
 | `tests/contracts/test_reporter_contract.py` | Reporter contract tests |
 
-### Block B-071 — MCP Tests
+### Block B-075 — MCP Tests
 
 | File | Purpose |
 |---|---|
@@ -980,7 +1063,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 
 ## 21. Phase 16 — Full Assembly
 
-### Block B-072 — Entry Point and Scripts
+### Block B-076 — Entry Point and Scripts
 
 | File | Purpose |
 |---|---|
@@ -990,7 +1073,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `scripts/build_docs.py` | Documentation build script |
 | `scripts/package.py` | Distribution packaging script |
 
-### Block B-073 — Release and Migration Scripts
+### Block B-077 — Release and Migration Scripts
 
 | File | Purpose |
 |---|---|
@@ -1000,7 +1083,7 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 | `scripts/validate_schemas.py` | Schema validation script |
 | `scripts/integration_phase.py` | Cross-phase integration script |
 
-### Block B-074 — End-to-End Tests and Fixtures
+### Block B-078 — End-to-End Tests and Fixtures
 
 | File | Purpose |
 |---|---|
@@ -1038,13 +1121,13 @@ At each phase boundary, the integration script covers every phase completed so f
 | Phase 9 | Discover every bundled plugin, call a tool, produce a SARIF report, load a runtime grammar, enforce a permission |
 | Phase 10 | Render every prompt through one code path |
 | Phase 11 | Run recon, blast, analyst, tester, writer against a fixture |
-| Phase 12 | Store a skill, retrieve it, rebuild the index |
+| Phase 12 | Store a skill, retrieve it, rebuild the index, admit and reject through the governor, adopt and reject a negative record |
 | Phase 13 | Full pipeline with checkpoint and resume |
 | Phase 14 | Every CLI command end-to-end |
 | Phase 15 | MCP client and server round trip, every reporter format |
 | Phase 16 | Full pipeline on every fixture, every artifact validates |
 
-The integration script lives at `scripts/integration_phase.py` and is written at B-073. Until then, each phase boundary runs its integration steps manually.
+The integration script lives at `scripts/integration_phase.py` and is written at B-077. Until then, each phase boundary runs its integration steps manually.
 
 ---
 
@@ -1067,25 +1150,34 @@ The integration script lives at `scripts/integration_phase.py` and is written at
 | Phase 6 — Rust Kernel | 5 | 14 |
 | Phase 7 — Rust Engines | 7 | 31 |
 | Phase 8 — Providers | 4 | 20 |
-| **Phase 9 — Plugins (merged)** | **8** | **36** |
+| Phase 9 — Plugins (merged) | 8 | 36 |
 | Phase 10 — Prompts | 1 | 7 |
 | Phase 11 — Agents | 3 | 10 |
-| Phase 12 — Skills Module | 2 | 6 |
+| **Phase 12 — Skills Module v2** | **6** | **29** |
 | Phase 13 — Orchestrator | 4 | 14 |
 | Phase 14 — CLI | 7 | 27 |
 | Phase 15 — MCP and Reporters | 5 | 17 |
 | Phase 16 — Full Assembly | 3 | 18 |
-| **Total** | **76** | **315** |
+| **Total** | **80** | **338** |
 
-76 blocks. Every block groups four or five files, except Phase 9 where the merged scope requires two larger blocks and one smaller block. Every phase ends with three tests. Every phase re-runs the integration from Phase 0 forward.
+80 blocks. Every block groups four or five files, except Phase 9 where the merged scope requires two larger blocks and one smaller block. Phase 12's blocks are all within the four-to-five range. Every phase ends with three tests. Every phase re-runs the integration from Phase 0 forward.
 
-**Change from the previous version.** Phase 9 grew from 6 blocks / 25 files to 8 blocks / 36 files. The originally-planned Phase 9.5 (runtime grammar loading) was merged into Phase 9. Total block count rose from 74 to 76. Total file count rose from 304 to 315.
+**Change from the previous version.**
+
+*Phase 9 growth (2026-10-19).* Phase 9 grew from 6 blocks / 25 files to 8 blocks / 36 files. The originally-planned Phase 9.5 (runtime grammar loading) was merged into Phase 9. Total block count rose from 74 to 76. Total file count rose from 304 to 315.
+
+*Phase 12 v2 growth (2026-11-06).* Phase 12 grew from 2 blocks / 6 files to 6 blocks / 29 files. The originally-planned Phase 12 (a flat hybrid retriever over Markdown) was replaced with a six-layer lifecycle-managed procedural memory system after the 2026 research literature showed the flat design degrades silently at scale — implicit routing collapses from 73.6% to 27.4% recall at 1,000 distractors, and skill libraries are the highest attack-success vector in production at 69.4%. The expansion adds a typed skill graph, a four-stage retrieval chain with fallbacks, a separate negative-knowledge tier, a governance gate, and a security layer. Total block count rose from 76 to 80. Total file count rose from 315 to 338.
+
+Because Phase 12 gained four blocks, all subsequent phases were renumbered: Phase 13 shifted from B-056–B-059 to B-060–B-063; Phase 14 from B-060–B-066 to B-064–B-070; Phase 15 from B-067–B-071 to B-071–B-075; Phase 16 from B-072–B-074 to B-076–B-078. `BUILD_STATE.md` was written before this renumbering and its Phase 13 section still references the old B-056–B-059 range; a follow-up edit to that file will bring it into sync.
+
+The full Phase 12 v2 rationale, the six-layer architecture, the four-stage decision chain, the five safety rules, and the complete residual inventory are recorded in `docs/summaries/Phase_12.md` Part II.
 
 ---
 
 ## 25. Related Documents
 
 - `docs/summaries/phase-9-design.md` — the complete Phase 9 design settlement (the seven weaknesses, the eight blocks, the exact file list, the behavioral assertions, the audit hook event table, the version negotiation rules, the three explicit residuals)
+- `docs/summaries/Phase_12.md` — the Phase 12 v2 design settlement (Part I preserves the superseded v1 settlement; Part II is the authoritative spec for the six-layer procedural memory system: the six layers, the four-stage decision chain, the Recon/Blast integration, the five safety rules, the two Rule 1 escalations, the complete decision log, and the twenty references)
 - `docs/04-architecture.md` — what each phase builds
 - `docs/05-data-model.md` — schemas each phase produces or consumes
 - `docs/06-api-contracts.md` — interfaces each phase implements

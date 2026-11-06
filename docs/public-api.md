@@ -7,10 +7,23 @@ For behavior, read the source or its docstring.
 The next chat must consult this file before asking for a source file to
 modify. If a symbol is not listed here, it is not public.
 
-**Snapshot:** end of Phase 5, plus the post-Phase-5 translation fix.
-**Test count:** 256 passing.
+**Snapshot:** end of Phase 12 v2.
+
+**Test count:** 1547 passing, 14 skipped, 7 xfailed, 5 xpassed.
+
+**Structure:** Two parts.
+
+- **Part I — Phases 0 through 5.** Retained verbatim from the pre-Phase-6
+  version of this file. Accurate for its era. Kept for cross-reference,
+  and because a future reader often wants to see the shape of the early
+  packages before the later phases layered on top of them.
+- **Part II — Phase 6 through Phase 12 v2 additions.** Documents every
+  module, symbol, and constant added since Part I was written. This part
+  is authoritative for the current state.
 
 ---
+
+# Part I — Phases 0 through 5
 
 ## `codeguardian` (package root)
 
@@ -74,27 +87,11 @@ class ErrorCategory(str, Enum):
     AUTH = "auth"
 
 class ErrorCode(str, Enum):
-    # 46 members, listed in codeguardian/core/errors/codes.py
-    # Repository: REPO_CLONE_FAILED, REPO_AUTH_FAILED, REPO_NOT_FOUND,
-    #             PATTERN_INVALID, DIFF_COMPUTE_FAILED, METADATA_UNAVAILABLE,
-    #             FILE_NOT_FOUND, FILE_TOO_LARGE, FILE_BINARY,
-    #             FILE_PERMISSION_DENIED
-    # Apply: APPLY_CONFLICT, APPLY_AUTH_FAILED, APPLY_PARTIAL,
-    #        ROLLBACK_FAILED, ROLLBACK_REF_NOT_FOUND
-    # Model: MODEL_UNAVAILABLE, MODEL_RATE_LIMITED, MODEL_CONTEXT_EXCEEDED,
-    #        MODEL_AUTH_FAILED, MODEL_UNKNOWN, PROVIDER_UNAVAILABLE
-    # Sandbox: SANDBOX_CREATE_FAILED, SANDBOX_IMAGE_UNAVAILABLE,
-    #          SANDBOX_QUOTA_EXCEEDED, SANDBOX_TIMEOUT, SANDBOX_OOM,
-    #          SANDBOX_EXEC_FAILED, SANDBOX_NOT_FOUND
-    # MCP: MCP_SERVER_UNAVAILABLE, MCP_PROTOCOL_ERROR, MCP_TOOL_NOT_FOUND,
-    #      MCP_TOOL_TIMEOUT, MCP_TOOL_ERROR
-    # Plugin: PLUGIN_LOAD_FAILED, PLUGIN_MANIFEST_INVALID,
-    #         PLUGIN_PERMISSION_DENIED, PLUGIN_DISABLED
-    # Network: NET_TIMEOUT, NET_UNREACHABLE, NET_DNS_FAILED
-    # Config: CONFIG_INVALID, CONFIG_PARSE_ERROR, SECRET_KEYCHAIN_ERROR
-    # Storage: STORAGE_MIGRATION_FAILED, STORAGE_SCHEMA_INVALID,
-    #          STORAGE_GRAPH_CORRUPTED
-    # Internal: SYS_INTERNAL, SYS_NOT_IMPLEMENTED, SYS_INVARIANT_VIOLATED
+    # Members are listed in codeguardian/core/errors/codes.py.
+    # Categories (Repository, Apply, Model, Sandbox, MCP, Plugin,
+    # Grammar, Network, Config, Storage, Internal) are described in
+    # docs/06-api-contracts.md §15.
+    # Part II records the codes added since this snapshot was taken.
 ```
 
 ### Data classes
@@ -143,62 +140,16 @@ DEFAULT_MARKER: str = "[REDACTED]"
 
 ```python
 category_of(code: ErrorCode | str) -> ErrorCategory
-    # Raises UnknownCodeError.
-
 retry_policy_of(code: ErrorCode | str) -> RetryPolicy
-    # Raises UnknownCodeError.
-
-compute_delay(
-    attempt: int,
-    policy: RetryPolicy,
-    *,
-    rng: random.Random | None = None,
-) -> float
-    # Raises ValueError if attempt < 1.
-
-retry_sync(
-    fn: Callable[P, R],
-    *args: P.args,
-    retry_categories: set[ErrorCategory] | None = None,
-    on_retry: Callable[[int, float, CodeGuardianError], None] | None = None,
-    sleep: Callable[[float], None] = time.sleep,
-    **kwargs: P.kwargs,
-) -> R
-
-retry_async(
-    fn: Callable[P, Awaitable[R]],
-    *args: P.args,
-    retry_categories: set[ErrorCategory] | None = None,
-    on_retry: Callable[[int, float, CodeGuardianError], None] | None = None,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    **kwargs: P.kwargs,
-) -> R
-
+compute_delay(attempt, policy, *, rng=None) -> float
+retry_sync(fn, *args, retry_categories=None, on_retry=None, sleep=time.sleep, **kwargs) -> R
+retry_async(fn, *args, retry_categories=None, on_retry=None, sleep=asyncio.sleep, **kwargs) -> R
 translate(exc: BaseException) -> CodeGuardianError
-    # Idempotent: returns CodeGuardianError unchanged.
-    # The mapping table covers:
-    #   FileNotFoundError, IsADirectoryError, NotADirectoryError
-    #     -> FILE_NOT_FOUND
-    #   PermissionError -> FILE_PERMISSION_DENIED
-    #   FileExistsError -> SYS_INTERNAL
-    #   ConnectionRefusedError, ConnectionResetError,
-    #     ConnectionAbortedError, BrokenPipeError -> NET_UNREACHABLE
-    #   socket.gaierror -> NET_DNS_FAILED
-    #   TimeoutError -> NET_TIMEOUT
-    #   UnicodeDecodeError -> FILE_BINARY
-    #   json.JSONDecodeError -> CONFIG_PARSE_ERROR
-    #   tomllib.TOMLDecodeError -> CONFIG_PARSE_ERROR
-    # Anything else -> SYS_INTERNAL.
-
 typed(fn: Callable[P, R]) -> Callable[P, R]
-    # Supports sync and async functions.
-    # Does not translate BaseException subclasses that are not
-    # Exception subclasses (KeyboardInterrupt, SystemExit,
-    # asyncio.CancelledError).
-
 redact(value: Any, *, marker: str = DEFAULT_MARKER) -> Any
-    # Never mutates input. Returns a new structure.
 ```
+
+Behaviour, error mapping, and idempotence guarantees are in the docstrings of `retry.py`, `translation.py`, and `redaction.py`.
 
 ---
 
@@ -206,174 +157,35 @@ redact(value: Any, *, marker: str = DEFAULT_MARKER) -> Any
 
 ```python
 from codeguardian.core.config import (
-    VALID_API_KEY_SOURCES,
-    VALID_LOG_LEVELS,
-    VALID_MODEL_ROLES,
-    VALID_MODES,
-    VALID_PROVIDER_NAMES,
-    VALID_SANDBOX_BACKENDS,
-    CODEGUARDIAN_CONFIG_ENV,
-    CODEGUARDIAN_HOME_ENV,
-    DEFAULT_ARTIFACTS_RETENTION_DAYS,
-    DEFAULT_AUDIT_RETENTION_DAYS,
-    DEFAULT_CONFIG_DIR,
-    DEFAULT_CONFIG_FILENAME,
-    DEFAULT_DATABASE,
-    DEFAULT_GRAPH_RETENTION_DAYS,
-    DEFAULT_LOG_LEVEL,
-    DEFAULT_MODE,
-    DEFAULT_NETWORK_DURING_DEPS,
-    DEFAULT_SANDBOX_BACKEND,
-    DEFAULT_SANDBOX_CPU_CORES,
-    DEFAULT_SANDBOX_MEMORY_MB,
-    DEFAULT_SANDBOX_PROCESS_LIMIT,
-    SERVICE_NAME,
-    Config,
-    ExclusionsConfig,
-    GeneralConfig,
-    MCPConfig,
-    MCPServerConfig,
-    ModelRoleConfig,
-    ModelsConfig,
-    ProviderConfig,
-    ProvidersConfig,
-    SandboxConfig,
-    StorageConfig,
-    delete_api_key,
-    get_api_key,
-    load_config,
-    set_api_key,
-    validate,
+    VALID_API_KEY_SOURCES, VALID_LOG_LEVELS, VALID_MODEL_ROLES,
+    VALID_MODES, VALID_PROVIDER_NAMES, VALID_SANDBOX_BACKENDS,
+    CODEGUARDIAN_CONFIG_ENV, CODEGUARDIAN_HOME_ENV,
+    DEFAULT_ARTIFACTS_RETENTION_DAYS, DEFAULT_AUDIT_RETENTION_DAYS,
+    DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILENAME, DEFAULT_DATABASE,
+    DEFAULT_GRAPH_RETENTION_DAYS, DEFAULT_LOG_LEVEL, DEFAULT_MODE,
+    DEFAULT_NETWORK_DURING_DEPS, DEFAULT_SANDBOX_BACKEND,
+    DEFAULT_SANDBOX_CPU_CORES, DEFAULT_SANDBOX_MEMORY_MB,
+    DEFAULT_SANDBOX_PROCESS_LIMIT, SERVICE_NAME,
+    Config, ExclusionsConfig, GeneralConfig, MCPConfig,
+    MCPServerConfig, ModelRoleConfig, ModelsConfig, ProviderConfig,
+    ProvidersConfig, SandboxConfig, StorageConfig,
+    delete_api_key, get_api_key, load_config, set_api_key, validate,
 )
 ```
 
-### Constants
+Data classes: `GeneralConfig`, `ModelRoleConfig`, `ModelsConfig`, `ProviderConfig`, `ProvidersConfig`, `StorageConfig`, `SandboxConfig`, `MCPServerConfig`, `MCPConfig`, `ExclusionsConfig`, `Config`. All `@dataclass(frozen=True, slots=True)`. Field lists are in `core/config/schema.py`.
 
-```python
-VALID_MODES: frozenset[str]
-VALID_SANDBOX_BACKENDS: frozenset[str]
-VALID_LOG_LEVELS: frozenset[str]
-VALID_MODEL_ROLES: frozenset[str]
-VALID_API_KEY_SOURCES: frozenset[str]
-VALID_PROVIDER_NAMES: frozenset[str]
-
-CODEGUARDIAN_HOME_ENV: str = "CODEGUARDIAN_HOME"
-CODEGUARDIAN_CONFIG_ENV: str = "CODEGUARDIAN_CONFIG"
-DEFAULT_CONFIG_DIR: str
-DEFAULT_CONFIG_FILENAME: str
-DEFAULT_MODE: str
-DEFAULT_SANDBOX_BACKEND: str
-DEFAULT_LOG_LEVEL: str
-DEFAULT_DATABASE: str
-DEFAULT_ARTIFACTS_RETENTION_DAYS: int
-DEFAULT_GRAPH_RETENTION_DAYS: int
-DEFAULT_AUDIT_RETENTION_DAYS: int
-DEFAULT_SANDBOX_MEMORY_MB: int
-DEFAULT_SANDBOX_CPU_CORES: int
-DEFAULT_SANDBOX_PROCESS_LIMIT: int
-DEFAULT_NETWORK_DURING_DEPS: bool
-SERVICE_NAME: str
-```
-
-### Data classes (all frozen, slots)
-
-```python
-@dataclass(frozen=True, slots=True)
-class GeneralConfig:
-    mode: str = DEFAULT_MODE
-    sandbox_backend: str = DEFAULT_SANDBOX_BACKEND
-    log_level: str = DEFAULT_LOG_LEVEL
-
-@dataclass(frozen=True, slots=True)
-class ModelRoleConfig:
-    provider: str
-    model: str
-
-@dataclass(frozen=True, slots=True)
-class ModelsConfig:
-    analyst: ModelRoleConfig | None = None
-    tester: ModelRoleConfig | None = None
-    writer: ModelRoleConfig | None = None
-    correctness_verifier: ModelRoleConfig | None = None
-    security_verifier: ModelRoleConfig | None = None
-    contract_verifier: ModelRoleConfig | None = None
-    skill_curator: ModelRoleConfig | None = None
-
-@dataclass(frozen=True, slots=True)
-class ProviderConfig:
-    api_key_source: str | None = None
-    base_url: str | None = None
-
-@dataclass(frozen=True, slots=True)
-class ProvidersConfig:
-    anthropic: ProviderConfig | None = None
-    openai: ProviderConfig | None = None
-    deepseek: ProviderConfig | None = None
-    local: ProviderConfig | None = None
-
-@dataclass(frozen=True, slots=True)
-class StorageConfig:
-    database: str = DEFAULT_DATABASE
-    artifacts_retention_days: int = DEFAULT_ARTIFACTS_RETENTION_DAYS
-    graph_retention_days: int = DEFAULT_GRAPH_RETENTION_DAYS
-    audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
-
-@dataclass(frozen=True, slots=True)
-class SandboxConfig:
-    memory_limit_mb: int = DEFAULT_SANDBOX_MEMORY_MB
-    cpu_limit_cores: int = DEFAULT_SANDBOX_CPU_CORES
-    process_limit: int = DEFAULT_SANDBOX_PROCESS_LIMIT
-    network_during_deps: bool = DEFAULT_NETWORK_DURING_DEPS
-
-@dataclass(frozen=True, slots=True)
-class MCPServerConfig:
-    name: str
-    command: str | None = None
-    args: tuple[str, ...] = ()
-    url: str | None = None
-
-@dataclass(frozen=True, slots=True)
-class MCPConfig:
-    servers: tuple[MCPServerConfig, ...] = ()
-
-@dataclass(frozen=True, slots=True)
-class ExclusionsConfig:
-    patterns: tuple[str, ...] = ()
-
-@dataclass(frozen=True, slots=True)
-class Config:
-    general: GeneralConfig = GeneralConfig()
-    models: ModelsConfig = ModelsConfig()
-    providers: ProvidersConfig = ProvidersConfig()
-    storage: StorageConfig = StorageConfig()
-    sandbox: SandboxConfig = SandboxConfig()
-    mcp: MCPConfig = MCPConfig()
-    exclusions: ExclusionsConfig = ExclusionsConfig()
-```
-
-### Functions
+Functions:
 
 ```python
 validate(raw: Mapping[str, Any] | None) -> Config
-    # Raises CodeGuardianError(CONFIG_INVALID) with details["path"].
-
-load_config(
-    path: str | Path | None = None,
-    env: Mapping[str, str] | None = None,
-) -> Config
-    # Raises CodeGuardianError with CONFIG_PARSE_ERROR,
-    # CONFIG_INVALID, or FILE_PERMISSION_DENIED.
-
+load_config(path=None, env=None) -> Config
 get_api_key(provider: str) -> str | None
-    # Returns None when keyring is unavailable or no key is stored.
-
 set_api_key(provider: str, value: str) -> None
-    # Raises CodeGuardianError(SECRET_KEYCHAIN_ERROR) or
-    # CodeGuardianError(CONFIG_INVALID) for empty input.
-
 delete_api_key(provider: str) -> None
-    # Succeeds silently if the key was not present.
 ```
+
+Part II adds `SkillsConfig` and 16 new `DEFAULT_SKILLS_*` constants.
 
 ---
 
@@ -381,333 +193,19 @@ delete_api_key(provider: str) -> None
 
 ```python
 from codeguardian.core.storage import (
-    CPGHeader,
-    Cache,
-    CleanupSummary,
-    FilesystemStore,
-    GraphStore,
-    MigrationResult,
-    MigrationRunner,
-    SkillStore,
-    SQLiteStore,
+    CPGHeader, Cache, CleanupSummary, FilesystemStore, GraphStore,
+    MigrationResult, MigrationRunner, SkillStore, SQLiteStore,
     run_cleanup,
 )
 ```
 
-### `CPGHeader`
-
-```python
-@dataclass(frozen=True, slots=True)
-class CPGHeader:
-    format_version: int
-    flags: int
-    node_count: int
-    edge_count: int
-    payload_offset: int
-    payload_length: int
-    payload_checksum: int
-
-    @property
-    def incremental(self) -> bool: ...
-```
-
-### `SQLiteStore`
-
-```python
-class SQLiteStore:
-    def __init__(self, db_path: Path) -> None: ...
-    @property
-    def db_path(self) -> Path: ...
-    @property
-    def connection(self) -> sqlite3.Connection: ...
-    def open(self) -> None: ...
-    def close(self) -> None: ...
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor: ...
-    def query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]: ...
-    def execute_script(self, script: str) -> None: ...
-    def is_migration_applied(self, version: str) -> bool: ...
-    def record_migration(self, version: str, applied_at: str) -> None: ...
-    def __enter__(self) -> SQLiteStore: ...
-    def __exit__(self, *args: Any) -> None: ...
-```
-
-### `FilesystemStore`
-
-```python
-class FilesystemStore:
-    def __init__(self, root: Path, schemas_dir: Path) -> None: ...
-    @property
-    def root(self) -> Path: ...
-    @property
-    def schemas_dir(self) -> Path: ...
-    def artifact_path(self, repo_id: str, run_id: str, filename: str) -> Path: ...
-    def write_artifact(
-        self,
-        repo_id: str,
-        run_id: str,
-        filename: str,
-        data: Mapping[str, Any],
-        schema_filename: str,
-    ) -> Path: ...
-    def read_artifact(
-        self, repo_id: str, run_id: str, filename: str
-    ) -> dict[str, Any]: ...
-    def write_text(
-        self, repo_id: str, run_id: str, filename: str, content: str
-    ) -> Path: ...
-    def read_text(self, repo_id: str, run_id: str, filename: str) -> str: ...
-    def delete_run(self, repo_id: str, run_id: str) -> None: ...
-```
-
-### `GraphStore`
-
-```python
-class GraphStore:
-    def __init__(self, root: Path, sqlite_store: SQLiteStore) -> None: ...
-    def cpg_path(self, repo_id: str, commit_hash: str) -> Path: ...
-    def exists(self, repo_id: str, commit_hash: str) -> bool: ...
-    def read_header(self, repo_id: str, commit_hash: str) -> CPGHeader: ...
-    def write_metadata(
-        self,
-        repo_id: str,
-        commit_hash: str,
-        header: CPGHeader,
-        binary_path: Path,
-        build_duration_ms: int | None = None,
-    ) -> None: ...
-    def read_metadata(
-        self, repo_id: str, commit_hash: str
-    ) -> dict[str, object] | None: ...
-    def delete(
-        self,
-        repo_id: str,
-        commit_hash: str,
-        *,
-        remove_metadata: bool = True,
-    ) -> bool: ...
-```
-
-### `Cache`
-
-```python
-class Cache:
-    def __init__(
-        self,
-        sqlite_store: SQLiteStore,
-        filesystem_store: FilesystemStore,
-        repo_id: str,
-        *,
-        max_memory_entries: int = 256,
-        inline_threshold_bytes: int = 65536,
-    ) -> None: ...
-    @property
-    def memory_size(self) -> int: ...
-    def get_memory(self, key: str) -> Any | None: ...
-    def put_memory(self, key: str, value: Any) -> None: ...
-    def clear_memory(self) -> None: ...
-    def get_disk(self, commit_hash: str, cache_type: str) -> bytes | None: ...
-    def put_disk(self, commit_hash: str, cache_type: str, payload: bytes) -> None: ...
-    def invalidate(self, commit_hash: str, cache_type: str) -> None: ...
-```
-
-### `MigrationRunner`
-
-```python
-@dataclass(frozen=True, slots=True)
-class MigrationResult:
-    applied: tuple[str, ...]
-    skipped: tuple[str, ...]
-
-class MigrationRunner:
-    def __init__(
-        self,
-        sqlite_store: SQLiteStore,
-        migrations_dir: Path | None = None,
-    ) -> None: ...
-    @property
-    def migrations_dir(self) -> Path: ...
-    def run(self) -> MigrationResult: ...
-```
-
-### `Cleanup`
-
-```python
-@dataclass(frozen=True, slots=True)
-class CleanupSummary:
-    runs_swept: int
-    run_files_deleted: int
-    graph_files_deleted: int
-    cache_entries_deleted: int
-    bytes_freed: int
-    wal_checkpointed: bool
-
-def run_cleanup(
-    sqlite_store: SQLiteStore,
-    filesystem_store: FilesystemStore,
-    graph_store: GraphStore,
-    *,
-    now: datetime | None = None,
-    artifacts_retention_days: int = 30,
-    graph_retention_days: int = 90,
-    wal_threshold_bytes: int = 104857600,
-) -> CleanupSummary: ...
-```
-
-### `SkillStore`
-
-```python
-class SkillStore:
-    def __init__(
-        self,
-        sqlite_store: SQLiteStore,
-        root: Path,
-        schemas_dir: Path,
-    ) -> None: ...
-    @property
-    def root(self) -> Path: ...
-    def add(
-        self,
-        name: str,
-        frontmatter: Mapping[str, Any],
-        body: str,
-        embedding: list[float] | None = None,
-        *,
-        overwrite: bool = False,
-    ) -> Path: ...
-    def get(self, name: str) -> dict[str, Any] | None: ...
-    def remove(self, name: str) -> bool: ...
-    def list_all(self) -> list[dict[str, Any]]: ...
-    def count(self) -> int: ...
-    def search_keyword(self, query: str, limit: int = 10) -> list[dict[str, Any]]: ...
-    def search_semantic(
-        self, embedding: list[float], limit: int = 10
-    ) -> list[dict[str, Any]]: ...
-    def record_feedback(
-        self,
-        name: str,
-        run_id: str,
-        outcome: str,
-        task_description: str | None = None,
-    ) -> None: ...
-    def rebuild_index(self) -> int: ...
-```
+Exports and methods are documented in §`SQLiteStore` through §`SkillStore` of the Phase-5 snapshot. **Part II records two behaviour changes to `SkillStore`** (internal upsert pattern and `remove` semantics) that emerged in Phase 12 v2.
 
 ---
 
 ## `codeguardian.interfaces`
 
-Forty-three symbols. Re-exported dynamically at import time, declared statically in a `TYPE_CHECKING` block so mypy can see them.
-
-```python
-from codeguardian.interfaces import (
-    # repository
-    FileChange,
-    RepoMetadata,
-    RepositoryProvider,
-    # apply
-    ApplyProvider,
-    ApplyResult,
-    ConsentRecord,
-    ConsentScope,
-    RollbackResult,
-    # model
-    ModelChunk,
-    ModelInfo,
-    ModelOptions,
-    ModelProvider,
-    ModelResponse,
-    # sandbox
-    ExecutionResult,
-    ResourceLimits,
-    SandboxBackend,
-    SandboxHandle,
-    SandboxSpec,
-    # orchestrator
-    Orchestrator,
-    RunConfig,
-    RunMode,
-    RunResult,
-    RunState,
-    RunStatus,
-    # agent
-    Agent,
-    # tool
-    ToolDescriptor,
-    ToolPlugin,
-    # verifier
-    ChangeKind,
-    ContractAssertion,
-    Finding,
-    Severity,
-    VerdictValue,
-    VerifierContext,
-    VerifierPlugin,
-    VerifierVerdict,
-    # reporter
-    ReporterPlugin,
-    # language
-    LanguagePlugin,
-    ReliabilityTier,
-    TestResult,
-    # mcp
-    MCPClient,
-    MCPServer,
-    MCPTransport,
-    ToolResult,
-)
-```
-
-### Protocols
-
-| Protocol | Methods | `runtime_checkable` |
-|---|---|---|
-| `RepositoryProvider` | clone, read_file, list_files, get_diff, get_metadata | No |
-| `ApplyProvider` | apply, rollback | No |
-| `ModelProvider` | complete, stream, count_tokens, get_available_models | No |
-| `SandboxBackend` | create, execute, destroy, supports_language, get_resource_limits | No |
-| `Orchestrator` | run, resume, pause, get_state | No |
-| `Agent[InputT, OutputT]` | run (async) | No |
-| `ToolPlugin` | call (async) | Yes |
-| `VerifierPlugin` | verify (async) | Yes |
-| `ReporterPlugin` | report | Yes |
-| `LanguagePlugin` | detect, parse, generate_test, run_tests | Yes |
-| `MCPClient` | discover_tools, call_tool, list_servers | No |
-| `MCPServer` | start, stop, list_tools | No |
-
-### Type aliases
-
-```python
-ConsentScope = Literal["apply", "verify"]
-RunMode = Literal["legacy", "greenfield"]
-RunStatus = Literal["running", "success", "failure", "stopped", "dry_run", "paused"]
-ChangeKind = Literal["syntactic", "semantic", "contract", "signature"]
-Severity = Literal["info", "warning", "critical"]
-VerdictValue = Literal["pass", "fail", "uncertain"]
-ReliabilityTier = Literal["high", "best-effort"]
-MCPTransport = Literal["stdio", "http"]
-```
-
-### DTOs
-
-All DTOs are `@dataclass(frozen=True, slots=True)`. Field lists are in the source; the interfaces are grouped by their owning module:
-
-| Module | DTOs |
-|---|---|
-| `interfaces/repository.py` | `FileChange`, `RepoMetadata` |
-| `interfaces/apply.py` | `ConsentRecord`, `ApplyResult`, `RollbackResult` |
-| `interfaces/model.py` | `ModelOptions`, `ModelResponse`, `ModelChunk`, `ModelInfo` |
-| `interfaces/sandbox.py` | `SandboxSpec`, `SandboxHandle`, `ExecutionResult`, `ResourceLimits` |
-| `interfaces/orchestrator.py` | `RunConfig`, `RunState`, `RunResult` |
-| `interfaces/tool.py` | `ToolDescriptor` |
-| `interfaces/verifier.py` | `ContractAssertion`, `Finding`, `VerifierContext`, `VerifierVerdict` |
-| `interfaces/language.py` | `TestResult` |
-| `interfaces/mcp_client.py` | `ToolResult` |
-
-### Async rule
-
-Async methods: `ModelProvider.complete`, `ModelProvider.stream`, `Agent.run`, `ToolPlugin.call`, `VerifierPlugin.verify`, `MCPClient.discover_tools`, `MCPClient.call_tool`, `MCPServer.start`, `MCPServer.stop`.
-
-Sync methods: everything else.
+Twelve Protocols. Re-exported dynamically at import time, declared statically in a `TYPE_CHECKING` block. Member list is the union of the `__all__` of every module in `interfaces/`. Part II adds one new Protocol (`ContextProvider`) and three new fields on `ToolPlugin`.
 
 ---
 
@@ -715,253 +213,856 @@ Sync methods: everything else.
 
 ```python
 from codeguardian.core.bridges import (
-    AUDIT_EXPORT,
-    AUDIT_VERIFY,
-    AUDIT_WRITE,
-    RpcError,
-    RpcNotification,
-    RpcRequest,
-    RpcResponse,
-    SANDBOX_CREATE,
-    SANDBOX_DESTROY,
-    SANDBOX_EXECUTE,
-    SANDBOX_HEALTH,
-)
-```
-
-### Constants
-
-```python
-AUDIT_WRITE: Final[str] = "audit.write"
-AUDIT_VERIFY: Final[str] = "audit.verify"
-AUDIT_EXPORT: Final[str] = "audit.export"
-SANDBOX_CREATE: Final[str] = "sandbox.create"
-SANDBOX_EXECUTE: Final[str] = "sandbox.execute"
-SANDBOX_DESTROY: Final[str] = "sandbox.destroy"
-SANDBOX_HEALTH: Final[str] = "sandbox.health"
-```
-
-### Data classes
-
-```python
-@dataclass(frozen=True, slots=True)
-class RpcError:
-    code: int
-    message: str
-    data: object | None = None
-
-@dataclass(frozen=True, slots=True)
-class RpcRequest:
-    id: str | int
-    method: str
-    params: dict[str, object]
-
-@dataclass(frozen=True, slots=True)
-class RpcResponse:
-    id: str | int
-    result: object | None = None
-    error: RpcError | None = None
-
-@dataclass(frozen=True, slots=True)
-class RpcNotification:
-    method: str
-    params: dict[str, object]
-```
-
----
-
-## `codeguardian.core.bridges.pyo3_bridge`
-
-```python
-from codeguardian.core.bridges.pyo3_bridge import (
-    PyO3Bridge,
-    is_native_available,
+    AUDIT_EXPORT, AUDIT_VERIFY, AUDIT_WRITE,
+    RpcError, RpcNotification, RpcRequest, RpcResponse,
+    SANDBOX_CREATE, SANDBOX_DESTROY, SANDBOX_EXECUTE, SANDBOX_HEALTH,
 )
 
-def is_native_available() -> bool: ...
-
-class PyO3Bridge:
-    def __init__(self) -> None: ...
-    def echo(self, value: str) -> str: ...
-```
-
-Raises `CodeGuardianError(SYS_NOT_IMPLEMENTED)` on any call if the native extension `codeguardian._native` is not built.
-
-The only function exposed in Phase 5 is `echo`. Phase 6 adds the kernel bindings.
-
----
-
-## `codeguardian.core.bridges.jsonrpc_bridge`
-
-```python
+from codeguardian.core.bridges.pyo3_bridge import PyO3Bridge, is_native_available
 from codeguardian.core.bridges.jsonrpc_bridge import JSONRPCBridge
+```
 
-class JSONRPCBridge:
-    def __init__(
-        self,
-        command: Sequence[str],
-        *,
-        cwd: Path | None = None,
-    ) -> None: ...
+Phase-5 PyO3Bridge exposed only `echo`. **Part II records the growth of `_native` across Phases 6, 7, 9, and 10.**
+
+---
+
+## Rust crates (Phase-5 snapshot)
+
+At Phase 5, `codeguardian-rpc` had real content, `codeguardian-pyo3` had `echo`, `codeguardian-kernel` was docstring-only, and four crates were stubs. **Part II records what each crate contains after Phase 7.**
+
+---
+
+# Part II — Phase 6 through Phase 12 v2 additions
+
+Each section lists the exports added in that phase. Signatures are transcribed where the writer is confident; where a signature would need source verification, the section says so and refers to source. This matches the convention Part I already uses for DTO fields.
+
+---
+
+## Phase 6 — Kernel bindings on `_native`
+
+`codeguardian._native` gained three PyO3 functions.
+
+```python
+# codeguardian._native  (imported as `from codeguardian import _native`)
+
+def kernel_version() -> str: ...
+    # Returns the kernel's semantic version string.
+
+def build_graph(sources: list[tuple[str, str, str]]) -> bytes: ...
+    # sources is [(path, language, content), ...].
+    # Returns the serialized Code Property Graph bytes.
+    # GIL is released during the call.
+
+def graph_summary(data: bytes) -> dict: ...
+    # Reads a serialized CPG and returns:
+    # {"node_count": int, "edge_count": int,
+    #  "file_count": int, "incremental": bool}
+
+class KernelError(Exception):
+    code: str       # "PARSE_FAILED", "CHECKSUM_MISMATCH", "INVALID_MAGIC",
+                    # "TREE_TOO_DEEP", "FILE_NOT_FOUND",
+                    # "BLAST_TARGET_NOT_FOUND", "BLAST_TARGET_AMBIGUOUS"
+    message: str
+    details: dict
+```
+
+Every `_native` function raises `KernelError` on failure. The Python side is responsible for translating a `KernelError.code` into a `CodeGuardianError` code. The pattern in `pyo3/kernel.rs` translates every kernel variant. The JSON-RPC path (Phase 7) translates every failure to `SYS_INTERNAL`.
+
+Rust-side content is documented in `docs/summaries/phases-6-to-7.md` §10. The kernel crate now contains: `parser.rs`, `ast.rs`, `symbol_table.rs`, `call_graph.rs`, `cfg.rs`, `pdg.rs`, `cpg.rs`, `incremental.rs`, `query.rs`, plus the language modules under `langs/` (populated in the multi-language extension after Phase 8 — see below).
+
+### Multi-language extension (between Phase 8 and Phase 9)
+
+The kernel's `Language` enum grew from 2 variants (Python, TypeScript) to 8 (adding JavaScript, Java, Go, Rust, C, C++). `NodeKind` grew from 55 to 82 variants. This is recorded in `docs/summaries/phases-0-to-8.md` §13. It is a Rust internal; the Python-facing `_native.build_graph` signature did not change.
+
+---
+
+## Phase 7 — Engine bindings on `_native` and the `rpcd` daemon
+
+`_native` gained four PyO3 functions, and a new Rust binary (`codeguardian-rpcd`) was introduced.
+
+```python
+# codeguardian._native  (continued)
+
+def compute_blast(
+    cpg_bytes: bytes,
+    target_path: str,
+    target_qualified_name: str,
+) -> dict: ...
+    # Returns:
+    # {
+    #   "target_node_id": int,
+    #   "direct_callers": list[dict],
+    #   "transitive_callers": list[dict],
+    #   "transitive_truncated": bool,
+    #   "contract_violations": list[dict],
+    #   "coverage_gaps": list[dict],
+    #   "blast_score": int,      # 0..100
+    #   "recommendation": str,   # "proceed" | "review" | "block"
+    # }
+    # GIL is released during the call.
+    # Raises KernelError with code BLAST_TARGET_NOT_FOUND or
+    # BLAST_TARGET_AMBIGUOUS on resolution failure.
+
+def check_sandbox_spec(
+    language: str,
+    memory_mb: int,
+    cpu_cores: int,
+    process_limit: int,
+    max_memory_mb: int,
+    max_cpu_cores: int,
+    max_process_limit: int,
+    allowed_languages: list[str],
+) -> dict: ...
+    # Returns a policy verdict dict. Allowed means no violation.
+    # Policy is fail-closed: an empty allow list denies every language.
+
+def check_plugin_permissions(
+    plugin_name: str,
+    filesystem: str,        # "none" | "sandbox_only" | "read_only" | "full"
+    network: bool,
+    process_spawn: bool,
+    env_read: list[str],
+    allowed_filesystem: str,
+    allow_network: bool,
+    allow_process_spawn: bool,
+    allowed_env_keys: list[str],
+) -> dict: ...
+    # Filesystem levels are ordered. "does the request exceed the grant?"
+    # is a single comparison.
+
+def detect_host_limits() -> dict: ...
+    # Reads /proc/meminfo, /proc/cpuinfo, /proc/sys/kernel/pid_max.
+    # Returns {"total_memory_mb": int, "total_cpu_cores": int,
+    #          "max_processes": int}. Fails on platforms without /proc.
+```
+
+### `rpcd` binary
+
+Location: `rust/crates/codeguardian-rpcd/`. Spawned by `JSONRPCBridge`. Speaks JSON-RPC 2.0 over stdio. Two-worker tokio runtime.
+
+Seven handlers, registered at startup:
+
+| Method | Purpose |
+|---|---|
+| `sandbox.health` | Report available backends |
+| `sandbox.create` | Create a sandbox handle |
+| `sandbox.destroy` | Destroy a sandbox handle |
+| `sandbox.execute` | Run a command inside a sandbox |
+| `audit.write` | Append an audit entry |
+| `audit.verify` | Verify a hash chain |
+| `audit.export` | Export an audit log |
+
+Every sandbox and audit operation crosses the Python-Rust boundary via these seven methods. Python never holds a direct handle to the log file or the bwrap process.
+
+---
+
+## Phase 8 — Providers and sandbox backends
+
+### `codeguardian.core.providers`
+
+```python
+from codeguardian.core.providers import (
+    # Repositories
+    LocalProvider, GitHubProvider, GitLabProvider,
+    # Apply
+    ApplyProvider,
+    # Models
+    AnthropicProvider, OpenAIProvider, DeepSeekProvider,
+    OpenAICompatibleProvider,
+    ModelRegistry, FallbackModelProvider,
+    RegistryModel, RoleConfig,
+)
+```
+
+| Class | Implements | Notes |
+|---|---|---|
+| `LocalProvider` | `RepositoryProvider` | Real `git` subprocess. `_resolve_relative` walks `.resolve()` then `.relative_to(root)` to reject escapes. |
+| `GitHubProvider` | `RepositoryProvider` | Subclass of `LocalProvider`, URL-prefix validation. |
+| `GitLabProvider` | `RepositoryProvider` | Subclass of `LocalProvider`, GitLab prefixes. |
+| `ApplyProvider` | `ApplyProvider` | Consent-gated. `sha256(diff) == consent.diff_hash` before any write. |
+| `AnthropicProvider` | `ModelProvider` | Anthropic Messages API. |
+| `OpenAIProvider` | `ModelProvider` | OpenAI Chat Completions. |
+| `DeepSeekProvider` | `ModelProvider` | Subclass of `OpenAIProvider`. |
+| `OpenAICompatibleProvider` | `ModelProvider` | Groq, Ollama, vLLM, llama.cpp, LM Studio. Requires `base_url`; API key optional. |
+| `ModelRegistry` | — | Discovery-driven. `discover(provider)` calls the adapter's `list_models()`. |
+| `FallbackModelProvider` | `ModelProvider` | Interprets `model` as a role name or `provider/model` string. Applies family exclusion, tier selection, cooldowns, scoring. |
+
+`apply_provider.py` exposes one additional method on the class beyond the interface: `apply` returns `ApplyResult` with a `rollback_ref` field carrying the pre-apply HEAD commit.
+
+### `codeguardian.core.sandbox`
+
+```python
+from codeguardian.core.sandbox import (
+    BubblewrapBackend, DockerBackend,
+    SeatbeltBackend, FirecrackerBackend,
+    select_backend,
+)
+```
+
+| Class | Implements | v1 status |
+|---|---|---|
+| `BubblewrapBackend` | `SandboxBackend` | Working, Linux default. |
+| `DockerBackend` | `SandboxBackend` | Working, fallback. |
+| `SeatbeltBackend` | `SandboxBackend` | Stub — `create` raises `SANDBOX_CREATE_FAILED`. |
+| `FirecrackerBackend` | `SandboxBackend` | Stub — same. |
+| `select_backend(config)` | — | Returns a backend **name**, not an instance. Stubs are never auto-selected. |
+
+Phase 8's `SandboxBackend.execute` signature changed from Phase 4's: `execute(handle, command: Sequence[str], *, env, cwd, timeout_ms, stdin)`. This was a Rule-1 escalation recorded in `docs/summaries/phases-8.md` §4.
+
+---
+
+## Phase 9 — Plugins
+
+### `codeguardian.core.plugins`
+
+```python
+from codeguardian.core.plugins import (
+    PluginRegistry, PluginSpec,
+    PluginSource, BundledSource, EntryPointSource,
+    RegisteredPlugin, FaultBarrier,
+    PluginManifest, Compatibility, check_interface_version,
+    BudgetTracker,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `PluginRegistry` | Class | Central registry. Classmethod `discover(sources)`. Lookups: `get_language`, `get_tool`, `get_reporter`, `get_verifier`, `list_plugins`, `load_runtime_grammar`. |
+| `PluginSpec` | Frozen dataclass | `{source, manifest_dict, plugin_class_loader, package_path}`. |
+| `PluginSource` | Protocol | `__iter__` yields `PluginSpec`. |
+| `BundledSource` | Class | Walks `plugins_bundled/` directories. |
+| `EntryPointSource` | Class | Uses `importlib.metadata.entry_points`. |
+| `RegisteredPlugin` | Frozen dataclass | Wraps a loaded instance. Carries the `disabled` flag. |
+| `FaultBarrier` | Class | Exception isolation + per-type timeout. |
+| `PluginManifest` | Frozen dataclass | Validated manifest. `validate(raw)` raises `PLUGIN_MANIFEST_INVALID`. |
+| `Compatibility` | Literal type | `"current" | "newer_minor" | "prior_major" | "incompatible"`. |
+| `check_interface_version` | Function | `(plugin_version, kernel_version) -> Compatibility`. Raises on incompatible. |
+| `BudgetTracker` | Class | Per-phase tool call and output byte caps. Added as Phase 10 pre-work but exported from `core.plugins`. |
+
+### `_native` additions
+
+```python
+def load_grammar(language_name: str, library_path: str) -> None: ...
+    # Loads a tree-sitter grammar shared library at runtime.
+    # Raises KernelError with GRAMMAR_LIBRARY_NOT_FOUND,
+    # GRAMMAR_SYMBOL_NOT_FOUND, GRAMMAR_ABI_INCOMPATIBLE, or
+    # GRAMMAR_ALREADY_LOADED.
+
+def list_languages() -> list[str]: ...
+    # Union of built-in and runtime-loaded languages.
+```
+
+### `codeguardian.plugins_bundled`
+
+```
+plugins_bundled/
+├── context_providers/    # added in Phase 10
+│   ├── call_graph_slice/plugin.py
+│   ├── code_skeleton/plugin.py
+│   ├── function_body/plugin.py
+│   └── list_symbols/plugin.py
+├── languages/
+│   ├── python/plugin.py
+│   ├── typescript/plugin.py
+│   ├── javascript/plugin.py
+│   ├── java/plugin.py
+│   ├── go/plugin.py
+│   ├── rust/plugin.py
+│   ├── c/plugin.py
+│   └── cpp/plugin.py
+├── reporters/
+│   └── sarif_reporter/plugin.py
+└── tools/
+    ├── ast_grep/plugin.py
+    └── code_analysis/plugin.py
+```
+
+Each `plugin.py` declares a class and a class-level `__manifest__` dict.
+
+### Schema change
+
+`schemas/plugin-manifest.json` went from v1.1 to v1.2. Four new optional fields: `capabilities`, `blast_scope`, `kernel_extensible`, `grammar_path`. Reader supports N-1.
+
+---
+
+## Phase 10 — Prompts, PyCPG, and context providers
+
+### `codeguardian.core.prompts`
+
+```python
+from codeguardian.core.prompts import (
+    render_prompt, validate_output, PromptResult,
+    SkillProposalOutput,
+    # Per-role output dataclasses beyond SkillProposalOutput are in
+    # core/prompts/schema.py.
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `render_prompt` | Function | `(role, version, variables) -> PromptResult`. Strict `{{var}}` substitution. Raises on missing variables and on variable values that reference other variables in the same mapping. |
+| `validate_output` | Function | `(role, data) -> dataclass`. Raises `CodeGuardianError` on schema violation. |
+| `PromptResult` | Frozen dataclass | `{rendered: str, role: str, version: str, variables: Mapping}`. |
+| `SkillProposalOutput` | Frozen dataclass | `{skill_name, skill_markdown, confidence}`. |
+
+The eval harness lives at `core/prompts/eval_harness.py` and exposes `run_golden(role, cases, model_callable, ...)` and `load_golden(role)` returning `EvalReport`.
+
+### `_native` additions for PyCPG
+
+```python
+class _native.PyCPG:
+    """Python handle wrapping a deserialized CPG. Avoids re-deserialization."""
+    # Constructed from serialized bytes.
+    # Methods (added in Phase 10; full surface in source):
+    #   find_declaration(...) -> int | None
+    #   qualified_name_of(...) -> str | None
+    #   declaration_info(...) -> dict | None
+
+def find_declaration(cpg_bytes: bytes, file_path: str, symbol: str) -> int | None: ...
+def qualified_name_of(cpg_bytes: bytes, node_id: int) -> str | None: ...
+def declaration_info(cpg_bytes: bytes, node_id: int) -> dict | None: ...
+```
+
+The `_native` module now provides both stateless (bytes-in/out) and stateful (`PyCPG`) access. The context providers use `PyCPG` so a phase deserializes once and queries many times.
+
+### `codeguardian.interfaces.context_provider`
+
+New Protocol added in Phase 10:
+
+```python
+class ContextProvider(Protocol):
+    name: str
+    def provide(self, cpg: PyCPG, target: str, **kwargs) -> str: ...
+```
+
+Four implementations ship: `code-skeleton`, `function-body`, `call-graph-slice`, `list-symbols`.
+
+### `ToolPlugin` fields added in Phase 10
+
+The Protocol at `interfaces/tool.py` gained three fields:
+
+```python
+class ToolPlugin(Protocol):
+    name: str
+    description: str
+    input_schema: dict
+    output_schema: dict
+    action_kind: str      # e.g. "read", "write", "network"
+    sensitivity: str      # e.g. "low", "medium", "high"
+    is_read_only: bool
+    async def call(self, input: dict) -> dict: ...
+```
+
+These support the agent approval layer. A `plan`-mode agent cannot invoke a `write`-kind tool.
+
+### `ModelOptions` field added in Phase 10
+
+`interfaces/model.py` gained `max_reasoning_tokens: int | None`. Reasoning models (gpt-oss family) need a separate cap because their internal reasoning consumes the general `max_tokens` budget before any visible output.
+
+### Prompts on disk
+
+```
+prompts/
+├── _base/
+│   ├── v1.0.0.md      # every role inherits
+│   └── v1.1.0.md
+├── analyst/
+│   ├── v1.0.0.md
+│   ├── v1.1.0.md
+│   └── eval/golden.yaml
+├── tester/            # v1.0.0, v1.1.0, eval/golden.yaml
+├── writer/            # v1.0.0, v1.1.0, eval/golden.yaml
+├── skill_curator/     # v1.0.0, eval/golden.yaml
+├── correctness_verifier/    # v1.0.0, eval/golden.yaml, eval/adversarial.yaml
+├── security_verifier/       # v1.0.0, eval/golden.yaml, eval/adversarial.yaml
+└── contract_verifier/       # v1.0.0, eval/golden.yaml, eval/adversarial.yaml
+```
+
+---
+
+## Phase 11 — Agents, routing, telemetry, and verifier loop
+
+### `codeguardian.core.agents`
+
+```python
+from codeguardian.core.agents import (
+    # Deterministic
+    ReconAgent, BlastAgent,
+    # Model-backed
+    AnalystAgent, TesterAgent, WriterAgent,
+    CorrectnessVerifierAgent, SecurityVerifierAgent,
+    ContractVerifierAgent, SkillCuratorAgent,
+    # Inputs and results
+    ReconInput, ReconResult,
+    BlastInput, BlastResult,
+    AnalystInput, AnalystResult,
+    TesterInput, TesterResult,
+    WriterInput, WriterResult,
+    CorrectnessVerifierInput, CorrectnessVerifierResult,
+    SecurityVerifierInput, SecurityVerifierResult,
+    ContractVerifierInput, ContractVerifierResult,
+    SkillCuratorInput, SkillCuratorResult,
+    # Skill curator helpers
+    RecentRun, SkillEvalCase,
+)
+```
+
+Every agent implements `interfaces/agent.py::Agent[InputT, OutputT]` — the Protocol did not change. Each agent class has class-level attributes: `name`, `phase`, `is_deterministic`, `requires_tools`, `can_refuse`, `prompt_role`, `prompt_version`.
+
+### `codeguardian.core.agents.telemetry`
+
+```python
+from codeguardian.core.agents.telemetry import (
+    record_call, try_record_call,
+    FailureCategory, VerdictReason,
+)
+
+record_call(store, *, role, outcome, failure_category, verdict_reason,
+            target_symbol, prompt, output, tokens_in, tokens_out,
+            latency_ms, model_id, prompt_role, prompt_version,
+            model_options, ...) -> None
+try_record_call(store_or_none, **kwargs) -> None
+```
+
+`FailureCategory` (Literal, 7 values): `localization`, `generation`, `schema`, `contract`, `timeout`, `context_overflow`, `model_unavailable`.
+
+`VerdictReason` (Literal, 4 values): `behavior_drift`, `vulnerability_introduced`, `contract_broken`, `inconclusive`.
+
+The two are stored in separate columns. A verifier that returns `fail` did its job — its `failure_category` is `NULL`. An agent that times out did not — its `verdict_reason` is `NULL`.
+
+### `codeguardian.core.agents.context_budget`
+
+```python
+from codeguardian.core.agents.context_budget import ContextBudget
+```
+
+`ContextBudget` tracks fill percentage of a model context window. Requests compaction past 60%, refuses with a snapshot past 85%. Passed through `tracked_model_call` via `context_budget=`.
+
+### `codeguardian.core.agents._loop`
+
+```python
+from codeguardian.core.agents._loop import VerifierLoop
+```
+
+`VerifierLoop` accepts a generator coroutine and a verifier coroutine. Runs up to `max_attempts` rounds, passes the previous verification result as feedback, halts on a generator refusal, calls an optional observer per round. Used by Phase 13.
+
+### `codeguardian.core.providers.routing`, `.budget`, `.gateways`
+
+Phase 11 added routing primitives in `core/providers/`:
+
+```python
+from codeguardian.core.providers.routing import (
+    CapabilityProfile, TierRubric, ObjectiveEscalation,
+    select_profile,
+)
+
+from codeguardian.core.providers.budget import (
+    BudgetEnvelope, PressureLevel,
+)
+
+from codeguardian.core.providers.gateways import (
+    DirectGateway, OpenRouterGateway, LiteLLMGateway,
+    ModelGateway,
+)
+```
+
+Field lists and method signatures are in the source. These primitives are tested in isolation at Phase 11; Phase 13 wires them into `fallback_router.py`.
+
+### `codeguardian.core.agents.agent_eval`
+
+```python
+from codeguardian.core.agents.agent_eval import run_golden as run_agent_golden, load_golden as load_agent_golden
+```
+
+Distinct from `core.prompts.eval_harness`. `core.prompts.eval_harness` scores the prompt rendering. `core.agents.agent_eval` scores the agent's overall pass/fail against golden cases.
+
+### Migrations added
+
+| File | Purpose |
+|---|---|
+| `002_agent_calls.sql` | New `agent_calls` table |
+| `003_agent_provenance.sql` | Adds `prompt_role`, `prompt_version`, `model_options_json` |
+| `004_agent_provenance_v2.sql` | Adds `tool_chain`, `decision_log`, `model_reasoning`, `evidence_receipt` |
+
+All four migrations run at Phase 11 boundary.
+
+### Deep test
+
+`sandtest/deep_test.py` was rewritten during Phase 11. Its public behavior (running against `psf/requests` and reporting pass/fail/skip/xfail per section) is unchanged; the internals add a section per agent and a check per prompt call.
+
+---
+
+## Phase 12 v2 — Skills
+
+Phase 12 v1 shipped 6 files. Phase 12 v2 shipped 27 files plus two Rule-1 escalations. The design settlement is in `docs/summaries/Phase_12.md` Part II.
+
+### `codeguardian.core.skills`
+
+```python
+from codeguardian.core.skills import (
+    # v1 — unchanged surface
+    EmbeddingProvider, SkillLibrary, SkillIndexer, SkillRetriever,
+    RetrievedSkill,
+    # v2 — new modules
+    SkillGovernor, NegativeKnowledgeStore,
+    SkillGraph, SkillEvolver,
+    RetrievalPipeline,
+    # v2 — shared types
+    SkillNode, SkillEdge, EdgeKind,
+    RetrievalBundle, RetrievalItem,
+    NegativeRecord, AdmissionVerdict,
+    ProvenancePin, ProjectCard,
+)
+```
+
+That is 19 exported names. Every one is a direct re-export of a symbol defined in a submodule.
+
+### `SkillLibrary` — new methods and behavior
+
+Existing v1 methods (`add_skill`, `promote_skill`, `archive_skill`, `get_skill`, `list_skills`, `record_feedback`) are unchanged in signature and behavior **except** for `add_skill`, which gains gate routing when `admission_strict=True`.
+
+New methods:
+
+```python
+class SkillLibrary:
+    # ... existing v1 methods ...
+
+    def governor(self) -> SkillGovernor: ...
+    def negative(self) -> NegativeKnowledgeStore: ...
+    def graph(self) -> SkillGraph: ...
+    def evolver(self) -> SkillEvolver: ...
+    def retrieval(self) -> RetrievalPipeline: ...
+
+    def set_skill_state(self, name: str, state: str) -> bool: ...
 
     @property
-    def is_running(self) -> bool: ...
-
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-    def call(self, method: str, params: dict[str, object]) -> object: ...
-    def notify(self, method: str, params: dict[str, object]) -> None: ...
-
-    def __enter__(self) -> JSONRPCBridge: ...
-    def __exit__(self, *args: Any) -> None: ...
+    def config(self) -> SkillsConfig: ...
 ```
 
-Wire format: line-delimited JSON-RPC 2.0. Each message is one JSON object followed by a newline.
+Each accessor is a lazy factory — the first call constructs the dependent object; subsequent calls return the cached instance.
 
-Error mapping:
-- `error` field in response → `CodeGuardianError(SYS_INTERNAL)` with the RPC code and method in details.
-- Malformed JSON from subprocess → `CodeGuardianError(MCP_PROTOCOL_ERROR)`.
-- Subprocess closes stdout before responding → `CodeGuardianError(SYS_INTERNAL)`.
-- Call before `start` → `CodeGuardianError(SYS_INVARIANT_VIOLATED)`.
-- Double start → `CodeGuardianError(SYS_INVARIANT_VIOLATED)`.
-- Spawn failure → `CodeGuardianError(SANDBOX_CREATE_FAILED)`.
+`add_skill` behavior with `admission_strict=True`:
 
----
+1. Parse frontmatter, generate embedding, write via `SkillStore.add`.
+2. Call `governor().admit(name, frontmatter, body)`.
+3. If the verdict is not accepted:
+   - Call `SkillStore.remove(name)` to delete the just-written file and DB rows.
+   - Raise `CodeGuardianError(STORAGE_SCHEMA_INVALID)` with the verdict's reason and findings.
 
-## Rust crates
+If `admission_strict=False` (the default), `add_skill` behaves exactly as in Phase 12 v1.
 
-The Rust workspace lives at `rust/crates/`. Seven members. Three have real content after Phase 5.
+### `SkillGovernor`
 
-### `codeguardian-rpc`
+```python
+class SkillGovernor:
+    def __init__(self, store: SQLiteStore, library: SkillLibrary, config: SkillsConfig) -> None: ...
 
-Public types (from `rust/crates/codeguardian-rpc/src/lib.rs`):
+    def admit(
+        self,
+        skill_name: str,
+        frontmatter: dict,
+        body: str,
+        *,
+        eval_score: float | None = None,
+    ) -> AdmissionVerdict: ...
 
-```rust
-pub const JSONRPC_VERSION: &str = "2.0";
+    def transition(self, skill_name: str, target_state: str) -> bool: ...
 
-pub struct RpcRequest {
-    pub jsonrpc: String,
-    pub id: u64,
-    pub method: String,
-    pub params: serde_json::Value,
-}
+    def retire(self, skill_name: str, reason: str = "") -> bool: ...
 
-pub struct RpcResponse {
-    pub jsonrpc: String,
-    pub id: u64,
-    pub result: Option<serde_json::Value>,
-    pub error: Option<RpcError>,
-}
+    def record_load_outcome(
+        self,
+        skill_name: str,
+        outcome: str,
+        *,
+        task_description: str | None = None,
+    ) -> None: ...
 
-pub struct RpcError {
-    pub code: i64,
-    pub message: String,
-    pub data: Option<serde_json::Value>,
-}
+    def apply_retirement(self) -> list[str]: ...
 
-pub struct RpcNotification {
-    pub jsonrpc: String,
-    pub method: String,
-    pub params: serde_json::Value,
-}
-
-pub const PARSE_ERROR: i64 = -32700;
-pub const INVALID_REQUEST: i64 = -32600;
-pub const METHOD_NOT_FOUND: i64 = -32601;
-pub const INTERNAL_ERROR: i64 = -32603;
-
-pub type Handler =
-    Arc<dyn Fn(serde_json::Value) -> Result<serde_json::Value, RpcError>
-        + Send + Sync + 'static>;
-
-pub struct RpcServer { ... }
-
-impl RpcServer {
-    pub fn new() -> Self;
-    pub fn register<F>(&mut self, method: impl Into<String>, handler: F)
-        where F: Fn(serde_json::Value) -> Result<serde_json::Value, RpcError>
-                + Send + Sync + 'static;
-    pub fn handler_count(&self) -> usize;
-    pub fn handle_line(&self, line: &str) -> Option<String>;
-    pub fn serve<R: BufRead, W: Write>(
-        &self, reader: R, writer: W,
-    ) -> std::io::Result<()>;
-}
-
-pub struct RpcClient<R: BufRead, W: Write> { ... }
-
-impl<R: BufRead, W: Write> RpcClient<R, W> {
-    pub fn new(reader: R, writer: W) -> Self;
-    pub fn call(
-        &mut self, method: &str, params: serde_json::Value,
-    ) -> std::io::Result<Result<serde_json::Value, RpcError>>;
-    pub fn notify(
-        &mut self, method: &str, params: serde_json::Value,
-    ) -> std::io::Result<()>;
-}
+    def get_state(self, skill_name: str) -> str | None: ...
 ```
 
-### `codeguardian-pyo3`
+`admit` runs the five checks in order: security scan, strict warning promotion, eval score, dedupe, active cap. Every call writes one row to `skill_admission_log`. Every rejection is logged with the reason and findings.
 
-```rust
-// rust/crates/codeguardian-pyo3/src/lib.rs
+`transition` enforces the state machine: `draft → trial → active → stable → retired`. `stale` and `archived` (v1 states) are treated as aliases for `retired` on read. Illegal transitions return `False`; they do not raise.
 
-#[pyfunction]
-fn echo(value: &str) -> String;
+`record_load_outcome` records the feedback through `library.record_feedback` and then reads the DB row to check whether a transition should fire. The transition logic uses only DB values because `record_feedback` updates the DB row and not the Markdown file — reading the Markdown here would see stale counters.
 
-#[pymodule]
-fn _native(module: &Bound<'_, PyModule>) -> PyResult<()>;
+### `NegativeKnowledgeStore`
+
+Store-bound wrapper around the module-level functions in `core/skills/negative.py`.
+
+```python
+class NegativeKnowledgeStore:
+    def __init__(self, store: SQLiteStore) -> None: ...
+    def add(self, record: NegativeRecord) -> None: ...
+    def find(
+        self,
+        context_signature: str,
+        *,
+        min_confidence: float = 0.1,
+        limit: int = 5,
+    ) -> tuple[NegativeRecord, ...]: ...
+    def adopt(self, failure_id: str) -> None: ...
+    def reject(self, failure_id: str) -> None: ...
+    def delete(self, failure_id: str) -> bool: ...
+    def apply_forgetting_curve(
+        self,
+        *,
+        decay_factor: float = 0.9,
+        reference_days: int = 30,
+        min_confidence: float = 0.1,
+        max_per_skill: int = 20,
+    ) -> int: ...
 ```
 
-Imported from Python as `codeguardian._native`. Phase 6 extends this file to register kernel bindings. This is the open Rule 1 escalation.
+The underlying module (`core.skills.negative`) also exports: `add_record`, `get_record`, `find_relevant`, `list_all`, `adopt`, `reject`, `delete_record`, `apply_forgetting_curve`. Callers that hold a library should prefer the store-bound accessor.
 
-### `codeguardian-kernel`
+### `SkillGraph`
 
-```rust
-// rust/crates/codeguardian-kernel/src/lib.rs
-// Docstring only in Phase 5.
+Store-bound wrapper around `core.skills.graph_store`.
+
+```python
+class SkillGraph:
+    def __init__(self, store: SQLiteStore, skills_dir: Path) -> None: ...
+    def nodes(self) -> tuple[SkillNode, ...]: ...
+    def edges(self) -> tuple[SkillEdge, ...]: ...
+    def neighbors(
+        self,
+        node_id: str,
+        *,
+        kind: EdgeKind | None = None,
+        direction: str = "out",   # "out" | "in" | "both"
+    ) -> tuple[str, ...]: ...
+    def rebuild(
+        self,
+        embeddings: dict[str, list[float]] | None = None,
+        *,
+        semantic_threshold: float = 0.85,
+    ) -> tuple[int, int]: ...
+    def node_count(self) -> int: ...
+    def edge_count(self) -> int: ...
 ```
 
-Filled in Phase 6.
+The underlying module (`core.skills.graph_store`) also exports: `upsert_node`, `upsert_edge`, `get_node`, `get_all_nodes`, `get_all_edges`, `neighbors`, `count_nodes`, `count_edges`, `drop_and_rebuild`.
 
-### Stubs
+The builder module (`core.skills.graph`) exposes: `build_edges(frontmatters, embeddings=None, *, semantic_threshold=0.85) -> (list[SkillEdge], list[str])`, `detect_cycles(edges) -> tuple[tuple[str, ...], ...]`, `capability_node_id(name) -> str`, `CAPABILITY_PREFIX = "cap:"`.
 
-`codeguardian-blast`, `codeguardian-sandbox`, `codeguardian-audit`, `codeguardian-policy` are still stubs. They compile with zero content.
+### `SkillEvolver`
+
+Store-bound wrapper around `core.skills.evolver`.
+
+```python
+class SkillEvolver:
+    def __init__(self, store: SQLiteStore) -> None: ...
+    def mine(
+        self,
+        *,
+        min_cooccurrence: int = 3,
+        outcome_filter: str = "success",
+    ) -> list[SkillEdge]: ...
+    def write(self, path: Path, candidates: list[SkillEdge]) -> int: ...
+    def list(self, path: Path) -> list[SkillEdge]: ...
+    def promote(self, path: Path, *, min_weight: float = 0.5) -> int: ...
+    def discard(self, path: Path) -> bool: ...
+```
+
+The underlying module also exports: `mine_candidates`, `write_candidates`, `list_candidates`, `promote_candidates`, `discard_candidates`.
+
+Phase 12 v2 stores candidate edges in a sidecar JSON file, not shadow tables. See `docs/summaries/Phase_12.md` §13 for the recorded residual.
+
+### `RetrievalPipeline`
+
+```python
+class RetrievalPipeline:
+    def __init__(
+        self,
+        store: SQLiteStore,
+        library: SkillLibrary,
+        embedder: EmbeddingProvider,
+        config: SkillsConfig,
+        *,
+        reranker: Reranker | None = None,
+        token_budget: int = 3000,
+    ) -> None: ...
+
+    async def retrieve_for_prompt(
+        self,
+        query: str,
+        *,
+        project_context: ProjectCard | None = None,
+        limit: int = 3,
+        token_budget: int | None = None,
+        seed_retriever: Callable[[str, int], Awaitable[str]] | None = None,
+    ) -> str: ...
+
+    async def retrieve(
+        self,
+        query: str,
+        *,
+        project_context: ProjectCard | None = None,
+        limit: int = 3,
+        token_budget: int | None = None,
+    ) -> RetrievalBundle: ...
+```
+
+`retrieve_for_prompt` delegates to `seed_retriever` when every feature flag is off, which produces byte-identical output to the Phase 12 v1 `SkillRetriever.retrieve_for_prompt`. This is the guarantee `test_all_flags_off_delegates_to_v1_retriever` asserts.
+
+`retrieve` always runs the staged pipeline. Neither method raises; both return an empty `RetrievalBundle` on any failure.
+
+The underlying modules `core.skills.ppr`, `core.skills.hydrator`, and `core.skills.reranker` also expose their primitives directly:
+
+```python
+# core.skills.ppr
+personalized_pagerank(edges, seeds, *, max_hops=1, timeout_ms=50,
+                      reverse_multiplier=2.0, skill_names=None)
+    -> list[RankedNode]
+
+# core.skills.hydrator
+hydrate(items, body_loader, *, token_budget, priority_order=None,
+        token_counter=DEFAULT_TOKEN_COUNTER) -> RetrievalBundle
+DEFAULT_TOKEN_COUNTER(text: str) -> int
+
+# core.skills.reranker
+Reranker(model_name=..., timeout_ms=120)
+    async def rerank(query, items) -> tuple[RetrievalItem, ...]
+```
+
+### `core.skills.types`
+
+All frozen dataclasses with `slots=True`, except `EdgeKind` (Enum):
+
+| Type | Kind | Public fields (summary) |
+|---|---|---|
+| `EdgeKind` | `str, Enum` | `PREREQUISITE`, `PROVIDES`, `CONSUMES`, `SUPERSEDES`, `SEMANTIC`, `CONFLICTS` |
+| `SkillNode` | Dataclass | `node_id`, `kind`, `name`, `metadata` |
+| `SkillEdge` | Dataclass | `edge_id`, `src`, `dst`, `kind`, `weight`, `provenance` |
+| `RetrievalItem` | Dataclass | `name`, `score`, `reason`, `body`, `token_count`, `is_negative` |
+| `RetrievalBundle` | Dataclass | `items`, `truncated`, `truncation_strategy`, `total_tokens`, `stages_run`, `fallback_used` |
+| `ProvenancePin` | Dataclass | `source_runs`, `authored_by`, `commit_hash`, `license`, `schema_hash`, `scan_result`, `eval_score`, `reviewer`, `reviewer_id`, `kernel_version`, `admission_evidence` |
+| `NegativeRecord` | Dataclass | `failure_id`, `skill_name`, `failure_category`, `context_signature`, `attempted`, `observed`, `run_id`, `confidence`, `first_seen`, `last_seen`, `provenance`, `adopted_count`, `rejected_count` |
+| `AdmissionVerdict` | Dataclass | `accepted`, `reason`, `blocking_findings`, `warning_findings`, `scan_result`, `dedupe_status`, `near_duplicate_of`, `eval_score` |
+| `ProjectCard` | Dataclass | `repo_id`, `commit_hash`, `languages`, `frameworks`, `test_frameworks`, `test_command`, `build_system`, `blast_recommendation`, `caller_search_complete`, `confidence` |
+
+Helper functions in `types.py`: `compute_edge_id(src, dst, kind) -> str` and `empty_bundle(reason="empty") -> RetrievalBundle`.
+
+### `core.skills.provenance`
+
+```python
+build_pin(*, source_runs=(), authored_by, commit_hash, license="",
+          kernel_version="", schema_hash="", scan_result="",
+          eval_score=None, reviewer="auto", reviewer_id=None,
+          admission_evidence=None) -> ProvenancePin
+
+compute_schema_hash(schemas_dir: Path) -> str
+verify_complete(pin: ProvenancePin) -> tuple[bool, tuple[str, ...]]
+require_complete(pin: ProvenancePin) -> None    # raises STORAGE_SCHEMA_INVALID
+save_pin(store: SQLiteStore, skill_name: str, pin: ProvenancePin) -> None
+load_pin(store: SQLiteStore, skill_name: str) -> ProvenancePin | None
+```
+
+### `core.skills.security`
+
+```python
+FILESYSTEM_LEVELS: dict[str, int]      # none < sandbox_only < read_only < full
+scan(markdown: str) -> AdmissionVerdict
+intersect_permissions(skill_permissions, plugin_permissions) -> dict
+install_audit_hook() -> None            # idempotent, once per process
+skill_scope(permissions) -> ContextManager[dict]
+```
+
+`scan` is a known-pattern filter: prompt injection markers, invisible Unicode, shell substitution, exfiltration verbs targeting URLs (blocks); external URLs, conditional instructions, long lines, base64 (warns). It is not a proof of safety.
+
+`skill_scope` installs a `sys.addaudithook` that enforces the given permissions during the block and resets the context var on exit.
+
+### `SkillsConfig` — new fields
+
+`core/config/schema.py` gained one dataclass. All fields have defaults from `defaults.py`.
+
+```python
+@dataclass(frozen=True, slots=True)
+class SkillsConfig:
+    graph_enabled: bool = False
+    ppr_enabled: bool = False
+    ppr_hops: int = 1
+    ppr_timeout_ms: int = 50
+    reranker_enabled: bool = False
+    reranker_timeout_ms: int = 120
+    negative_store_enabled: bool = False
+    admission_strict: bool = False
+    dedupe_threshold: float = 0.92
+    max_active_skills: int = 200
+    retire_threshold: float = 0.3
+    retire_after_runs: int = 20
+    trial_runs_before_active: int = 3
+    retrieval_token_budget: int = 3000
+    recon_blast_filter_enabled: bool = False
+    evolver_enabled: bool = False
+```
+
+`Config` gained one field: `skills: SkillsConfig`. `validate()` gained one branch handling `config.skills`. Every existing config file remains valid because all fields default.
+
+### 16 new `DEFAULT_SKILLS_*` constants in `core.config.defaults`
+
+```
+DEFAULT_SKILLS_GRAPH_ENABLED               = False
+DEFAULT_SKILLS_PPR_ENABLED                 = False
+DEFAULT_SKILLS_PPR_HOPS                    = 1
+DEFAULT_SKILLS_PPR_TIMEOUT_MS              = 50
+DEFAULT_SKILLS_RERANKER_ENABLED            = False
+DEFAULT_SKILLS_RERANKER_TIMEOUT_MS         = 120
+DEFAULT_SKILLS_NEGATIVE_STORE_ENABLED      = False
+DEFAULT_SKILLS_ADMISSION_STRICT            = False
+DEFAULT_SKILLS_DEDUPE_THRESHOLD            = 0.92
+DEFAULT_SKILLS_MAX_ACTIVE_SKILLS           = 200
+DEFAULT_SKILLS_RETIRE_THRESHOLD            = 0.3
+DEFAULT_SKILLS_RETIRE_AFTER_RUNS           = 20
+DEFAULT_SKILLS_TRIAL_RUNS_BEFORE_ACTIVE    = 3
+DEFAULT_SKILLS_RETRIEVAL_TOKEN_BUDGET      = 3000
+DEFAULT_SKILLS_RECON_BLAST_FILTER_ENABLED  = False
+DEFAULT_SKILLS_EVOLVER_ENABLED             = False
+```
+
+### `SkillStore` — two behavior changes (Rule 1 escalation)
+
+These are behavior changes to a Phase 3 file, approved during Phase 12 v2 verification. Public method names and signatures are unchanged; the fixes are internal and affect a pre-existing bug and a pre-existing failure mode.
+
+| Method | Before | After |
+|---|---|---|
+| `_upsert_skill_row` (private) | DELETE-then-INSERT. Failed the `skill_feedback.skill_name` FK when the skill had any feedback row. | UPDATE-when-exists. Never triggers the FK. FTS delete-before-update preserved. |
+| `remove` (public) | Deleted `skills` row first. Failed the same FK. | Deletes `skill_feedback` rows for the skill before `skills`. Removing a skill that has feedback now succeeds. |
+
+Any caller that previously caught `SYS_INTERNAL` from `remove` on a skill that had feedback can drop the catch. The bug was latent in Phase 3 and was exposed by Phase 12 v2's `record_load_outcome`.
+
+### Schema: `schemas/skill.json` v1.0 → v1.1
+
+Six new **optional** fields (`prerequisites`, `provides`, `consumes`, `supersedes`, `provenance`, `permission_manifest`). The `state` enum gained three values: `trial`, `stable`, `retired`. The six original required fields are unchanged. Reader supports N-1; every existing `SKILL.md` validates without edit.
+
+### Migrations: `005` and `006`
+
+| File | Purpose |
+|---|---|
+| `005_skill_graph.sql` | Creates `skill_graph_nodes`, `skill_graph_edges`, `negative_knowledge`, `skill_provenance`, `skill_admission_log`. `IF NOT EXISTS`, no `ALTER` on existing tables. |
+| `006_skill_states.sql` | Rebuilds `skills` table with expanded `CHECK` constraint for `trial`, `stable`, `retired`. Preserves rowids and FTS. Restores `PRAGMA foreign_keys` to its prior value (`OFF`, the project default). |
+
+Both migrations run at Phase 12 v2 boundary. Fresh databases and existing databases both end up with the same schema.
 
 ---
 
 ## Not yet implemented
 
-Anything not listed above. In particular:
+Anything not listed in Part I or Part II. In particular, at the end of Phase 12 v2:
 
-- Every CLI command (Phase 14)
-- Every agent (Phase 11)
-- Every provider implementation (Phase 8)
-- Every Python sandbox backend (Phase 8)
-- Every plugin loader and bundled plugin (Phase 9)
-- Every reporter (Phase 15)
-- The MCP client and server (Phase 15)
-- The orchestrator (Phase 13)
-- The skill library operations (Phase 12)
-- The prompts (Phase 10)
-- Every Rust module inside `codeguardian-kernel` (Phase 6)
-- Every Rust module inside `codeguardian-blast`, `codeguardian-sandbox`, `codeguardian-audit`, `codeguardian-policy` (Phase 7)
-- `scripts/integration_phase.py` (Phase 16)
-- `scripts/validate_schemas.py` (Phase 16)
-- `python/codeguardian/__main__.py`'s real entry point (Phase 16)
-```
+- `codeguardian.core.orchestrator` — Phase 13 (empty stubs exist)
+- `codeguardian.core.mcp` — Phase 15 (empty stubs exist)
+- `codeguardian.core.reporting` — Phase 15 (empty stubs exist)
+- `codeguardian.cli` — Phase 14 (empty stubs exist)
+- `python/codeguardian/__main__.py` real entry point — Phase 16
+- `scripts/integration_phase.py` — Phase 16
+- `scripts/validate_schemas.py` — Phase 16
+- `scripts/migrate.py` — Phase 16 (currently 0 bytes)
+- `skills/README.md` — currently 0 bytes
+- `examples/skills/python-add-type-hints/SKILL.md`, `examples/skills/typescript-extract-interface/SKILL.md` — currently 0 bytes
 
----
-
-Save this at `docs/public-api.md`, replacing the current version.
-
-Then push it the same way as the phases summary:
-
-```bash
-git add docs/public-api.md
-git commit -m "docs: update public API reference through Phase 5
-
-Adds the interfaces package, the bridges package, the storage layer,
-and the post-Phase-5 translation table entries. Reflects the state
-of the codebase at the end of Phase 5."
-git push
+Every agent in Phase 11 has a `run()` method that is exercised by unit tests, but no orchestrator calls them in sequence. Retrieval (`library.retrieval()`) is callable but has no caller. Governance (`library.governor()`) has no automatic caller — a Phase 13 orchestrator must invoke `record_load_outcome` and `apply_retirement`. The full pipeline has not run end-to-end since the Phase 11 deep test.

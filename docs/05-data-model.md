@@ -1,4 +1,3 @@
-
 # 05 — Data Model
 
 ---
@@ -8,6 +7,8 @@
 This document defines every structured entity CodeGuardian reads, writes, or passes between components. It covers schemas, relationships, storage locations, lifecycle, and versioning.
 
 Everything here is concrete: field names, types, required versus optional, validation rules.
+
+**Snapshot.** Last updated at the Phase 12 v2 boundary. Records the six new tables added by migration 005 and the `skills` table rebuild in migration 006. Where a schema version advanced in Phase 12 v2, the change is recorded in §5.13 and §8.1.
 
 ---
 
@@ -118,6 +119,11 @@ CodeGuardian uses a hybrid storage model. No single backend serves every need.
 | **Skill** | Filesystem (Markdown) + SQLite index | A reusable pattern |
 | **Skill Embedding** | SQLite (sqlite-vec) | Vector representation for semantic retrieval |
 | **Skill Feedback** | SQLite | Outcome of each skill use |
+| **Skill Graph Node** | SQLite | A skill or capability node in the procedural graph |
+| **Skill Graph Edge** | SQLite | A typed relationship between two graph nodes (prerequisite, provides, consumes, supersedes, semantic, conflicts) |
+| **Negative Knowledge Record** | SQLite | A typed failure record describing what was attempted, what happened, and in what context |
+| **Skill Provenance** | SQLite | The full admission-time record for a skill: source runs, author, commit, license, scanner result, eval score, reviewer, kernel version |
+| **Skill Admission Log** | SQLite (append-only) | One row per admission attempt: verdict, findings, eval score, dedupe status |
 | **Run Summary** | Filesystem (`summary.md`) | AI-generated human-readable summary |
 | **Cache Entry** | SQLite + filesystem | Cached reconnaissance, graph, blast reports |
 
@@ -143,6 +149,7 @@ erDiagram
     RUN ||--o| CONSENT_RECORD : "may have"
     RUN ||--o{ SKILL_FEEDBACK : "generates"
     RUN ||--o{ MCP_TOOL_CALL : "has many"
+    RUN ||--o{ NEGATIVE_KNOWLEDGE : "may record"
     PHASE_EXECUTION ||--o{ MODEL_CALL : "has many"
     PHASE_EXECUTION ||--o{ MCP_TOOL_CALL : "has many"
     BLAST_RADIUS_REPORT ||--o{ CONTRACT_VIOLATION : "contains"
@@ -150,6 +157,12 @@ erDiagram
     CPG ||--|| RUNTIME_CONTRACT_MAP : "informs"
     SKILL ||--|| SKILL_EMBEDDING : "has one"
     SKILL ||--o{ SKILL_FEEDBACK : "has many"
+    SKILL ||--o| SKILL_PROVENANCE : "has one"
+    SKILL ||--o{ SKILL_ADMISSION_LOG : "attempted in"
+    SKILL ||--o| SKILL_GRAPH_NODE : "represented by (skill-kind)"
+    SKILL ||--o{ NEGATIVE_KNOWLEDGE : "referenced by (loose)"
+    SKILL_GRAPH_NODE ||--o{ SKILL_GRAPH_EDGE : "src"
+    SKILL_GRAPH_NODE ||--o{ SKILL_GRAPH_EDGE : "dst"
     PLUGIN_MANIFEST ||--o{ CACHE_ENTRY : "declares"
 
     REPOSITORY {
@@ -362,6 +375,70 @@ erDiagram
         string task_description
     }
 
+    SKILL_GRAPH_NODE {
+        string node_id PK
+        string kind
+        string name
+        string metadata_json
+        string created_at
+    }
+
+    SKILL_GRAPH_EDGE {
+        string edge_id PK
+        string src FK
+        string dst FK
+        string kind
+        float weight
+        string provenance
+        string created_at
+    }
+
+    NEGATIVE_KNOWLEDGE {
+        string failure_id PK
+        string skill_name
+        string failure_category
+        string context_signature
+        string attempted
+        string observed
+        string run_id
+        float confidence
+        string first_seen
+        string last_seen
+        string provenance_json
+        int adopted_count
+        int rejected_count
+    }
+
+    SKILL_PROVENANCE {
+        string skill_name PK
+        string source_runs_json
+        string authored_by
+        string commit_hash
+        string license
+        string schema_hash
+        string scan_result
+        float eval_score
+        string reviewer
+        string reviewer_id
+        string kernel_version
+        string recorded_at
+    }
+
+    SKILL_ADMISSION_LOG {
+        string admission_id PK
+        string skill_name
+        string attempted_at
+        boolean accepted
+        string reason
+        string scan_result
+        float eval_score
+        string dedupe_status
+        string blocking_findings_json
+        string warning_findings_json
+        string reviewer
+        string reviewer_id
+    }
+
     CACHE_ENTRY {
         string repo_id FK
         string commit_hash
@@ -369,6 +446,13 @@ erDiagram
         string payload_path
     }
 ```
+
+**Notes on new relationships.**
+
+- `SKILL_GRAPH_NODE` refers to a `SKILL` when `kind = 'skill'` (the `node_id` equals the skill name). Capability nodes have `kind = 'capability'` and `node_id` prefixed with `cap:`. The relationship is not enforced by a foreign key in SQL because capability nodes have no corresponding skill row.
+- `NEGATIVE_KNOWLEDGE.skill_name` is a loose reference, not a foreign key. It records which skill was attempted, but the record survives the skill's removal so a security investigation can still trace what happened.
+- `SKILL_PROVENANCE` and `SKILL_ADMISSION_LOG` reference the skill name but do not enforce a foreign key for the same reason — they must survive a skill removal so the audit trail is preserved.
+- `SKILL_GRAPH_EDGE.src` and `.dst` **do** enforce foreign keys to `SKILL_GRAPH_NODE` (with `ON DELETE CASCADE`). This is because the graph is entirely derived; if a node is removed the edges pointing at it are meaningless.
 
 ---
 
@@ -1097,29 +1181,119 @@ Upgraded to include the sandbox backend plugin type.
 }
 ```
 
-### 5.13 Skill Frontmatter — Schema v1.0
+### 5.13 Skill Frontmatter — Schema v1.1
 
 Every skill is a Markdown file with YAML frontmatter. The Markdown is the truth; the SQLite index is derived.
+
+**Version history.** v1.0 had six required fields and four state values. v1.1 adds six **optional** fields and expands the `state` enum from four to seven values. The six required fields are unchanged. Every v1.0 skill validates against v1.1 without edit. A v1.1 reader accepts a v1.0 skill (no optional fields present). A v1.0 reader rejects a v1.1 skill whose state is `trial`, `stable`, or `retired`, with a clear message.
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://codeguardian.dev/schemas/skill/v1.0.json",
+  "$id": "https://codeguardian.dev/schemas/skill/v1.1.json",
   "title": "Skill Frontmatter",
   "type": "object",
-  "required": ["name", "description", "trigger", "skill_type", "language", "state"],
+  "required": [
+    "name", "description", "trigger", "skill_type", "language", "state"
+  ],
+  "additionalProperties": false,
   "properties": {
-    "name": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$"
+    },
     "description": {"type": "string"},
-    "trigger": {"type": "string", "description": "When to use this skill"},
-    "skill_type": {"type": "string", "enum": ["refactor_pattern", "test_pattern", "language_rule", "project_convention"]},
+    "trigger": {
+      "type": "string",
+      "description": "When to use this skill."
+    },
+    "skill_type": {
+      "type": "string",
+      "enum": [
+        "refactor_pattern", "test_pattern",
+        "language_rule", "project_convention"
+      ]
+    },
     "language": {"type": "string"},
-    "effectiveness": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5},
-    "total_uses": {"type": "integer", "minimum": 0, "default": 0},
-    "total_successes": {"type": "integer", "minimum": 0, "default": 0},
-    "state": {"type": "string", "enum": ["active", "stale", "archived", "draft"]},
+    "effectiveness": {
+      "type": "number", "minimum": 0, "maximum": 1, "default": 0.5
+    },
+    "total_uses": {
+      "type": "integer", "minimum": 0, "default": 0
+    },
+    "total_successes": {
+      "type": "integer", "minimum": 0, "default": 0
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "active", "stale", "archived", "draft",
+        "trial", "stable", "retired"
+      ]
+    },
     "created_at": {"type": "string", "format": "date-time"},
-    "last_used_at": {"type": "string", "format": "date-time"}
+    "last_used_at": {"type": "string", "format": "date-time"},
+    "prerequisites": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+      "description": "Skill names that must be available for this skill to be usable. Optional. Absent means no prerequisites."
+    },
+    "provides": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Capability labels this skill provides. Optional. Used by the graph to connect skills to task requirements without naming a specific skill."
+    },
+    "consumes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Capability labels this skill expects to be available. Optional."
+    },
+    "supersedes": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+      "description": "Skill names this skill replaces. Optional. Used by governance to retire superseded skills."
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Provenance information persisted with the skill. Optional. Admission evidence lives in the skill_provenance table, not here.",
+      "required": ["source_runs", "authored_by", "commit_hash"],
+      "additionalProperties": false,
+      "properties": {
+        "source_runs": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "authored_by": {
+          "type": "string",
+          "enum": ["skill_curator", "human"]
+        },
+        "commit_hash": {"type": "string"},
+        "license": {"type": "string"}
+      }
+    },
+    "permission_manifest": {
+      "type": "object",
+      "description": "Permissions any executable asset referenced by this skill is allowed to exercise. Optional. Absent means inherit the plugin defaults.",
+      "required": ["filesystem", "network"],
+      "additionalProperties": false,
+      "properties": {
+        "filesystem": {
+          "type": "string",
+          "enum": ["none", "sandbox_only", "read_only", "full"]
+        },
+        "network": {"type": "boolean"},
+        "process_spawn": {"type": "boolean"},
+        "env_read": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Free-form extension bag. Carries metadata not covered by the core contract, so a phase can record new information without a version bump."
+    }
   }
 }
 ```
@@ -1139,6 +1313,21 @@ total_successes: 38
 state: active
 created_at: 2026-10-06T10:00:00Z
 last_used_at: 2026-10-06T14:22:00Z
+prerequisites:
+- python-code-skeleton-reader
+provides:
+- type-hint-annotations
+consumes:
+- python-ast-body
+provenance:
+  source_runs: ["run-2026-10-06-abc123"]
+  authored_by: skill_curator
+  commit_hash: "3c7baaa05ab4aa49cc819ce3a819d260de19c157"
+permission_manifest:
+  filesystem: read_only
+  network: false
+  process_spawn: false
+  env_read: []
 ---
 
 # Add Type Hints to Python Functions
@@ -1215,6 +1404,10 @@ Upgraded to include blast radius, structural findings, and skill proposals.
 ## 6. SQLite Schema
 
 The SQLite index stores metadata, checkpoints, and indexes. It never stores large payloads.
+
+**Migration history.** The schema below is collectively produced by migrations `001_initial.sql` through `006_skill_states.sql`. Migration `001` created the base tables; `002`, `003`, `004` added the `agent_calls` table and its provenance columns; `005` added the five skill-graph and provenance tables; `006` rebuilt the `skills` table with an expanded `state` CHECK constraint (SQLite cannot ALTER a CHECK in place, so the table is recreated with rowids preserved and FTS rebuilt).
+
+The `skills` table definition shown below is the **post-006** shape. Migration `006` disables foreign key enforcement for the rebuild and restores it to its previous value (`OFF`, the project default) at the end.
 
 ```sql
 -- Enable WAL mode and performance PRAGMAs on every connection
@@ -1416,7 +1609,10 @@ CREATE TABLE IF NOT EXISTS consent_records (
 
 CREATE INDEX idx_consent_run ON consent_records(run_id);
 
--- Skills
+-- Skills. The state CHECK constraint shown here is the post-migration-006
+-- shape. Migration 001 created the table with only four states; migration
+-- 006 rebuilds it to add the three Phase 12 v2 states. Rowids are preserved
+-- across the rebuild, so the FTS5 external-content index remains valid.
 CREATE TABLE IF NOT EXISTS skills (
     name TEXT PRIMARY KEY,
     path TEXT NOT NULL,
@@ -1427,7 +1623,10 @@ CREATE TABLE IF NOT EXISTS skills (
     effectiveness REAL DEFAULT 0.5,
     total_uses INTEGER DEFAULT 0,
     total_successes INTEGER DEFAULT 0,
-    state TEXT DEFAULT 'active' CHECK (state IN ('active', 'stale', 'archived', 'draft')),
+    state TEXT DEFAULT 'active' CHECK (state IN (
+        'active', 'stale', 'archived', 'draft',
+        'trial', 'stable', 'retired'
+    )),
     created_at TEXT,
     last_used_at TEXT
 );
@@ -1462,6 +1661,112 @@ CREATE TABLE IF NOT EXISTS skill_feedback (
 
 CREATE INDEX idx_feedback_skill ON skill_feedback(skill_name);
 CREATE INDEX idx_feedback_run ON skill_feedback(run_id);
+
+-- Skill graph nodes. A node is either a skill (node_id = skill name) or a
+-- capability label (node_id = "cap:" + capability name). Derived from
+-- SKILL.md frontmatter and embeddings. Dropping this table and rebuilding
+-- via SkillIndexer.rebuild_graph() reproduces the exact state.
+CREATE TABLE IF NOT EXISTS skill_graph_nodes (
+    node_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('skill', 'capability')),
+    name TEXT NOT NULL,
+    metadata_json TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_skill_graph_nodes_kind ON skill_graph_nodes(kind);
+CREATE INDEX idx_skill_graph_nodes_name ON skill_graph_nodes(name);
+
+-- Skill graph edges. Typed relationships between nodes. Both endpoints
+-- reference skill_graph_nodes with ON DELETE CASCADE because the graph is
+-- entirely derived; a deleted node makes its edges meaningless.
+CREATE TABLE IF NOT EXISTS skill_graph_edges (
+    edge_id TEXT PRIMARY KEY,
+    src TEXT NOT NULL REFERENCES skill_graph_nodes(node_id) ON DELETE CASCADE,
+    dst TEXT NOT NULL REFERENCES skill_graph_nodes(node_id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN (
+        'prerequisite', 'provides', 'consumes',
+        'supersedes', 'semantic', 'conflicts'
+    )),
+    weight REAL NOT NULL DEFAULT 1.0,
+    provenance TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (src, dst, kind)
+);
+
+CREATE INDEX idx_skill_graph_edges_src ON skill_graph_edges(src);
+CREATE INDEX idx_skill_graph_edges_dst ON skill_graph_edges(dst);
+CREATE INDEX idx_skill_graph_edges_kind ON skill_graph_edges(kind);
+
+-- Negative knowledge. Typed failure records. skill_name is a loose
+-- reference, not a foreign key: a record survives the skill's removal so a
+-- security investigation can trace what happened even after the skill is
+-- gone.
+CREATE TABLE IF NOT EXISTS negative_knowledge (
+    failure_id TEXT PRIMARY KEY,
+    skill_name TEXT NOT NULL,
+    failure_category TEXT NOT NULL CHECK (failure_category IN (
+        'localization', 'generation', 'schema', 'contract',
+        'timeout', 'context_overflow', 'model_unavailable'
+    )),
+    context_signature TEXT NOT NULL,
+    attempted TEXT NOT NULL,
+    observed TEXT NOT NULL,
+    run_id TEXT,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    provenance_json TEXT,
+    adopted_count INTEGER NOT NULL DEFAULT 0,
+    rejected_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_negative_knowledge_skill ON negative_knowledge(skill_name);
+CREATE INDEX idx_negative_knowledge_context ON negative_knowledge(context_signature);
+CREATE INDEX idx_negative_knowledge_last_seen ON negative_knowledge(last_seen);
+
+-- Skill provenance. The full admission-time record for a skill. Re-written
+-- on re-admission; the history of admission attempts lives in
+-- skill_admission_log. Loose skill_name reference for the same reason as
+-- negative_knowledge.
+CREATE TABLE IF NOT EXISTS skill_provenance (
+    skill_name TEXT PRIMARY KEY,
+    source_runs_json TEXT NOT NULL,
+    authored_by TEXT NOT NULL CHECK (authored_by IN ('skill_curator', 'human')),
+    commit_hash TEXT NOT NULL,
+    license TEXT,
+    schema_hash TEXT,
+    scan_result TEXT,
+    eval_score REAL,
+    reviewer TEXT CHECK (reviewer IN ('auto', 'human')),
+    reviewer_id TEXT,
+    kernel_version TEXT,
+    recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_skill_provenance_authored_by ON skill_provenance(authored_by);
+
+-- Skill admission log. Append-only. One row per admission attempt. Provides
+-- the audit trail for every candidate that was accepted or rejected at the
+-- governance gate. Loose skill_name reference.
+CREATE TABLE IF NOT EXISTS skill_admission_log (
+    admission_id TEXT PRIMARY KEY,
+    skill_name TEXT NOT NULL,
+    attempted_at TEXT NOT NULL,
+    accepted INTEGER NOT NULL CHECK (accepted IN (0, 1)),
+    reason TEXT NOT NULL,
+    scan_result TEXT,
+    eval_score REAL,
+    dedupe_status TEXT,
+    blocking_findings_json TEXT,
+    warning_findings_json TEXT,
+    reviewer TEXT,
+    reviewer_id TEXT
+);
+
+CREATE INDEX idx_skill_admission_log_skill ON skill_admission_log(skill_name);
+CREATE INDEX idx_skill_admission_log_accepted ON skill_admission_log(accepted);
+CREATE INDEX idx_skill_admission_log_attempted_at ON skill_admission_log(attempted_at);
 
 -- Cache entries
 CREATE TABLE IF NOT EXISTS cache_entries (
@@ -1513,6 +1818,7 @@ CREATE TABLE IF NOT EXISTS cleanup_log (
 | **Apply consent records** | Forever | Consent record. Part of the audit trail. |
 | **Skills** (Markdown) | Forever | Knowledge artifact. User-approved. |
 | **Skill feedback** | Forever | Supports effectiveness scoring. |
+| **Skill graph, negative knowledge, provenance, admission log** | Forever | All derived from Markdown and run history. Small. Rebuildable on demand. |
 | **Run artifacts** (context pack, diff, test file, refactored file, verification, contract assertions) | 30 days | Debug data. Pruned by background cleanup. |
 | **Blast radius reports** | 30 days | Debug data. Rebuildable from the CPG. |
 | **Checkpoints** | Until run completes successfully | Resume data. Deleted after apply or on discard. |
@@ -1544,6 +1850,8 @@ flowchart TB
     Checkpoint --> Log
 ```
 
+The skill graph, negative-knowledge store, and provenance tables are **not** swept by the cleanup job. They are small and derived; a rebuild-from-Markdown restores them if any are corrupt or stale. Negative-knowledge records decay via the explicit `apply_forgetting_curve` call rather than via the file-age cleanup.
+
 ### 7.3 Disk Usage Guarantees
 
 | Component | Bounded By |
@@ -1552,9 +1860,10 @@ flowchart TB
 | SQLite WAL | `wal_autocheckpoint = 10000` keeps it under ~40 MB. |
 | Code Property Graph binary | One per commit. 90-day retention. |
 | Filesystem artifacts | 30-day retention. |
-| Skill library | Grows with approved skills only. Small. |
+| Skill library | Grows with admitted skills plus retired-but-kept. Bounded by the `max_active_skills` cap for the active subset; retired skills accumulate but are small Markdown files. |
+| Skill graph, negative knowledge, provenance, admission log | Derived. Bounded by the `max_active_skills` cap and the `apply_forgetting_curve` per-skill cap on negative records. |
 
-**Rule:** No storage component grows unbounded. The audit log and skills are the only things retained forever, and both are compact.
+**Rule:** No storage component grows unbounded. The audit log and skills are the only things retained forever, and both are compact. The Phase 12 v2 tables are derived and can be dropped-and-rebuilt; they are not a growth vector.
 
 ---
 
@@ -1578,14 +1887,18 @@ Each schema has its own version, independent of the application version and of o
 | Checkpoint | 1.0 | `.../checkpoint/v1.0.json` |
 | Audit Entry | 1.1 | `.../audit-entry/v1.1.json` |
 | Plugin Manifest | 1.1 | `.../plugin-manifest/v1.1.json` |
-| Skill Frontmatter | 1.0 | `.../skill/v1.0.json` |
+| Skill Frontmatter | 1.1 | `.../skill/v1.1.json` |
 | Run Summary | 1.1 | `.../run-summary/v1.1.json` |
+
+The Skill Frontmatter schema advanced from v1.0 to v1.1 in Phase 12 v2 (§5.13). The six original required fields are unchanged; the delta is six optional fields plus an expanded `state` enum. A v1.1 reader accepts both versions.
 
 ### 8.2 Compatibility Rule
 
 The core reads version N and N-1 of every schema. Older versions are rejected with a clear error.
 
 Example: if the current reconnaissance schema is 1.1, the core reads 1.1 and 1.0. A 0.9 file is rejected with a message explaining the supported versions and the upgrade path.
+
+For the Skill Frontmatter schema, the N-1 support is enforced two ways: (a) the schema itself uses `additionalProperties: false` with six optional fields, so a v1.0 skill (no optional fields) validates against the v1.1 schema; (b) the reader in `SkillStore._build_validator` loads the schema from disk on every store construction, so the loaded schema matches the current version.
 
 ### 8.3 Breaking Versus Non-Breaking Changes
 
@@ -1596,7 +1909,7 @@ Example: if the current reconnaissance schema is 1.1, the core reads 1.1 and 1.0
 | Remove field | Major | Removing `drift_report` |
 | Rename field | Major | `repo_url` to `url` |
 | Change field type | Major | `files: int` to `files: string` |
-| Change enum values | Minor if additive, major if removing | Adding `uncertain` to verdict |
+| Change enum values | Minor if additive, major if removing | Adding `uncertain` to verdict; adding `trial`, `stable`, `retired` to skill state |
 | Change validation rules | Minor if loosening, major if tightening | New regex constraint |
 
 ### 8.4 Migration
@@ -1608,6 +1921,8 @@ When a schema version changes:
 3. Old versions are supported for N-1.
 4. A migration command is provided.
 5. Migration is idempotent.
+
+SQLite schema changes are handled by the `MigrationRunner` (§6). The runner reads `.sql` files sorted by filename and applies only the ones not recorded in `_schema_migrations`. Every migration is written to be idempotent (each statement uses `IF NOT EXISTS` where possible). Migration `006` demonstrates the pattern for a breaking DDL change that SQLite cannot express as an ALTER: rebuild the table with the target shape, copy rowids, drop the old table, rename the new one, rebuild any dependent indexes and virtual tables, and restore the PRAGMA state.
 
 ---
 
@@ -1625,6 +1940,7 @@ flowchart LR
         FS[Filesystem Artifacts]
         Skills[(Skill Library)]
         Audit[(audit.jsonl)]
+        SkillMeta[(Skill Graph, Negative Knowledge, Provenance)]
     end
 
     subgraph Runtime["Runtime Only"]
@@ -1635,11 +1951,13 @@ flowchart LR
     Repo --> Graph
     Repo --> FS
     Repo --> Skills
+    Skills --> SkillMeta
     FS --> Audit
     SQLite --> Mem
     Graph --> Mem
     FS --> Mem
     Skills --> Mem
+    SkillMeta --> Mem
     Mem --> SQLite
     Mem --> FS
 ```
@@ -1662,7 +1980,11 @@ flowchart LR
 | Checkpoint | SQLite + export to JSON | After each phase |
 | Skill | Markdown file + SQLite index | On user approval |
 | Skill embedding | SQLite (sqlite-vec) | On skill creation or update |
-| Skill feedback | SQLite | After each skill use |
+| Skill graph nodes and edges | SQLite (`skill_graph_*`) | After `SkillGraph.rebuild()` |
+| Skill provenance | SQLite (`skill_provenance`) | On admission |
+| Skill admission log | SQLite (`skill_admission_log`) | On every admission attempt |
+| Negative knowledge | SQLite (`negative_knowledge`) | After a skill load failure is observed and recorded |
+| Skill feedback | SQLite (`skill_feedback`) | After each skill use |
 | Run summary | Filesystem | At run end |
 
 ---
@@ -1677,8 +1999,11 @@ flowchart LR
 | **Cache poisoning** | Cache entries keyed by commit hash. A new commit invalidates the cache. |
 | **Plugin manifest spoofing** | Manifests are validated against the schema before the plugin is loaded. |
 | **Path traversal** | All file paths are validated against the repository root. Symlinks are resolved and checked. |
-| **Skill poisoning** | Skills enter the library only on user approval. The Markdown source is the truth and can be inspected. |
+| **Skill poisoning** | Every skill passes the admission scanner before entering the retrieval pool. The scanner blocks known injection patterns, invisible Unicode, shell substitution, and exfiltration verbs. Every admission writes a row to `skill_admission_log` (append-only audit trail) and a `skill_provenance` record. Skills with declared permissions cannot execute beyond them, enforced by the Phase 9 audit hook. See §5.13 for the `permission_manifest` field. |
+| **Negative-knowledge tampering** | Not applicable — negative records are advisory and are only surfaced to the agent for adopt/reject. The records are derived from `agent_calls` and can be regenerated. |
 | **Graph file tampering** | The graph is a cache, not a source of truth. It is rebuildable from source at any time. |
+| **Skill graph tampering** | Same as the CPG — the skill graph is derived from `SKILL.md` frontmatter. Drop the tables and rebuild via `SkillIndexer.rebuild_graph()`. |
+| **Provenance reconstruction** | Every admission writes a `ProvenancePin` to `skill_provenance`. The source runs, author, commit, license, scanner result, eval score, reviewer, and kernel version can be reconstructed from the table plus `agent_calls`. A skill found malicious can be traced and rolled back (§5.13 records what the pin stores in Markdown; the DB stores the full record). |
 
 ---
 
@@ -1690,3 +2015,5 @@ flowchart LR
 - `14-model-strategy.md` — model call records
 - `15-verification-architecture.md` — verifier verdict schemas in context
 - `16-context-engineering.md` — Context Pack construction
+- `summaries/Phase_12.md` — the Phase 12 v2 design settlement, including §7 (storage and schema) and §12 (files created and updated)
+- `summaries/phase-9-design.md` — the Phase 9 design settlement, including the permission model that skill `permission_manifest` inherits from

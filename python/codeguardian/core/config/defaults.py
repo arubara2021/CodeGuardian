@@ -27,6 +27,22 @@ __all__ = [
     "DEFAULT_SANDBOX_CPU_CORES",
     "DEFAULT_SANDBOX_MEMORY_MB",
     "DEFAULT_SANDBOX_PROCESS_LIMIT",
+    "DEFAULT_SKILLS_ADMISSION_STRICT",
+    "DEFAULT_SKILLS_DEDUPE_THRESHOLD",
+    "DEFAULT_SKILLS_EVOLVER_ENABLED",
+    "DEFAULT_SKILLS_GRAPH_ENABLED",
+    "DEFAULT_SKILLS_MAX_ACTIVE_SKILLS",
+    "DEFAULT_SKILLS_NEGATIVE_STORE_ENABLED",
+    "DEFAULT_SKILLS_PPR_ENABLED",
+    "DEFAULT_SKILLS_PPR_HOPS",
+    "DEFAULT_SKILLS_PPR_TIMEOUT_MS",
+    "DEFAULT_SKILLS_RECON_BLAST_FILTER_ENABLED",
+    "DEFAULT_SKILLS_RERANKER_ENABLED",
+    "DEFAULT_SKILLS_RERANKER_TIMEOUT_MS",
+    "DEFAULT_SKILLS_RETIRE_AFTER_RUNS",
+    "DEFAULT_SKILLS_RETIRE_THRESHOLD",
+    "DEFAULT_SKILLS_RETRIEVAL_TOKEN_BUDGET",
+    "DEFAULT_SKILLS_TRIAL_RUNS_BEFORE_ACTIVE",
 ]
 
 # Environment variables read by the loader. Both are optional. They
@@ -59,3 +75,40 @@ DEFAULT_SANDBOX_MEMORY_MB = 1024
 DEFAULT_SANDBOX_CPU_CORES = 2
 DEFAULT_SANDBOX_PROCESS_LIMIT = 256
 DEFAULT_NETWORK_DURING_DEPS = True
+
+# Skills defaults added in Phase 12 v2. Every feature flag defaults to
+# false; a user who upgrades without editing their configuration sees
+# the exact behavior of the flat retrieval path.
+DEFAULT_SKILLS_GRAPH_ENABLED: bool = False
+DEFAULT_SKILLS_PPR_ENABLED: bool = False
+DEFAULT_SKILLS_RERANKER_ENABLED: bool = False
+DEFAULT_SKILLS_NEGATIVE_STORE_ENABLED: bool = False
+DEFAULT_SKILLS_ADMISSION_STRICT: bool = False
+DEFAULT_SKILLS_RECON_BLAST_FILTER_ENABLED: bool = False
+DEFAULT_SKILLS_EVOLVER_ENABLED: bool = False
+
+# PageRank traversal bounds. One hop is the default because the graph
+# is small enough that a prerequisite's prerequisite is rarely useful,
+# and because the walk has a hard time budget that a deeper traversal
+# would frequently exceed.
+DEFAULT_SKILLS_PPR_HOPS: int = 1
+DEFAULT_SKILLS_PPR_TIMEOUT_MS: int = 50
+
+# Cross-encoder reranking bound. Generous enough for a MiniLM-class
+# model on a laptop CPU and short enough that a slower machine degrades
+# to the previous stage rather than stalling the pipeline.
+DEFAULT_SKILLS_RERANKER_TIMEOUT_MS: int = 120
+
+# Governance thresholds. The dedupe threshold follows the middle of the
+# measured collision band. The retire threshold and run count follow
+# the fitness-driven retirement recipe from the library lifecycle
+# literature.
+DEFAULT_SKILLS_DEDUPE_THRESHOLD: float = 0.92
+DEFAULT_SKILLS_MAX_ACTIVE_SKILLS: int = 200
+DEFAULT_SKILLS_RETIRE_THRESHOLD: float = 0.3
+DEFAULT_SKILLS_RETIRE_AFTER_RUNS: int = 20
+DEFAULT_SKILLS_TRIAL_RUNS_BEFORE_ACTIVE: int = 3
+
+# Retrieval budget. Three thousand tokens is enough for roughly five
+# hydrated skill bodies of average size. The caller may override.
+DEFAULT_SKILLS_RETRIEVAL_TOKEN_BUDGET: int = 3000

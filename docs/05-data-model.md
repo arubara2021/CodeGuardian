@@ -8,7 +8,7 @@ This document defines every structured entity CodeGuardian reads, writes, or pas
 
 Everything here is concrete: field names, types, required versus optional, validation rules.
 
-**Snapshot.** Last updated at the Phase 12 v2 boundary. Records the six new tables added by migration 005 and the `skills` table rebuild in migration 006. Where a schema version advanced in Phase 12 v2, the change is recorded in §5.13 and §8.1.
+**Snapshot.** Last updated at the Phase 13 boundary. Records the `registered_agents` table added by migration 007, the `agent_calls.role` foreign key, the `checkpoints.heartbeat_at` column, and the two new entity relations the orchestrator depends on. Where a schema version advanced in Phase 13, the change is recorded in §5 and §8.1.
 
 ---
 
@@ -18,7 +18,7 @@ CodeGuardian uses a hybrid storage model. No single backend serves every need.
 
 | Storage Layer | Technology | What It Holds | Why |
 |---|---|---|---|
-| **Structured index** | SQLite with WAL mode | Run history, checkpoints, skills index, blast radius metadata, MCP call log | Concurrent-safe, embedded, fast reads, atomic transactions |
+| **Structured index** | SQLite with WAL mode | Run history, checkpoints, skills index, blast radius metadata, MCP call log, registered agents | Concurrent-safe, embedded, fast reads, atomic transactions |
 | **Graph store** | Binary columnar file, memory-mapped | The Code Property Graph per repository per commit | The graph is too large for SQLite blobs. Columnar memory-mapped layout gives fast traversal and low memory usage. |
 | **Immutable artifacts** | Filesystem (JSON, JSONL, Markdown) | Reconnaissance manifest, blast radius report, context packs, diffs, audit logs, summaries | Append-only, portable, human-readable |
 | **Skill source** | Filesystem (Markdown with YAML frontmatter) | The source of truth for every skill | Human-readable, editable by hand, trackable in version control |
@@ -116,6 +116,7 @@ CodeGuardian uses a hybrid storage model. No single backend serves every need.
 | **Consent Record** | SQLite + audit log | The user's approval to apply changes |
 | **Audit Entry** | Filesystem (`audit.jsonl`) | One line in the tamper-evident log |
 | **Plugin Manifest** | Filesystem (in plugin package) | Capabilities and permissions |
+| **Registered Agent** | SQLite | One row per agent the orchestrator can dispatch. Name is the `agent_calls.role` value; capabilities is a JSON array of tags; backend is one of `in-process`, `cli`, `acp`, `openai-api`. |
 | **Skill** | Filesystem (Markdown) + SQLite index | A reusable pattern |
 | **Skill Embedding** | SQLite (sqlite-vec) | Vector representation for semantic retrieval |
 | **Skill Feedback** | SQLite | Outcome of each skill use |
@@ -150,8 +151,11 @@ erDiagram
     RUN ||--o{ SKILL_FEEDBACK : "generates"
     RUN ||--o{ MCP_TOOL_CALL : "has many"
     RUN ||--o{ NEGATIVE_KNOWLEDGE : "may record"
+    RUN ||--o{ AGENT_CALL : "has many"
     PHASE_EXECUTION ||--o{ MODEL_CALL : "has many"
     PHASE_EXECUTION ||--o{ MCP_TOOL_CALL : "has many"
+    PHASE_EXECUTION ||--o{ AGENT_CALL : "may anchor"
+    REGISTERED_AGENT ||--o{ AGENT_CALL : "role of"
     BLAST_RADIUS_REPORT ||--o{ CONTRACT_VIOLATION : "contains"
     BLAST_RADIUS_REPORT ||--o{ COVERAGE_GAP : "contains"
     CPG ||--|| RUNTIME_CONTRACT_MAP : "informs"
@@ -206,6 +210,7 @@ erDiagram
         string phase
         string state_json
         string created_at
+        string heartbeat_at
     }
 
     PLAN_APPROVAL {
@@ -237,6 +242,41 @@ erDiagram
         string output_hash
         int duration_ms
         string status
+    }
+
+    AGENT_CALL {
+        string call_id PK
+        string run_id FK
+        string phase_id FK
+        string target_symbol
+        string role FK
+        string prompt_role
+        string prompt_version
+        string model_id
+        int tokens_in
+        int tokens_out
+        int latency_ms
+        string outcome
+        string refusal_code
+        int retry_count
+        string output_hash
+        string created_at
+        string prompt_hash
+        string context_hash
+        string failure_category
+        string verdict_reason
+        string model_options
+        string tool_chain
+        string decision_log
+        string model_reasoning
+        string evidence_receipt
+    }
+
+    REGISTERED_AGENT {
+        string name PK
+        string capabilities
+        string backend
+        string registered_at
     }
 
     CPG {
@@ -453,6 +493,8 @@ erDiagram
 - `NEGATIVE_KNOWLEDGE.skill_name` is a loose reference, not a foreign key. It records which skill was attempted, but the record survives the skill's removal so a security investigation can still trace what happened.
 - `SKILL_PROVENANCE` and `SKILL_ADMISSION_LOG` reference the skill name but do not enforce a foreign key for the same reason — they must survive a skill removal so the audit trail is preserved.
 - `SKILL_GRAPH_EDGE.src` and `.dst` **do** enforce foreign keys to `SKILL_GRAPH_NODE` (with `ON DELETE CASCADE`). This is because the graph is entirely derived; if a node is removed the edges pointing at it are meaningless.
+- **`AGENT_CALL.role` enforces a foreign key to `REGISTERED_AGENT.name`** (added by migration 007). The FK is declarative because the project runs with foreign key enforcement off by default; the `AgentRegistry` enforces agent names at registration time and `loop._seed_registered_agents` populates the table from the resolved graph on the first run.
+- **`CHECKPOINT.heartbeat_at` is nullable.** It is written on every checkpoint by `write_checkpoint` and updated between phases by `CheckpointSupervisor.heartbeat`. A checkpoint written before the first heartbeat has `NULL`; the supervisor falls back to `created_at` when computing staleness.
 
 ---
 
@@ -1024,6 +1066,8 @@ The resume state. Stored in SQLite via the orchestrator's checkpointer and expor
 }
 ```
 
+The schema does not name `heartbeat_at`; the column is orchestrator-internal liveness state, not part of the exported checkpoint payload. The exported JSON matches the schema; the column is a database-level implementation detail written by the same code path.
+
 ### 5.11 Audit Entry — Schema v1.1
 
 Upgraded to include the blast radius section, three verifier verdicts, checkpoint reference, and plan approval reference.
@@ -1122,6 +1166,8 @@ entry_n: prev_hash = entry_(n-1).entry_hash, entry_hash = sha256(entry_(n-1).ent
 ```
 
 If any entry is modified, its `entry_hash` no longer matches the next entry's `prev_hash`, and the chain breaks.
+
+The Phase 13 orchestrator writes one audit entry per phase through `loop.run_loop`. Each entry carries the `checkpoint_id` the phase wrote, and the entry is appended to the chain by the caller-supplied `AuditWriter`. The `entry.phase` value is mapped from the slot name by `loop._AUDIT_PHASE_MAP` so a slot name like `verifier_correctness` becomes the schema-valid phase name `independent_verify`.
 
 ### 5.12 Plugin Manifest — Schema v1.1
 
@@ -1405,9 +1451,9 @@ Upgraded to include blast radius, structural findings, and skill proposals.
 
 The SQLite index stores metadata, checkpoints, and indexes. It never stores large payloads.
 
-**Migration history.** The schema below is collectively produced by migrations `001_initial.sql` through `006_skill_states.sql`. Migration `001` created the base tables; `002`, `003`, `004` added the `agent_calls` table and its provenance columns; `005` added the five skill-graph and provenance tables; `006` rebuilt the `skills` table with an expanded `state` CHECK constraint (SQLite cannot ALTER a CHECK in place, so the table is recreated with rowids preserved and FTS rebuilt).
+**Migration history.** The schema below is collectively produced by migrations `001_initial.sql` through `007_agent_registry.sql`. Migration `001` created the base tables; `002`, `003`, `004` added the `agent_calls` table and its provenance columns; `005` added the five skill-graph and provenance tables; `006` rebuilt the `skills` table with an expanded `state` CHECK constraint; `007` created `registered_agents`, rebuilt `agent_calls` with a `role` foreign key, and added `checkpoints.heartbeat_at`.
 
-The `skills` table definition shown below is the **post-006** shape. Migration `006` disables foreign key enforcement for the rebuild and restores it to its previous value (`OFF`, the project default) at the end.
+The `skills` table definition shown below is the **post-006** shape. The `agent_calls` table definition shown below is the **post-007** shape. The `checkpoints` table definition shown below is the **post-007** shape. Migration `007` disables foreign key enforcement for the rebuild and restores it to its previous value (`OFF`, the project default) at the end. The migration does not seed `registered_agents`; the seed runs from `loop._seed_registered_agents` on the first orchestrated run.
 
 ```sql
 -- Enable WAL mode and performance PRAGMAs on every connection
@@ -1495,18 +1541,87 @@ CREATE TABLE IF NOT EXISTS phase_executions (
 
 CREATE INDEX idx_phases_run ON phase_executions(run_id, started_at);
 
--- Checkpoints
+-- Checkpoints. The heartbeat_at column is added by migration 007. A
+-- long-running phase updates it every few seconds so the supervisor
+-- can distinguish a slow phase from a hung one. The column is
+-- nullable; a checkpoint written before the first heartbeat has NULL
+-- and the supervisor falls back to created_at.
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(run_id),
     phase TEXT NOT NULL,
     state_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    heartbeat_at TEXT
 );
 
 CREATE INDEX idx_checkpoints_run ON checkpoints(run_id, created_at DESC);
 
--- Model calls
+-- Registered agents. One row per agent the orchestrator can dispatch.
+-- Populated by the orchestration loop on the first run, from the
+-- resolved graph; not seeded by the migration. The role foreign key
+-- on agent_calls references name. The FK is declarative because the
+-- project runs with foreign keys off by default; the AgentRegistry
+-- enforces agent names at registration time.
+CREATE TABLE IF NOT EXISTS registered_agents (
+    name TEXT PRIMARY KEY,
+    capabilities TEXT NOT NULL DEFAULT '[]',
+    backend TEXT NOT NULL DEFAULT 'in-process'
+        CHECK (backend IN ('in-process', 'cli', 'acp', 'openai-api')),
+    registered_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_registered_agents_backend ON registered_agents(backend);
+
+-- Agent call telemetry. The role column references registered_agents
+-- by name; the reference is declarative. outcome and refusal_code are
+-- CHECK-constrained to their closed sets. failure_category,
+-- verdict_reason, model_options, tool_chain, decision_log,
+-- model_reasoning, and evidence_receipt are not CHECK-constrained;
+-- the valid shapes live in codeguardian.core.agents.telemetry as
+-- TypedDicts.
+CREATE TABLE IF NOT EXISTS agent_calls (
+    call_id TEXT PRIMARY KEY,
+    run_id TEXT REFERENCES runs(run_id),
+    phase_id TEXT REFERENCES phase_executions(phase_id),
+    target_symbol TEXT,
+    role TEXT NOT NULL REFERENCES registered_agents(name),
+    prompt_role TEXT,
+    prompt_version TEXT,
+    model_id TEXT,
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL CHECK (outcome IN (
+        'success',
+        'refused',
+        'schema_violation',
+        'signature_drift',
+        'timeout'
+    )),
+    refusal_code TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    output_hash TEXT,
+    created_at TEXT NOT NULL,
+    prompt_hash TEXT,
+    context_hash TEXT,
+    failure_category TEXT,
+    verdict_reason TEXT,
+    model_options TEXT,
+    tool_chain TEXT,
+    decision_log TEXT,
+    model_reasoning TEXT,
+    evidence_receipt TEXT
+);
+
+CREATE INDEX idx_agent_calls_run ON agent_calls(run_id, created_at DESC);
+CREATE INDEX idx_agent_calls_role_prompt ON agent_calls(role, prompt_version);
+CREATE INDEX idx_agent_calls_role_model ON agent_calls(role, model_id);
+
+-- Model calls. Phase 11's agent_calls table supersedes this table for
+-- agent-level telemetry. This table remains for the provider-level
+-- recording that predates agents. agent_name retains its nine-value
+-- CHECK; it is not joined to registered_agents.
 CREATE TABLE IF NOT EXISTS model_calls (
     call_id TEXT PRIMARY KEY,
     phase_id TEXT NOT NULL REFERENCES phase_executions(phase_id),
@@ -1804,6 +1919,12 @@ CREATE TABLE IF NOT EXISTS cleanup_log (
 );
 ```
 
+**Migration 007 notes.**
+
+The rebuild of `agent_calls` follows SQLite's 12-step generalized ALTER TABLE procedure. The step that matters is the bracketing: `PRAGMA foreign_keys=OFF` is issued outside the transaction because SQLite silently ignores it inside one, and the transaction ends with `PRAGMA foreign_key_check` before `COMMIT` so a dangling reference is caught before it becomes permanent. The migration ends with `PRAGMA foreign_keys=OFF`, matching migration 006 and the project default. The role foreign key is declarative; the `AgentRegistry` enforces agent names at registration time and `loop._seed_registered_agents` writes the rows.
+
+The `model_calls` table retains its nine-value `agent_name` CHECK and is not joined to `registered_agents`. It is the pre-agent telemetry table; the agent-level table is `agent_calls`. A future migration may deprecate `model_calls` once the Phase 14 CLI no longer writes to it.
+
 ---
 
 ## 7. Lifecycle and Retention
@@ -1816,6 +1937,7 @@ CREATE TABLE IF NOT EXISTS cleanup_log (
 | **Run summary** (`summary.md`) | Forever | Cheap, human-readable record. |
 | **Plan approvals** | Forever | Consent record. Part of the audit trail. |
 | **Apply consent records** | Forever | Consent record. Part of the audit trail. |
+| **Registered agents** | Forever | One row per agent the registry has ever resolved. Rewritten with `INSERT OR IGNORE` on every run. The table is small (one row per agent name) and deleting a row would orphan historical `agent_calls.role` references in a schema that runs with foreign keys off. |
 | **Skills** (Markdown) | Forever | Knowledge artifact. User-approved. |
 | **Skill feedback** | Forever | Supports effectiveness scoring. |
 | **Skill graph, negative knowledge, provenance, admission log** | Forever | All derived from Markdown and run history. Small. Rebuildable on demand. |
@@ -1852,6 +1974,8 @@ flowchart TB
 
 The skill graph, negative-knowledge store, and provenance tables are **not** swept by the cleanup job. They are small and derived; a rebuild-from-Markdown restores them if any are corrupt or stale. Negative-knowledge records decay via the explicit `apply_forgetting_curve` call rather than via the file-age cleanup.
 
+The `registered_agents` table is not swept. It is small and its rows anchor the declarative foreign key on `agent_calls.role`.
+
 ### 7.3 Disk Usage Guarantees
 
 | Component | Bounded By |
@@ -1862,8 +1986,9 @@ The skill graph, negative-knowledge store, and provenance tables are **not** swe
 | Filesystem artifacts | 30-day retention. |
 | Skill library | Grows with admitted skills plus retired-but-kept. Bounded by the `max_active_skills` cap for the active subset; retired skills accumulate but are small Markdown files. |
 | Skill graph, negative knowledge, provenance, admission log | Derived. Bounded by the `max_active_skills` cap and the `apply_forgetting_curve` per-skill cap on negative records. |
+| Registered agents | One row per registered agent. Small. Bounded by the number of distinct agent names the project has ever declared. |
 
-**Rule:** No storage component grows unbounded. The audit log and skills are the only things retained forever, and both are compact. The Phase 12 v2 tables are derived and can be dropped-and-rebuilt; they are not a growth vector.
+**Rule:** No storage component grows unbounded. The audit log and skills are the only things retained forever, and both are compact. The Phase 12 v2 tables are derived and can be dropped-and-rebuilt; they are not a growth vector. The Phase 13 `registered_agents` table is bounded by the number of agent names the project declares.
 
 ---
 
@@ -1891,6 +2016,8 @@ Each schema has its own version, independent of the application version and of o
 | Run Summary | 1.1 | `.../run-summary/v1.1.json` |
 
 The Skill Frontmatter schema advanced from v1.0 to v1.1 in Phase 12 v2 (§5.13). The six original required fields are unchanged; the delta is six optional fields plus an expanded `state` enum. A v1.1 reader accepts both versions.
+
+The Phase 13 `registered_agents` table has no JSON Schema. It is a SQLite-only table populated by the orchestrator loop; it is not a cross-boundary artifact that requires the schema-validation contract the JSON artifacts carry. Its own field set is documented in §6 and its invariants are enforced by the `registered_agents` CREATE TABLE.
 
 ### 8.2 Compatibility Rule
 
@@ -1922,7 +2049,7 @@ When a schema version changes:
 4. A migration command is provided.
 5. Migration is idempotent.
 
-SQLite schema changes are handled by the `MigrationRunner` (§6). The runner reads `.sql` files sorted by filename and applies only the ones not recorded in `_schema_migrations`. Every migration is written to be idempotent (each statement uses `IF NOT EXISTS` where possible). Migration `006` demonstrates the pattern for a breaking DDL change that SQLite cannot express as an ALTER: rebuild the table with the target shape, copy rowids, drop the old table, rename the new one, rebuild any dependent indexes and virtual tables, and restore the PRAGMA state.
+SQLite schema changes are handled by the `MigrationRunner` (§6). The runner reads `.sql` files sorted by filename and applies only the ones not recorded in `_schema_migrations`. Every migration is written to be idempotent (each statement uses `IF NOT EXISTS` where possible). Migration `006` and migration `007` demonstrate the pattern for a breaking DDL change that SQLite cannot express as an ALTER: rebuild the table with the target shape, copy rowids, drop the old table, rename the new one, rebuild any dependent indexes and virtual tables, and restore the PRAGMA state. Migration `007` additionally runs `PRAGMA foreign_key_check` before `COMMIT` because it adds a foreign key during the rebuild.
 
 ---
 
@@ -1941,6 +2068,7 @@ flowchart LR
         Skills[(Skill Library)]
         Audit[(audit.jsonl)]
         SkillMeta[(Skill Graph, Negative Knowledge, Provenance)]
+        Agents[(Registered Agents)]
     end
 
     subgraph Runtime["Runtime Only"]
@@ -1958,8 +2086,10 @@ flowchart LR
     FS --> Mem
     Skills --> Mem
     SkillMeta --> Mem
+    Agents --> Mem
     Mem --> SQLite
     Mem --> FS
+    Mem --> Agents
 ```
 
 | Data | Written To | When |
@@ -1978,6 +2108,7 @@ flowchart LR
 | Consent record | SQLite + audit log | Before apply |
 | Audit entry | `audit.jsonl` | After each phase |
 | Checkpoint | SQLite + export to JSON | After each phase |
+| Registered agent | SQLite (`registered_agents`) | On first orchestrated run, from the resolved graph; preserved thereafter by `INSERT OR IGNORE` |
 | Skill | Markdown file + SQLite index | On user approval |
 | Skill embedding | SQLite (sqlite-vec) | On skill creation or update |
 | Skill graph nodes and edges | SQLite (`skill_graph_*`) | After `SkillGraph.rebuild()` |
@@ -2004,6 +2135,8 @@ flowchart LR
 | **Graph file tampering** | The graph is a cache, not a source of truth. It is rebuildable from source at any time. |
 | **Skill graph tampering** | Same as the CPG — the skill graph is derived from `SKILL.md` frontmatter. Drop the tables and rebuild via `SkillIndexer.rebuild_graph()`. |
 | **Provenance reconstruction** | Every admission writes a `ProvenancePin` to `skill_provenance`. The source runs, author, commit, license, scanner result, eval score, reviewer, and kernel version can be reconstructed from the table plus `agent_calls`. A skill found malicious can be traced and rolled back (§5.13 records what the pin stores in Markdown; the DB stores the full record). |
+| **Agent registration tampering** | `registered_agents` is populated from the resolved graph on the first orchestrated run. A tampered row is overwritten by `INSERT OR IGNORE` on the next run, but only if the tampering replaced a row; a deleted row is not restored. The `AgentRegistry` refuses to dispatch an agent whose name does not match the registry pattern, so a tampered row cannot smuggle an arbitrary role name into `agent_calls` without a matching registry entry. |
+| **Declarative foreign keys** | The project runs with `PRAGMA foreign_keys = OFF` by default. The `agent_calls.role` foreign key is declarative; enforcement is the `AgentRegistry`'s registration check plus the seed loop's `INSERT OR IGNORE`. A caller that wants runtime enforcement enables the PRAGMA for its own session; nothing in the default path does. |
 
 ---
 
@@ -2015,5 +2148,7 @@ flowchart LR
 - `14-model-strategy.md` — model call records
 - `15-verification-architecture.md` — verifier verdict schemas in context
 - `16-context-engineering.md` — Context Pack construction
+- `summaries/Phase_13.md` — the Phase 13 design settlement, including the orchestrator's data model and the two-tier evidence bus
+- `summaries/Phase_13_walls_and_handoff.md` — the v2 roadmap, including the walls that the data model's current scope leaves open
 - `summaries/Phase_12.md` — the Phase 12 v2 design settlement, including §7 (storage and schema) and §12 (files created and updated)
 - `summaries/phase-9-design.md` — the Phase 9 design settlement, including the permission model that skill `permission_manifest` inherits from

@@ -1,3 +1,4 @@
+
 # BUILD_ORDER.md
 
 **The complete file-by-file implementation sequence for CodeGuardian, built in phases, tested at phase boundaries.**
@@ -105,7 +106,7 @@ flowchart TB
     P11["Phase 11 — Agents<br/>B-051 to B-053"]
     P12["Phase 12 — Skills Module v2<br/>B-054 to B-059"]
     P13["Phase 13 — Orchestrator<br/>B-060 to B-063"]
-    P14["Phase 14 — CLI<br/>B-064 to B-070"]
+    P14["Phase 14 — UIs (TUI, VS Code, Daemon)<br/>B-064 to B-070"]
     P15["Phase 15 — MCP and Reporters<br/>B-071 to B-075"]
     P16["Phase 16 — Full Assembly<br/>B-076 to B-078"]
 
@@ -935,78 +936,77 @@ Recon agent, blast radius agent, analyst, tester, writer, and the three verifier
 
 ---
 
-## 19. Phase 14 — CLI
+## 19. Phase 14 — UIs (TUI, VS Code, Daemon)
 
-### Block B-064 — CLI Entry Point and Commands Part 1
+**Architectural shift.** The user interface is decoupled into three parts: a headless Python daemon, a Rust TUI (Terminal User Interface), and a VS Code extension. All three communicate over a local JSON-RPC/WebSocket connection. This ensures the engine never blocks the UI, and the TUI can achieve high-performance, 60fps animations (using `ratatui` and `tachyonfx`) without the overhead of a Node.js or Python TUI runtime.
 
+### Block B-064 — Headless Daemon and RPC
 | File | Purpose |
 |---|---|
 | `python/codeguardian/cli/__init__.py` | CLI package init |
-| `python/codeguardian/cli/main.py` | CLI entry point |
+| `python/codeguardian/cli/main.py` | Entry point (`codeguardian`) supporting daemon, headless, and TUI modes |
+| `python/codeguardian/cli/daemon.py` | Headless JSON-RPC/WebSocket daemon |
+| `python/codeguardian/cli/rpc.py` | Daemon RPC handlers and payload schemas |
 | `python/codeguardian/cli/commands/__init__.py` | Command package init |
-| `python/codeguardian/cli/commands/run.py` | `codeguardian run` |
-| `python/codeguardian/cli/commands/recon.py` | `codeguardian recon` |
 
-### Block B-065 — CLI Commands Part 2
-
+### Block B-065 — Rust TUI Skeleton
 | File | Purpose |
 |---|---|
-| `python/codeguardian/cli/commands/blast.py` | `codeguardian blast` |
-| `python/codeguardian/cli/commands/verify.py` | `codeguardian verify` |
-| `python/codeguardian/cli/commands/skill.py` | `codeguardian skill` |
-| `python/codeguardian/cli/commands/serve.py` | `codeguardian serve` |
-| `python/codeguardian/cli/commands/config.py` | `codeguardian config` |
+| `rust/crates/codeguardian-tui/Cargo.toml` | TUI crate metadata |
+| `rust/crates/codeguardian-tui/src/main.rs` | TUI entry point |
+| `rust/crates/codeguardian-tui/src/app.rs` | TUI application state |
+| `rust/crates/codeguardian-tui/src/rpc_client.rs` | WebSocket/JSON-RPC client to Python daemon |
+| `rust/crates/codeguardian-tui/src/events.rs` | Keyboard/mouse event handling |
 
-### Block B-066 — CLI Views
-
+### Block B-066 — Rust TUI UI and Animations
 | File | Purpose |
 |---|---|
-| `python/codeguardian/cli/views/__init__.py` | View package init |
-| `python/codeguardian/cli/views/recon_view.py` | Reconnaissance dashboard |
-| `python/codeguardian/cli/views/blast_view.py` | Blast radius visualization |
-| `python/codeguardian/cli/views/plan_view.py` | Plan approval view |
-| `python/codeguardian/cli/views/diff_view.py` | Diff preview |
-| `python/codeguardian/cli/views/verify_view.py` | Verification report |
+| `rust/crates/codeguardian-tui/src/ui/mod.rs` | UI module root |
+| `rust/crates/codeguardian-tui/src/ui/layout.rs` | Cassowary-based layout for multi-pane dashboards |
+| `rust/crates/codeguardian-tui/src/ui/widgets.rs` | Custom widgets (chat, progress, diff) |
+| `rust/crates/codeguardian-tui/src/ui/animations.rs` | `tachyonfx` animation pipelines |
+| `rust/crates/codeguardian-tui/src/ui/theme.rs` | Color palette and styling |
 
-### Block B-067 — CLI UI Components
-
+### Block B-067 — VS Code Extension Core
 | File | Purpose |
 |---|---|
-| `python/codeguardian/cli/ui/__init__.py` | UI package init |
-| `python/codeguardian/cli/ui/rich_output.py` | Rich panels |
-| `python/codeguardian/cli/ui/textual_app.py` | Textual TUI |
-| `python/codeguardian/cli/ui/prompts.py` | prompt_toolkit input |
-| `python/codeguardian/cli/ui/progress.py` | Progress bars |
+| `vscode/package.json` | Extension manifest |
+| `vscode/tsconfig.json` | TypeScript configuration |
+| `vscode/src/extension.ts` | Extension activation and lifecycle |
+| `vscode/src/rpc_client.ts` | WebSocket/JSON-RPC client to Python daemon |
+| `vscode/src/state.ts` | Extension state management |
 
-### Block B-068 — CLI Output Modes
+### Block B-068 — VS Code Extension UI Panels
+| File | Purpose |
+|---|---|
+| `vscode/src/panels/RunPanel.ts` | Webview for running refactors |
+| `vscode/src/panels/BlastRadiusPanel.ts` | Webview for blast radius visualization |
+| `vscode/src/panels/DiffPanel.ts` | Webview for diff preview |
+| `vscode/src/panels/StatusBar.ts` | Extension status bar item |
+| `vscode/media/style.css` | Webview styling |
 
+### Block B-069 — CLI Fallbacks and Headless Output
 | File | Purpose |
 |---|---|
 | `python/codeguardian/cli/output/__init__.py` | Output package init |
-| `python/codeguardian/cli/output/human.py` | Human-readable output |
-| `python/codeguardian/cli/output/json.py` | JSON output |
+| `python/codeguardian/cli/output/human.py` | Human-readable headless output |
+| `python/codeguardian/cli/output/json.py` | JSON headless output |
 | `python/codeguardian/cli/output/sarif.py` | SARIF output |
+| `python/codeguardian/cli/commands/run.py` | `codeguardian run` (headless, CI) |
 
-### Block B-069 — CLI Tests Part 1
-
+### Block B-070 — CLI Skill Commands and Integration Tests
 | File | Purpose |
 |---|---|
+| `python/codeguardian/cli/commands/skill.py` | `codeguardian skill` (list, show, promote, retire, rejected, graph) |
 | `tests/unit/cli/__init__.py` | CLI test package init |
-| `tests/unit/cli/test_commands.py` | Command tests |
-
-### Block B-070 — CLI Tests Part 2
-
-| File | Purpose |
-|---|---|
-| `tests/unit/cli/test_views.py` | View tests |
-| `tests/unit/cli/test_output.py` | Output mode tests |
+| `tests/unit/cli/test_daemon.py` | Daemon and RPC tests |
+| `tests/unit/cli/test_output.py` | Output format tests |
+| `tests/integration/test_ui_daemon.py` | TUI and VS Code extension round trips to the daemon |
 
 **Phase boundary test:**
-- Isolation: `pytest tests/unit/cli/ -v`
+- Isolation: `pytest tests/unit/cli/ -v` and `cargo test -p codeguardian-tui`
 - Chain: `pytest tests/`
-- Integration: run every CLI command end-to-end with `--json` and verify schema conformance of every output
-
-**Phase 14 CLI includes the skill commands surfaced by Phase 12 v2:** `codeguardian skill list` (lifecycle states), `codeguardian skill show <name>` (record plus provenance), `codeguardian skill promote <name>` (`draft → trial`), `codeguardian skill retire <name>`, `codeguardian skill rejected` (reads `skill_admission_log`), `codeguardian skill graph <name>` (neighbors from `skill_graph_edges`).
+- Integration: launch the daemon, connect the Rust TUI and the VS Code extension, run a refactor, verify the daemon streams events to both clients, and verify headless mode outputs valid JSON and SARIF.
 
 ---
 
@@ -1123,7 +1123,7 @@ At each phase boundary, the integration script covers every phase completed so f
 | Phase 11 | Run recon, blast, analyst, tester, writer against a fixture |
 | Phase 12 | Store a skill, retrieve it, rebuild the index, admit and reject through the governor, adopt and reject a negative record |
 | Phase 13 | Full pipeline with checkpoint and resume |
-| Phase 14 | Every CLI command end-to-end |
+| Phase 14 | Daemon RPC round trip, TUI and VS Code connections, headless command execution |
 | Phase 15 | MCP client and server round trip, every reporter format |
 | Phase 16 | Full pipeline on every fixture, every artifact validates |
 
@@ -1155,10 +1155,10 @@ The integration script lives at `scripts/integration_phase.py` and is written at
 | Phase 11 — Agents | 3 | 10 |
 | **Phase 12 — Skills Module v2** | **6** | **29** |
 | Phase 13 — Orchestrator | 4 | 14 |
-| Phase 14 — CLI | 7 | 27 |
+| Phase 14 — UIs (TUI, VS Code, Daemon) | 7 | 35 |
 | Phase 15 — MCP and Reporters | 5 | 17 |
 | Phase 16 — Full Assembly | 3 | 18 |
-| **Total** | **80** | **338** |
+| **Total** | **80** | **346** |
 
 80 blocks. Every block groups four or five files, except Phase 9 where the merged scope requires two larger blocks and one smaller block. Phase 12's blocks are all within the four-to-five range. Every phase ends with three tests. Every phase re-runs the integration from Phase 0 forward.
 
@@ -1167,6 +1167,8 @@ The integration script lives at `scripts/integration_phase.py` and is written at
 *Phase 9 growth (2026-10-19).* Phase 9 grew from 6 blocks / 25 files to 8 blocks / 36 files. The originally-planned Phase 9.5 (runtime grammar loading) was merged into Phase 9. Total block count rose from 74 to 76. Total file count rose from 304 to 315.
 
 *Phase 12 v2 growth (2026-11-06).* Phase 12 grew from 2 blocks / 6 files to 6 blocks / 29 files. The originally-planned Phase 12 (a flat hybrid retriever over Markdown) was replaced with a six-layer lifecycle-managed procedural memory system after the 2026 research literature showed the flat design degrades silently at scale — implicit routing collapses from 73.6% to 27.4% recall at 1,000 distractors, and skill libraries are the highest attack-success vector in production at 69.4%. The expansion adds a typed skill graph, a four-stage retrieval chain with fallbacks, a separate negative-knowledge tier, a governance gate, and a security layer. Total block count rose from 76 to 80. Total file count rose from 315 to 338.
+
+*Phase 14 UI architecture shift (2026-11-08).* Phase 14 transitioned from a standard Python CLI (7 blocks / 27 files) to a decoupled architecture: a headless Python Daemon, a high-performance Rust TUI (using `ratatui` and `tachyonfx`), and a VS Code Extension. Phase 14 remains 7 blocks but grew from 27 to 35 files to support the multi-language frontends and their tests. Total file count rose from 338 to 346.
 
 Because Phase 12 gained four blocks, all subsequent phases were renumbered: Phase 13 shifted from B-056–B-059 to B-060–B-063; Phase 14 from B-060–B-066 to B-064–B-070; Phase 15 from B-067–B-071 to B-071–B-075; Phase 16 from B-072–B-074 to B-076–B-078. `BUILD_STATE.md` was written before this renumbering and its Phase 13 section still references the old B-056–B-059 range; a follow-up edit to that file will bring it into sync.
 

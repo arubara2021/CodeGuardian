@@ -7,9 +7,9 @@ For behavior, read the source or its docstring.
 The next chat must consult this file before asking for a source file to
 modify. If a symbol is not listed here, it is not public.
 
-**Snapshot:** end of Phase 12 v2.
+**Snapshot:** end of Phase 13.
 
-**Test count:** 1547 passing, 14 skipped, 7 xfailed, 5 xpassed.
+**Test count:** 1771 passing, 14 skipped, 7 xfailed, 5 xpassed.
 
 **Structure:** Two parts.
 
@@ -17,7 +17,7 @@ modify. If a symbol is not listed here, it is not public.
   version of this file. Accurate for its era. Kept for cross-reference,
   and because a future reader often wants to see the shape of the early
   packages before the later phases layered on top of them.
-- **Part II — Phase 6 through Phase 12 v2 additions.** Documents every
+- **Part II — Phase 6 through Phase 13 additions.** Documents every
   module, symbol, and constant added since Part I was written. This part
   is authoritative for the current state.
 
@@ -232,7 +232,7 @@ At Phase 5, `codeguardian-rpc` had real content, `codeguardian-pyo3` had `echo`,
 
 ---
 
-# Part II — Phase 6 through Phase 12 v2 additions
+# Part II — Phase 6 through Phase 13 additions
 
 Each section lists the exports added in that phase. Signatures are transcribed where the writer is confident; where a signature would need source verification, the section says so and refers to source. This matches the convention Part I already uses for DTO fields.
 
@@ -1050,11 +1050,402 @@ Both migrations run at Phase 12 v2 boundary. Fresh databases and existing databa
 
 ---
 
+## Phase 13 — Orchestrator
+
+Phase 13 delivers the harness engine: a deterministic graph walker that resolves typed slots against a heterogeneous agent registry, consumes a two-tier evidence bus, runs a three-layer verification stack with a blast-band-scaled verifier loop, compiles bounded context from a run tree, enforces a cheap-first routing layer with blast-aware escalation, populates the four evidence columns, and enforces delegation capability attenuation.
+
+The design settlement is in `docs/summaries/Phase_13.md`. The v2 roadmap is in `docs/summaries/Phase_13_walls_and_handoff.md`.
+
+### `codeguardian.core.orchestrator`
+
+```python
+from codeguardian.core.orchestrator import (
+    AgentRegistry,
+    LangGraphOrchestrator,
+    LegacyGraph,
+    Orchestrator,
+    PhaseGraph,
+    PhaseSlot,
+    SlotResolver,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `PhaseGraph` | Frozen dataclass | An ordered, validated pipeline graph. Fields: `name`, `entry`, `slots`, `transitions`, `description`. `validate()` raises `GraphValidationError` on cycles, missing entry, unreachable required slots, duplicate names, or schema asymmetry. |
+| `PhaseSlot` | Frozen dataclass | One step. Fields: `name`, `required`, `capability_tags`, `input_schema`, `output_schema`, `gate`, `blast_band`, `phase_name`. `resolved_phase_name()` returns the value written to `phase_executions.phase_name`. |
+| `PhaseTransition` | Frozen dataclass | One edge. Fields: `src`, `dst` (both slot names, `dst` may be `None` for termination). |
+| `GraphValidationError` | Exception | `ValueError` subclass. Carries `failures: tuple[str, ...]` listing every distinct failure. |
+| `AgentRegistry` | Class | In-memory registry of `AgentSpec` entries. `register`, `unregister`, `get`, `list_all`, `names`, `clear`. Validates names against `^[a-z][a-z0-9_]{0,63}$` at registration time. |
+| `AgentSpec` | Frozen dataclass | One registered agent. Fields: `name`, `agent`, `capability_tags`, `input_type`, `output_type`, `backend`, `priority`, `description`. |
+| `SlotResolution` | Frozen dataclass | The resolver's outcome. Fields: `resolved: Mapping[str, AgentSpec]`, `unresolved: Mapping[str, str]`. `require(name)` raises `KeyError` when the slot is absent. |
+| `SlotResolver` | Class | Resolves each slot in a `PhaseGraph` by tag subset, then input/output schema compatibility, then priority. `resolve(graph) -> SlotResolution`. Missing required slot raises; ambiguous priority raises. |
+| `LangGraphOrchestrator` | Class | Concrete `Orchestrator` Protocol implementation. Delegates the walk to `run_loop`, owns the `runs` row and the artifact paths. Accepts an optional `observer=` per-phase callback that is not part of the Protocol. |
+| `LegacyGraph` | `PhaseGraph` | The ten-slot legacy pipeline plus one optional `project_test_suite` slot. Alias for `phase_graphs.LEGACY_GRAPH`. |
+
+### `codeguardian.core.orchestrator.phase_graphs`
+
+```python
+from codeguardian.core.orchestrator.phase_graphs import LEGACY_GRAPH
+```
+
+The default graph. Ten required slots (`recon`, `blast`, `analyst`, `tester`, `writer`, `sandbox_verify`, `verifier_correctness`, `verifier_security`, `verifier_contract`, `skill_curator`) plus one optional terminal slot (`project_test_suite`). Entry point is `recon`.
+
+A future phase adds a `greenfield` graph as a sibling module; the orchestrator does not change.
+
+### `codeguardian.core.orchestrator.loop`
+
+```python
+from codeguardian.core.orchestrator.loop import (
+    AuditWriter,
+    LoopContext,
+    LoopObserver,
+    LoopResult,
+    SlotExecution,
+    SlotInputFactory,
+    StopReason,
+    run_loop,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `run_loop` | Async function | Walks a `PhaseGraph`. Resolves each slot, runs the entry and exit gate, invokes the agent, drains the evidence bus, writes a checkpoint, writes one audit entry per phase. Returns a `LoopResult`. |
+| `LoopContext` | Frozen dataclass | Context handed to input factories and observers. Fields: `run_id`, `graph_name`, `repo_url`, `commit_hash`, `clone_root`, `results`, `current_slot`, `evidence_bus`, `context_budget`. |
+| `LoopResult` | Frozen dataclass | The complete outcome. Fields: `run_id`, `graph_name`, `completed_phases`, `slot_executions`, `checkpoint_ids`, `audit_hashes`, `hot_events`, `failed`, `error`, `stop_reason`. |
+| `SlotExecution` | Frozen dataclass | One phase's execution record. Fields: `slot_name`, `agent_name`, `started_at`, `finished_at`, `ok`, `output`, `error`, `events`, `checkpoint_id`, `audit_hash`. |
+| `SlotInputFactory` | Protocol | `build(slot_name, context) -> Any`. Builds the input object the agent expects. A `KeyError` is treated as a phase failure. |
+| `LoopObserver` | Callable | `(slot_name, execution, context) -> None`. Fires after each phase. Failures inside the observer are swallowed. |
+| `StopReason` | Literal | `"completed"`, `"paused"`, `"context_overflow"`, `"failed"`. |
+| `AuditWriter` | Callable | `(entry: dict) -> str`. Writes one audit entry and returns its entry_hash. |
+
+### `codeguardian.core.orchestrator.evidence`
+
+```python
+from codeguardian.core.orchestrator.evidence import (
+    BlastRecommendationAdjusted,
+    ContextBudgetExceeded,
+    EvidenceBus,
+    HotEvent,
+    TestRunFailed,
+    ToolCallFailed,
+    VerifierFailed,
+    events_to_decision_log,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `VerifierFailed` | Frozen dataclass | A verifier returned `fail` or `uncertain`. Fields: `verifier`, `verdict`, `reason`, `evidence_ids`. |
+| `TestRunFailed` | Frozen dataclass | A test run exited nonzero. Fields: `test_path`, `exit_code`, `stderr_tail`. |
+| `ContextBudgetExceeded` | Frozen dataclass | The per-run budget crossed its refuse threshold. Fields: `role`, `fill_percent`, `snapshot`. |
+| `ToolCallFailed` | Frozen dataclass | A tool or context provider could not complete. Fields: `tool`, `error_code`, `reason`. |
+| `BlastRecommendationAdjusted` | Frozen dataclass | The blast agent shifted its recommendation. Fields: `original`, `adjusted`, `reason`, `target`. |
+| `HotEvent` | Union type | The five events above. |
+| `EvidenceBus` | Class | Bounded event accumulator. `push`, `drain`, `peek`, `capacity`, `overflow_count`. |
+| `events_to_decision_log` | Function | Convert typed events to the dict shape `decision_log` expects. |
+
+### `codeguardian.core.orchestrator.phase_gates`
+
+```python
+from codeguardian.core.orchestrator.phase_gates import (
+    GatePair,
+    Gates,
+    PhaseContext,
+    get_gate,
+    has_gate,
+    known_gates,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `PhaseContext` | Frozen dataclass | The context a gate inspects. Fields: `run_id`, `repo_url`, `commit_hash`, `clone_root`, `results`, `evidence`. |
+| `GatePair` | Frozen dataclass | The entry and exit gates for one phase name. Fields: `entry`, `exit`. |
+| `Gates` | Class | Bundled gate implementations as static methods: `recon_exit`, `blast_exit`, `analyst_exit`, `tester_exit`, `writer_exit`, `sandbox_verify_exit`, `verifier_entry`, `verifier_exit`, `skill_curator_exit`. |
+| `get_gate` | Function | `(name: str | None) -> GatePair`. An unknown name or `None` yields a no-op pair. |
+| `has_gate` | Function | `(name: str | None) -> bool`. |
+| `known_gates` | Function | `() -> tuple[str, ...]`. Every gate name the module implements. |
+
+Phase 13 accepts a skill curator refusal as a legitimate phase outcome. A refusal means "no reusable pattern to propose"; the pipeline does not depend on a proposal.
+
+### `codeguardian.core.orchestrator.consent`
+
+```python
+from codeguardian.core.orchestrator.consent import (
+    ApplyConsentOutcome,
+    ApplyRequest,
+    ConsentOrigin,
+    PlanApprovalOutcome,
+    PlanApprovalRequest,
+    request_apply_consent,
+    request_plan_approval,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `request_plan_approval` | Function | Requests plan approval from a human or the configuration. Writes to `plan_approvals` and the audit chain. Returns `PlanApprovalOutcome`. |
+| `request_apply_consent` | Function | Requests apply consent. A block-band target overrides `origin="config_auto"` and forces a human callback. Writes to `consent_records` and the audit chain. Returns `ApplyConsentOutcome`. |
+| `PlanApprovalRequest` | Frozen dataclass | Fields: `run_id`, `plan_summary`, `plan_hash`, `targets`, `directive`. |
+| `ApplyRequest` | Frozen dataclass | Fields: `run_id`, `diff`, `diff_hash`, `target_path`, `blast_recommendation`. |
+| `PlanApprovalOutcome` | Frozen dataclass | Fields: `approved`, `approval_id`, `origin`, `reason`. |
+| `ApplyConsentOutcome` | Frozen dataclass | Fields: `approved`, `consent_id`, `origin`, `reason`. |
+| `ConsentOrigin` | Literal | `"human"`, `"config_auto"`. |
+
+### `codeguardian.core.orchestrator.checkpointing`
+
+```python
+from codeguardian.core.orchestrator.checkpointing import (
+    Checkpoint,
+    list_checkpoints,
+    read_checkpoint,
+    touch_heartbeat,
+    write_checkpoint,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `write_checkpoint` | Function | Write one checkpoint row. Picks up `heartbeat_at` when migration 007 has run, falls back to a column-less insert otherwise. Returns the `checkpoint_id`. |
+| `read_checkpoint` | Function | Return the most recent `Checkpoint` for a run, or `None`. |
+| `list_checkpoints` | Function | Return every checkpoint for a run, newest first. |
+| `touch_heartbeat` | Function | Update the most recent checkpoint's `heartbeat_at`. Returns `False` on a pre-007 database. |
+| `Checkpoint` | Frozen dataclass | Fields: `schema_version`, `checkpoint_id`, `run_id`, `phase`, `created_at`, `heartbeat_at`, `completed_phases`, `pending_phases`, `retries`, `state`, `artifacts`. |
+
+### `codeguardian.core.orchestrator.checkpoint_supervisor`
+
+```python
+from codeguardian.core.orchestrator.checkpoint_supervisor import (
+    DEFAULT_STALE_THRESHOLD_SECONDS,
+    CheckpointSupervisor,
+    ResumePlan,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `CheckpointSupervisor` | Class | Detects stale runs, tracks heartbeats, builds resume plans. Methods: `heartbeat(run_id)`, `find_stale_runs()`, `build_resume_plan(run_id, graph=...)`, `resume(run_id, graph=...)`, `mark_status(run_id, status)`. |
+| `ResumePlan` | Frozen dataclass | Fields: `run_id`, `resume_after_phase`, `completed_phases`, `pending_phases`, `retries`, `state`, `artifacts`, `last_checkpoint_id`. |
+| `DEFAULT_STALE_THRESHOLD_SECONDS` | int | `300` (five minutes). |
+
+### `codeguardian.core.orchestrator.deterministic_gate`
+
+```python
+from codeguardian.core.orchestrator.deterministic_gate import (
+    CheckOutcome,
+    DeterministicGateResult,
+    WritableSandboxExecutor,
+    deterministic_gate,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `deterministic_gate` | Function | Zero-token safety gate. Runs `git apply --check` and the characterization test. A failure bounces back to the writer without any LLM call. Returns `DeterministicGateResult`. |
+| `DeterministicGateResult` | Frozen dataclass | Fields: `passed`, `checks`, `stderr_tail`, `diff_hash`. `skip_reason()` and `failure_reason()` return the first skip or failure detail. |
+| `CheckOutcome` | Frozen dataclass | One check inside the gate. Fields: `name`, `status`, `detail`. `status` is `"pass"`, `"fail"`, or `"skip"`. |
+| `WritableSandboxExecutor` | Protocol | A `SandboxExecutor` that also has `write_file(path, content)`. |
+
+### `codeguardian.core.orchestrator.verifier_stack`
+
+```python
+from codeguardian.core.orchestrator.verifier_stack import (
+    DEFAULT_K_BY_BAND,
+    VerifierStackResult,
+    run_verifier_stack,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `run_verifier_stack` | Async function | Three-layer stack: deterministic gate → deterministic pre-scan → LLM verifier loop. K scales with blast band. Rolls back between rounds. Returns `VerifierStackResult`. |
+| `VerifierStackResult` | Frozen dataclass | Fields: `passed`, `k`, `attempts`, `gate_result`, `verdicts`, `halted_reason`, `escalation_required`, `final_generation`. |
+| `DEFAULT_K_BY_BAND` | `Mapping[BlastBand, int]` | `{"proceed": 1, "review": 2, "block": 2}`. |
+
+### `codeguardian.core.orchestrator.context_engine`
+
+```python
+from codeguardian.core.orchestrator.context_engine import (
+    CompiledContext,
+    ContextEngine,
+    PhaseSummary,
+    Summarizer,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `ContextEngine` | Class | The run's context tree plus its budget. Methods: `record_phase(slot_name, output, extra_tokens=0)`, `compile_for(slot_name)`, `should_compact()`, `should_refuse()`, `reset_with_summary(summary_tokens=...)`, `snapshot(role=...)`. |
+| `CompiledContext` | Frozen dataclass | Fields: `block`, `phases_included`, `phases_dropped`, `budget_signal`, `budget_fill`, `token_cost`. |
+| `PhaseSummary` | Frozen dataclass | Fields: `phase`, `summary`, `typed_output`, `token_cost`. |
+| `Summarizer` | Callable | `(slot_name, output) -> (summary_text, typed_output)`. |
+
+### `codeguardian.core.orchestrator.sandbox_adapter`
+
+```python
+from codeguardian.core.orchestrator.sandbox_adapter import (
+    BubblewrapExecutorAdapter,
+    SandboxExecutorAdapter,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `SandboxExecutorAdapter` | Class | Context manager that adapts any `SandboxBackend` to the verifier's `SandboxExecutor` protocol. Methods: `run(argv, *, timeout_s=120.0)`, `write_file(path, content)`, `handle`, `working_dir`. Timeout and OOM exits map to conventional codes 124 and 137. The write path resolves before containment. |
+| `BubblewrapExecutorAdapter` | Alias | `SandboxExecutorAdapter`. The name is used by the Phase 13 build order; the class is backend-agnostic. |
+
+### `codeguardian.core.orchestrator.capability_attenuation`
+
+```python
+from codeguardian.core.orchestrator.capability_attenuation import (
+    AttenuationRecord,
+    attenuated_dispatch,
+    intersect_permissions,
+    meet_filesystem,
+    meet_permissions,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `attenuated_dispatch` | Context manager | Binds an attenuated permission set around a subagent dispatch. The effective set is the lattice meet of parent, agent, and skill. The Phase 9 context vars carry the effective set so the audit hook enforces it. Yields an `AttenuationRecord`. |
+| `intersect_permissions` | Function | Fold the meet across every non-`None` operand. Raises when every operand is `None`. |
+| `meet_permissions` | Function | Dimension-wise intersection of two `PluginPermissions`. |
+| `meet_filesystem` | Function | The more restrictive of two `FilesystemLevel` values. |
+| `AttenuationRecord` | Frozen dataclass | Fields: `agent_name`, `parent`, `agent`, `skill`, `effective`, `narrowed`, `audit_hash`, `phase`. `describe()` returns a one-line summary; `to_decision_log_entry()` returns the shape `decision_log` expects. |
+
+Attenuation is parent-relative: `narrowed` reports every dimension the meet reduced below the parent's authority.
+
+### `codeguardian.core.orchestrator.verification_prompt`
+
+```python
+from codeguardian.core.orchestrator.verification_prompt import (
+    DiffSummary,
+    VerificationBrief,
+    VerifierEvidence,
+    brief_to_prompt_block,
+    build_verification_brief,
+    compute_diff_summary,
+    verifier_evidence_slice,
+)
+```
+
+Per-run verification brief. Compiles the diff summary, the characterization test result, the pre-scan signals, and one blind prediction per verifier. No model call.
+
+### `codeguardian.core.telemetry`
+
+```python
+from codeguardian.core.telemetry import (
+    LangSmithAdapter,
+    MetricsCollector,
+    NoopMetricsCollector,
+    SqliteMetricsCollector,
+    TraceContext,
+)
+```
+
+| Symbol | Type | Purpose |
+|---|---|---|
+| `MetricsCollector` | Protocol | `record_phase_timing`, `record_agent_call`, `record_verdict`, `record_band_outcome`. Every method is best-effort; a collector that raises is a broken collector. |
+| `SqliteMetricsCollector` | Class | Writes through the existing `phase_executions` and `agent_calls` tables. Swallows store errors. |
+| `NoopMetricsCollector` | Class | Records nothing. Construct when no store is available so the orchestration layer does not need an `if store is not None` branch. |
+| `PhaseTiming` | Frozen dataclass | Fields: `trace`, `phase_name`, `agent_name`, `started_at`, `finished_at`, `ok`, `retries`, `error_message`. |
+| `TraceContext` | Frozen dataclass | Fields: `run_id`, `phase_id`, `span_id`, `parent_span_id`, `tags`. `new_root(run_id)` starts a trace; `child(phase_id)` derives a phase; `with_phase(phase_id)` renames a span without growing the tree. No third-party imports. |
+| `LangSmithAdapter` | Class | Wraps any `ModelProvider` and records one LangSmith span per `complete` call. `state` is `"enabled"`, `"disabled"`, or `"unavailable"`. Becomes a pass-through when `LANGSMITH_API_KEY` is absent or when the `langsmith` package is not installed. |
+
+### `codeguardian.core.providers.fallback_router` — Phase 13 additions
+
+The router gained three keyword-only parameters on `complete` and `stream`, and one constructor keyword-only parameter. All defaults preserve pre-Phase-13 behaviour exactly.
+
+```python
+class FallbackModelProvider:
+    def __init__(
+        self,
+        registry: ModelRegistry,
+        providers: dict[str, ModelProvider] | None = None,
+        on_retry: RetryCallback | None = None,
+        *,
+        budget: BudgetEnvelope | None = None,
+    ) -> None: ...
+
+    async def complete(
+        self,
+        prompt: str,
+        model: str,
+        options: ModelOptions,
+        *,
+        blast_band_override: str | None = None,
+        escalation_signals: tuple[str, ...] = (),
+    ) -> ModelResponse: ...
+
+    def stream(
+        self,
+        prompt: str,
+        model: str,
+        options: ModelOptions,
+        *,
+        blast_band_override: str | None = None,
+        escalation_signals: tuple[str, ...] = (),
+    ) -> AsyncIterator[ModelChunk]: ...
+
+    @property
+    def budget(self) -> BudgetEnvelope | None: ...
+```
+
+`blast_band_override="block"` forces the frontier tier for the writer and the three verifiers. `"proceed"` forces the standard tier for the same four roles. Any other value is ignored.
+
+`escalation_signals` names objective quality signals. When any signal is a trigger for the role (per `ESCALATION_TRIGGERS`), the target tier is raised one step.
+
+`budget` is checked before each dispatch (`check_pressure`) and recorded after each successful call. A halting envelope raises `BudgetExceededError` before any provider is touched.
+
+Module-level helper:
+
+```python
+def _metadata_tier_to_routing_tier(metadata_tier: str) -> Tier: ...
+    # "local" -> "cheap", "mid" -> "standard", "frontier" -> "frontier",
+    # "apex" -> "apex", unknown -> "standard"
+```
+
+`side_effect_guard()` is unchanged. `loop.run_loop` imports it directly.
+
+### Migration 007 — `007_agent_registry.sql`
+
+One migration, three changes:
+
+1. **`CREATE TABLE registered_agents`.** Columns: `name` (PK), `capabilities` (JSON array, default `'[]'`), `backend` (`'in-process' | 'cli' | 'acp' | 'openai-api'`, default `'in-process'`), `registered_at` (ISO 8601). Index on `backend`.
+2. **Rebuild `agent_calls`** with a `role` foreign key to `registered_agents(name)`. Every other column and CHECK constraint from migrations 002–004 is preserved. The rebuild follows the SQLite 12-step procedure: `PRAGMA foreign_keys=OFF` outside the transaction, `BEGIN`, create `agent_calls_v2`, copy rows, `DROP`, `RENAME`, recreate indexes, `PRAGMA foreign_key_check`, `COMMIT`, restore `PRAGMA foreign_keys=OFF` (the project default).
+3. **`ALTER TABLE checkpoints ADD COLUMN heartbeat_at TEXT`.** Nullable. Supervisor falls back to `created_at` when `NULL`.
+
+The migration **does not seed** `registered_agents`. The seed lives in `loop._seed_registered_agents`, which reads from the resolved graph on the first run. A change to the graph seeds new rows without a migration.
+
+### Phase 13 in-memory registration
+
+The `registered_agents` rows are written by `loop._seed_registered_agents(store, resolution)`. It uses `INSERT OR IGNORE` so a registration that already exists is preserved. A database that runs the migration without executing the loop ends up with an empty `registered_agents` table; the FK on `agent_calls.role` is declarative (the project runs with foreign keys off by default) so pre-seed rows are not rejected.
+
+### Deep test
+
+`sandtest/deep_test.py` gained three sections:
+
+- **`_check_checkpoint_resume(store)`** — asserts at least one run has a checkpoint and a resume plan.
+- **`_check_verifier_retry()`** — asserts the verifier stack retries a bad candidate and passes on the second attempt.
+- **Import verification** — for a Python repo with a pipeline section, runs `python3 -c 'import <primary_module>'` with `PYTHONPATH=.deps:.:$PYTHONPATH`. Records `[PASS]` or `[WARN]`; a `[WARN]` does not fail the run.
+
+`sandtest/deep/_pipeline.py` was rewritten to drive the orchestrator via `LangGraphOrchestrator.run(config=..., observer=...)` instead of invoking agents directly. The observer collects per-phase `SlotExecution` records; `to_stages()` converts them to the `PipelineStageResult` tuples the rest of the deep test expects.
+
+Two test-scoped adapters live in `sandtest/deep/` because the production equivalents are not part of Phase 13:
+
+- **`_sandbox_verify.py`** — `SandboxVerifyAgent` fills the `sandbox_verify` slot by wrapping the production `deterministic_gate`.
+- **`_verifier_agents.py`** — `build_verifier_agents(...)` returns three `VerifierStackAgent` instances that share one `run_verifier_stack` call.
+
+A future phase that promotes these to `core/orchestrator/` swaps the registration and retires the two test files.
+
+---
+
 ## Not yet implemented
 
-Anything not listed in Part I or Part II. In particular, at the end of Phase 12 v2:
+Anything not listed in Part I or Part II. In particular, at the end of Phase 13:
 
-- `codeguardian.core.orchestrator` — Phase 13 (empty stubs exist)
 - `codeguardian.core.mcp` — Phase 15 (empty stubs exist)
 - `codeguardian.core.reporting` — Phase 15 (empty stubs exist)
 - `codeguardian.cli` — Phase 14 (empty stubs exist)
@@ -1065,4 +1456,6 @@ Anything not listed in Part I or Part II. In particular, at the end of Phase 12 
 - `skills/README.md` — currently 0 bytes
 - `examples/skills/python-add-type-hints/SKILL.md`, `examples/skills/typescript-extract-interface/SKILL.md` — currently 0 bytes
 
-Every agent in Phase 11 has a `run()` method that is exercised by unit tests, but no orchestrator calls them in sequence. Retrieval (`library.retrieval()`) is callable but has no caller. Governance (`library.governor()`) has no automatic caller — a Phase 13 orchestrator must invoke `record_load_outcome` and `apply_retirement`. The full pipeline has not run end-to-end since the Phase 11 deep test.
+Every agent in Phase 11 has a `run()` method that the orchestrator dispatches through the legacy graph. Retrieval (`library.retrieval()`) is callable but has no caller in the current pipeline; Phase 13 wires the retrieval stage into the analyst's input factory when it is enabled. Governance (`library.governor()`) is called by the loop after the Skill Curator slot via `record_load_outcome`. The full pipeline runs end-to-end through the orchestrator on both `httpx` and `scrapy`, with the residual issues recorded in `docs/summaries/Phase_13_walls_and_handoff.md`.
+
+The v2 roadmap for the harness engine — LSP integration, step-level routing, multi-language pipeline, production resilience, benchmarking, and observability — is documented in `docs/summaries/Phase_13_walls_and_handoff.md`.

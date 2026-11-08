@@ -160,6 +160,10 @@ class WriterResult:
         refusal_reason: Human-readable reason when status is
             "refused", None otherwise.
         total_attempted: Number of model calls made.
+        warnings: Non-fatal findings recorded during the run. Surfaced
+            when the agent could not do its job cleanly but did not
+            fail outright, for example when the ``function-body`` tool
+            returned a not-found response. Empty by default.
     """
 
     candidates: tuple[WriterCandidate, ...]
@@ -167,6 +171,7 @@ class WriterResult:
     requires: tuple[str, ...] = ()
     refusal_reason: str | None = None
     total_attempted: int = 0
+    warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in ("success", "partial", "refused"):
@@ -205,11 +210,20 @@ class WriterAgent:
             {"path": input.target_path, "qualified_name": input.target_symbol},
         )
         if _is_not_found(body):
+            _record_tool_failure(
+                input,
+                "function-body",
+                {"path": input.target_path, "qualified_name": input.target_symbol},
+                body,
+            )
             return WriterResult(
                 candidates=(),
                 status="refused",
                 refusal_reason=f"target body not found: {body[:100]}",
                 total_attempted=0,
+                warnings=(
+                    f"function-body did not find {input.target_symbol!r} in {input.target_path!r}",
+                ),
             )
         original_source = body
 
@@ -558,12 +572,25 @@ def _pre_check(
 
 
 def _check_signature_drift(original_source: str, candidate_source: str) -> tuple[bool, str | None]:
-    """Return (is_clean, reason). is_clean=False means drift."""
+    """Return (is_clean, reason). is_clean=False means drift.
+
+    A syntax error in either the original or the candidate is treated
+    as a rejection. When the original does not parse we cannot verify
+    that the candidate preserves its signature, and the safe choice is
+    to refuse the candidate rather than bypass the check. When the
+    candidate does not parse the pre-check would normally reject it
+    first; a direct caller that bypasses the pre-check still gets a
+    clear rejection rather than a silent pass.
+    """
     try:
         orig_tree = ast.parse(original_source)
+    except SyntaxError as exc:
+        return False, f"original source did not parse: {exc}"
+
+    try:
         cand_tree = ast.parse(candidate_source)
-    except SyntaxError:
-        return True, None
+    except SyntaxError as exc:
+        return False, f"candidate source did not parse: {exc}"
 
     orig_func = _first_function(orig_tree)
     if orig_func is None:
@@ -666,4 +693,51 @@ def _record(
             "temperature": _CANDIDATE_TEMPERATURE,
             "seed_index": seed_index,
         },
+    )
+
+
+def _record_tool_failure(
+    input: WriterInput,
+    tool_name: str,
+    tool_input: dict[str, object],
+    tool_output: str,
+) -> None:
+    """Record a failed tool call as a telemetry row.
+
+    Called when ``function-body`` cannot resolve the target. Records a
+    decision_log entry naming the specific failure and a tool_chain
+    entry naming the tool that produced it. Uses the same active-store
+    check as ``_record`` so absence of a store (unit tests, isolated
+    evals) is a silent skip rather than an error.
+
+    This is the Phase 11 section 2.3 fix for the writer: a tool lookup
+    that fails is now visible in the decision log rather than only in
+    the refusal text.
+    """
+    from codeguardian.core.agents import _store_context
+
+    store = _store_context.get_active_store()
+    if store is None:
+        return
+    record_call(
+        store,
+        role="writer",
+        outcome="refused",
+        refusal_code="target_missing",
+        target_symbol=input.target_symbol or None,
+        decision_log=[
+            {
+                "step": "function_body_lookup",
+                "candidate": None,
+                "verdict": "not_found",
+                "reason": tool_output[:100],
+            }
+        ],
+        tool_chain=[
+            {
+                "tool": tool_name,
+                "input": tool_input,
+                "output_bytes": len(tool_output),
+            }
+        ],
     )

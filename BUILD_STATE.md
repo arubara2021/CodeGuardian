@@ -1,8 +1,8 @@
 # CodeGuardian — Build State
 
-**Snapshot date:** 2026-11-06
-**Last phase completed:** Phase 12 — Skills Module v2 (27 files across 6 blocks)
-**Next phase to start:** Phase 13 — Orchestrator
+**Snapshot date:** 2026-11-08
+**Last phase completed:** Phase 13 — Orchestrator (49 files across 10 blocks)
+**Next phase to start:** Phase 14 — CLI
 **Phase 0 remaining work:** Deferred to the end of the build, per user decision
 
 ---
@@ -31,6 +31,7 @@
 - **Pre-commit is installed and active.** Every commit runs the hooks. `end-of-file-fixer`, `mixed-line-ending`, `ruff`, `ruff-format` will modify files on the first commit attempt if they find issues. Second attempt passes. This is normal pre-commit behavior, not a bug.
 - **`.so` size is approximately 8.8 MB** after the multi-language work. The increase is the linked grammar object files.
 - **`rust/crates/codeguardian-rpc/Cargo.toml` was accidentally overwritten** during the multi-language commit attempts and restored. Do not confuse it with root workspace content.
+- **Shell discipline.** Every Python, pytest, ruff, and git command in this project runs in WSL. The PowerShell window shares the same physical directory but does not know WSL tooling; pasting bash commands there creates empty files and drops tokens into the working tree. During Phase 13 the working tree accumulated twenty-two zero-byte files from a stray PowerShell paste; they were removed. Close the PowerShell window during build work.
 
 ---
 
@@ -45,114 +46,76 @@
 | B-003 Root Editor and Documentation | done | .editorconfig, .env.example, .python-version, .pre-commit-config.yaml, mkdocs.yml |
 | B-004 through B-009 | deferred to end | 30 files, no runtime impact |
 
-### Phases 1 through 10 — complete
+### Phases 1 through 12 — complete
 
-See `docs/summaries/phases-0-to-8.md` (through Phase 8), `docs/summaries/phase-9-design.md` (Phase 9), and `docs/summaries/phase-10.md` (Phase 10) for the detailed build history of every phase through Phase 10, plus the multi-language extension and the deep integration test.
+See `docs/summaries/phases-0-to-8.md` (through Phase 8), `docs/summaries/phase-9-design.md` (Phase 9), `docs/summaries/phase-10.md` (Phase 10), `docs/summaries/Phase_11.md` (Phase 11), and `docs/summaries/Phase_12.md` (Phase 12 v2) for the detailed build history of every phase through Phase 12.
 
-Test state at the Phase 10 boundary: **884 passed, 10 skipped, 7 xfailed, 5 xpassed** (Python pytest). Deep test: 59 passed, 2 xfail.
+Test state at the Phase 12 v2 boundary: **1547 passed, 14 skipped, 7 xfailed, 5 xpassed** (Python pytest).
 
-### Multi-language kernel extension — complete
+### Phase 13 — Orchestrator (complete)
 
-Scope extension between Phase 8 and Phase 9. Extended the kernel from 2 languages (Python, TypeScript) to 8 (adding JavaScript, Java, Go, Rust, C, C++). C# was attempted but removed after `tree-sitter-c-sharp` 0.23.5 produced an ABI incompatible with `tree-sitter` 0.24.
+**Scope.** Phase 13 delivers the harness engine: a deterministic graph walker that resolves typed slots against an agent registry, consumes a two-tier evidence bus, runs a three-layer verification stack with a blast-band-scaled verifier loop, compiles bounded context from a run tree, enforces a cheap-first routing layer with blast-aware escalation, populates the four evidence columns, and enforces delegation capability attenuation.
 
-Recorded in `docs/summaries/phases-0-to-8.md` §13. Post-batch corrections in §13.3.
+**Files delivered (49 across 10 blocks):**
 
-### Deep integration test — complete
+- **18 orchestrator source modules** in `python/codeguardian/core/orchestrator/`: `phase_graph.py`, `phase_graphs/{__init__,legacy}.py`, `registry.py`, `evidence.py`, `phase_gates.py`, `consent.py`, `checkpointing.py`, `checkpoint_supervisor.py`, `verification_prompt.py`, `loop.py`, `langgraph_orchestrator.py`, `deterministic_gate.py`, `verifier_stack.py`, `context_engine.py`, `sandbox_adapter.py`, `capability_attenuation.py`, `__init__.py`
+- **4 telemetry source modules** in `python/codeguardian/core/telemetry/`: `__init__.py`, `metrics.py`, `tracing.py`, `langsmith.py`
+- **1 migration**: `007_agent_registry.sql`
+- **8 test files** in `tests/unit/core/`: `test_phase_graph.py`, `test_orchestrator_core.py`, `test_verification_stack.py`, `test_context_and_routing.py`, `test_evidence_columns.py`, `test_sandbox_adapter.py`, `test_phase_gates.py`, `test_orchestrator_e2e.py`
+- **2 test-scoped adapters** in `sandtest/deep/`: `_sandbox_verify.py`, `_verifier_agents.py`
+- **1 deep-test rewire**: `sandtest/deep/_pipeline.py` (full rewrite, orchestrator-driven)
+- **3 doc updates**: `docs/public-api.md`, `docs/05-data-model.md`, `BUILD_STATE.md`
+- **1 roadmap**: `docs/summaries/Phase_13_walls_and_handoff.md`
 
-`sandtest/deep_test.py` (795+ lines). Permanent artifact. Clones a real repository into `sandtest/work/`, runs every phase that exists, reports pass/fail/skip/xfail/warn per section. Does not stop at first failure. Downstream sections mark SKIP when a dependency fails.
+**Architectural delivery.**
 
-### Phase 9 — Plugins (complete)
+| Layer | Component | Status |
+|---|---|---|
+| Data model | `PhaseGraph`, `PhaseSlot`, `LEGACY_GRAPH` | Complete, validated |
+| Dispatch | `AgentRegistry`, `AgentSpec`, `SlotResolver` | Complete, tag and schema checks |
+| Walk | `loop.run_loop` | Complete, deterministic |
+| Protocol | `LangGraphOrchestrator` | Complete, `Orchestrator` Protocol satisfied |
+| Evidence | `EvidenceBus`, hot-tier events, cold-tier writes | Complete, two-tier split preserved |
+| Gates | `phase_gates`, `consent` | Complete, entry and exit per slot |
+| Checkpoints | `checkpointing`, `checkpoint_supervisor` | Complete, resume tested |
+| Verification | `deterministic_gate`, `verifier_stack` | Complete, K-scaled by band |
+| Context | `context_engine` | Complete, 60/85 thresholds |
+| Sandbox | `sandbox_adapter` | Complete, backend-agnostic |
+| Attenuation | `capability_attenuation` | Complete, parent ∩ agent ∩ skill |
+| Telemetry | `MetricsCollector`, `TraceContext`, `LangSmithAdapter` | Complete, no-op fallbacks |
+| Migration | `007_agent_registry` | Complete, seeded by the loop |
+| Routing | `FallbackModelProvider` | Extended, budget and blast-aware |
 
-Merged scope. Replaced the originally-planned Phase 9 (plugin metadata) and Phase 9.5 (runtime grammar loading) with one phase delivering 8 blocks, 36 files. Full write-up in `docs/summaries/phase-9-design.md`.
+**Test state at the Phase 13 boundary:** **1771 passed, 14 skipped, 7 xfailed, 5 xpassed** (Python pytest). Delta from Phase 12 v2's 1547 is +224: the eight new Phase 13 test files plus the Block 1 analyst and writer tests.
 
-Delivers: plugin loader infrastructure, runtime grammar loading via `tree_sitter::Loader`, eight bundled language plugins, two bundled tool plugins, one bundled reporter plugin, behavioral contract tests, integration tests, version negotiation (N / N-1 SemVer), audit-hook permission enforcement, fault barrier with timeouts.
+**Deep test results.**
 
-### Phase 10 — Prompts (complete)
+`httpx` at 65 passed, 0 failed, 2 xfailed. The three pipelines walked all ten phases on all three bands. Fault injection ran and was correctly skipped for a target whose return value was not in the mutable-type set. The block-band approval contract fired. Checkpoints resumed. The verifier retry fired. The audit chain verified. Telemetry recorded 9/9 roles with provenance hashes.
 
-24 files. Full write-up in `docs/summaries/phase-10.md`.
+`scrapy` at 57 passed, 1 failed, 2 skipped, 1 warning, 2 xfailed. The failure is a fault-injection test-assertion detail (`test failed but no test_value_* in FAILED lines`); the smoke test caught the injected drift, the check did not accept the smoke-only catch. The two skips are honest environment limits: the block-band target exceeded `qwen3.8-27b`'s context window, and the block-band approval assertion consequently could not fire. The warning is scrapy's own Twisted/Zope incompatibility, not a pipeline problem. Twenty of twenty pipeline phases passed on the proceed and review bands.
 
-Delivers: strict `{{var}}` template renderer with injection defense, per-role output schemas, version-aware loader with `_base/v<version>.md` pairing, seven role prompts at v1.0.0, three golden-case eval YAMLs, one eval harness, eight test files. Approximately 178 new tests.
+**Rule 1 escalations in Phase 13 (eight, all approved):**
 
-Pre-work delivered with Phase 10 (not counted as Phase 10 files): `_native.PyCPG` handle, three kernel query methods (`find_declaration`, `qualified_name_of`, `declaration_info`), `ToolPlugin.action_kind` / `sensitivity` / `is_read_only`, `ModelOptions.max_reasoning_tokens`, `context_provider` plugin type, four context provider plugins, `BudgetTracker`.
-
-### Phase 11 — Agents (complete)
-
-Full write-up in `docs/summaries/Phase_11.md`. Delivery record: `docs/summaries/Phase_11.md` §13 records the A- rating; shortcomings inventory: `docs/summaries/Phase_11_shortcomings.md`.
-
-Delivers: nine callable agents (recon, blast, analyst, tester, writer, three verifiers, skill_curator), routing primitives, evidence capture (migration 004), the closed verifier loop primitive, the context budget primitive, per-agent telemetry, the `_runtime.py` / `_store_context.py` infrastructure.
-
-Test state at the Phase 11 boundary: **1367 passed, 14 skipped, 7 xfailed, 5 xpassed**. Deep test: **87 passed, 2 failed, 0 skipped, 2 xfailed**. The two deep test failures are documented as Phase 11 residuals (§3.4 in Phase_11.md): tester emitted JS literals instead of Python literals (a model quality issue with `qwen3.8-27b` on the free tier), and the fault-injection section labels its own success as a failure (a one-line label bug in the test harness).
-
-Three tiers of known Phase 11 issues are recorded in `docs/summaries/Phase_11_shortcomings.md`. Tier 1 (three fixes applied but not re-verified) and Tier 2 (four correctness bugs) are the actionable items. The three item closures required before declaring v1.1 provably complete are in §12.1 of Phase_11.md.
-
-### Phase 12 v2 — Skills Module (complete)
-
-Full design settlement in `docs/summaries/Phase_12.md`. This section records what shipped.
-
-**Scope.** Phase 12 v1 shipped 6 files: `embeddings.py`, `library.py`, `retriever.py`, `indexer.py`, and their tests. Phase 12 v2 delivered 27 files across 6 blocks:
-- **12 new source modules** in `python/codeguardian/core/skills/`: `types.py`, `graph.py`, `graph_store.py`, `ppr.py`, `retrieval.py`, `hydrator.py`, `reranker.py`, `negative.py`, `governor.py`, `provenance.py`, `security.py`, `evolver.py`
-- **2 new migrations**: `005_skill_graph.sql` (five new tables), `006_skill_states.sql` (expanded CHECK constraint on `skills.state`)
-- **8 new test files** in `tests/unit/core/`: `test_skill_graph.py`, `test_ppr.py`, `test_retrieval_pipeline.py`, `test_hydrator.py`, `test_negative.py`, `test_governor.py`, `test_skill_security.py`, `test_evolver.py`
-- **6 updated files**: `schemas/skill.json` (v1.0 → v1.1), `core/config/defaults.py` (16 new constants), `core/config/schema.py` (SkillsConfig), `core/skills/library.py` (accessors + admission routing), `core/skills/indexer.py` (rebuild_graph, apply_forgetting_curve), `core/skills/__init__.py` (19 public exports)
-- **1 Rule-1 escalation fix**: `core/storage/skill_store.py` (FK-safe upsert + FK-safe remove)
-
-**Six-layer architecture.** Every layer behind a Protocol, every layer flag-gated:
-1. Store — existing `SkillStore` Markdown + FTS5 + vec0, unchanged
-2. Graph — deterministic typed edges from frontmatter, rebuilt from source
-3. Retrieval — staged pipeline with a fallback at every stage
-4. Negative memory — separate tier with explicit adopt/reject
-5. Governance — draft → trial → active → stable → retired, admission gate, dedupe, fitness retirement
-6. Security — admission scan, provenance pinning, invocation guard
-
-**Four-stage decision chain.** The main agent never chooses; a chain does:
-- Stage 0 — Recon + Blast project filter (deterministic)
-- Stage 1 — Hybrid seed (FTS5 + vec0, RRF merge)
-- Stage 2 — Reverse-weighted PageRank over the graph, bounded to 1–2 hops
-- Stage 3 — Optional cross-encoder rerank
-- Stage 4 — Budget-aware hydration with calibrated threshold gate
-
-Every stage has a fallback to the previous stage. Flag-off produces byte-identical output to Phase 12 v1.
-
-**Five safety rules, enforced by test:**
-1. Every new flag defaults to `false`; a user who upgrades without editing config gets exactly v1 behavior
-2. New state is derived, never authoritative; drop and rebuild from Markdown
-3. `retriever.py` stays in the repo as the always-available fallback
-4. Schema only grows optional fields; every existing `SKILL.md` validates without edit
-5. Nothing mutates in place; graph mutations use a shadow file promoted only on validation
-
-**Rule 1 escalations performed:**
-- `core/storage/skill_store.py` — `_upsert_skill_row` was DELETE-then-INSERT, which failed the `skill_feedback.skill_name` FK once a skill had any feedback. Changed to UPDATE-when-exists. The same fix covers `promote_skill`, `archive_skill`, and `remove`. Pre-existing bug from Phase 3, exposed by Phase 12 v2's `record_load_outcome`.
-- `core/storage/migrations/006_skill_states.sql` — new migration to expand the `skills.state` CHECK constraint from `('active', 'stale', 'archived', 'draft')` to include `('trial', 'stable', 'retired')`. SQLite cannot ALTER a CHECK, so the table is rebuilt with rowids preserved and FTS rebuilt. Migration is forward-only and idempotent, per the migration contract.
-
-**Test state at the Phase 12 v2 boundary:** **1547 passed, 14 skipped, 7 xfailed, 5 xpassed** (Python pytest). The delta from Phase 11's 1367 is +180: the pre-existing `test_skills.py` and `test_skill_store.py` (which were uncommitted at Phase 11 boundary), plus the 166 new tests from Blocks 5 and 6.
-
-**Verification gates cleared:**
-- Full pytest suite: 1547 passed
-- `ruff check` on all Phase 12 files: `All checks passed!`
-- Migration 005 applies on a fresh DB and on an existing DB (data preserved)
-- Migration 006 applies on a fresh DB and on an existing DB (data preserved, FKs safe)
-- Flag-off byte-identical guarantee: verified by `test_all_flags_off_delegates_to_v1_retriever`
-- False-positive / false-negative security guard: verified manually after Block 6
-
-**What Phase 12 v2 explicitly does NOT deliver:**
-- Agentic multi-hop retrieval (SkillGATE-style region exploration) — deferred to a future phase
-- WASM-sandboxed skill execution — deferred
-- Cross-repo skill transfer / `scope: repo` skills — deferred
-- Skill authorship assistance — deferred
-- Embedding model swap — deferred
-- Multi-tenant isolation — deferred
-- Semantic caching of retrieval results — deliberately not implemented (per Anthropic engineering's retired-profile-cache finding)
-
-**Documented residuals from Phase 12 v2 design (documented in `docs/summaries/Phase_12.md` §13):**
-
-| Residual | When it becomes relevant |
+| File | Nature |
 |---|---|
-| Reranker loads `Xenova/ms-marco-MiniLM-L-6-v2` via `fastembed`; if the installed fastembed lacks `TextCrossEncoder`, degrades to passthrough silently | When reranker proves insufficient on real workloads |
-| Stage 0 project filter is language-only in v2; dependency version and test framework match need Phase 13 orchestration | Phase 13 |
-| Fitness formula uses effectiveness only; `−λ·cost` deferred because there is no per-skill cost column | When cost tracking arrives |
-| Evolver store uses a sidecar JSON file, not shadow tables, to avoid migration 006 dependency | Phase 13+ |
-| Negative knowledge decay is manual (via `apply_forgetting_curve`), not automatic | When Phase 13 scheduler exists |
-| Provenance `admission_evidence` is reconstructed from persisted columns, not stored as a JSON blob | When richer evidence is needed |
+| `core/agents/analyst.py` | §2.1 warn on unparseable body; §2.3 record function-body not-found in decision_log; 413 becomes a refusal |
+| `core/agents/writer.py` | §2.2 reject candidates when original source does not parse; §2.3 record function-body not-found |
+| `core/agents/tester.py` | §2.3 record function-body not-found; rate-limit and unavailability become refusals |
+| `core/providers/fallback_router.py` | Additive: `BudgetEnvelope`, `blast_band_override`, `escalation_signals`, tier-mapping helper |
+| `core/orchestrator/deterministic_gate.py` | Replace non-runtime-checkable `isinstance` against `WritableSandboxExecutor` with `hasattr` (latent bug) |
+| `core/orchestrator/phase_gates.py` | `verifier_entry` checks `sandbox_verify` result, not a `diff` slot that never runs; `skill_curator_exit` accepts refusal as a legitimate outcome |
+| `core/orchestrator/phase_graphs/legacy.py` | Distinguishing capability tag per verifier slot so each resolves to its own agent |
+| `core/orchestrator/loop.py` | `_seed_registered_agents` from the resolved graph; keeps the seed out of SQL |
+| `core/storage/sqlite_store.py` | `check_same_thread=False` on the connection to support the worker-thread dispatch |
+
+**Phase 13 residuals recorded:**
+
+- The deep test's `sandbox_verify` and verifier slots are filled by test-scoped adapters in `sandtest/deep/`, not by production agents. A future phase that promotes them to `core/orchestrator/` swaps the registration and retires the two test files.
+- `_SharedVerifierRunner` runs the verifier stack with `k_override=1`. The K-round retry path is exercised by the unit test `test_verifier_retry`, not by the deep test.
+- The `project_test_suite` slot remains unregistered; the loop skips it because it is optional.
+- The scrapy fault-injection assertion (`test failed but no test_value_* in FAILED lines`) needs the widened `as_check` predicate that accepts `test_smoke_*` as evidence of drift detection. The unit test for the module does not exercise this path; the deep test does.
+
+**What Phase 13 explicitly does NOT deliver:** CLI (Phase 14), MCP server and reporters (Phase 15), the LSP semantic layer, multi-language pipeline, step-level routing, benchmark numbers. All are recorded in `docs/summaries/Phase_13_walls_and_handoff.md`.
 
 ---
 
@@ -173,14 +136,15 @@ Every stage has a fallback to the previous stage. Flag-off produces byte-identic
 | Phase 8 hardening + Phase 9 | 704 | 10 | 7 | 5 | 59 pass, 2 xfail |
 | Phase 10 complete | 884 | 10 | 7 | 5 | 59 pass, 2 xfail |
 | Phase 11 complete | 1367 | 14 | 7 | 5 | 87 pass, 2 fail, 0 skip, 2 xfail |
-| **Phase 12 v2 complete** | **1547** | **14** | **7** | **5** | **unchanged from Phase 11** |
+| Phase 12 v2 complete | 1547 | 14 | 7 | 5 | unchanged from Phase 11 |
+| **Phase 13 complete** | **1771** | **14** | **7** | **5** | **httpx 65/0/2; scrapy 57/1/2 (1 fail, 2 skip, 1 warn)** |
 
 **Pytest command:** `PYTHONPATH=python python3 -m pytest tests/ -q`
-**Current result:** `1547 passed, 14 skipped, 7 xfailed, 5 xpassed`
+**Current result:** `1771 passed, 14 skipped, 7 xfailed, 5 xpassed`
 
-**Ruff:** `ruff check python/codeguardian/ tests/` → `All checks passed!`
+**Ruff:** `ruff check python/codeguardian/ tests/ sandtest/` → `All checks passed!`
 
-**Deep test:** last run is the Phase 11 deep test recorded in `docs/summaries/Phase_11.md` §3.1. The Phase 12 v2 work has not been exercised by the deep test; that is a Phase 13 obligation when the orchestrator consumes the retrieval pipeline.
+**Deep test:** last runs are recorded above. The Phase 13 orchestrator drives the pipeline on both `httpx` and `scrapy`. The scrapy fault-injection assertion is the one open test detail; the pipeline itself ran 20/20 phases on the proceed and review bands.
 
 **Breakdown of the 7 pytest xfails:** unchanged from Phase 11. C/C++ declarator gap (G-15) plus cross-file resolution incompleteness (G-16).
 
@@ -190,24 +154,21 @@ Every stage has a fallback to the previous stage. Flag-off produces byte-identic
 
 ## Deviations from BUILD_ORDER
 
-### Phase 1 through Phase 10 deviations
+### Phase 1 through Phase 12 deviations
 
-Recorded in `docs/summaries/phases-0-to-8.md` §10–§13, `docs/summaries/phase-9-design.md` §2.3, and `docs/summaries/phase-10.md` §9. All resolved, none open.
+Recorded in `docs/summaries/phases-0-to-8.md` §10–§13, `docs/summaries/phase-9-design.md` §2.3, `docs/summaries/phase-10.md` §9, `docs/summaries/Phase_11.md` §3, and `docs/summaries/Phase_12.md` §12. All resolved, none open.
 
-### Phase 11 deviations
-
-Recorded in `docs/summaries/Phase_11.md`. The 41 files delivered versus the plan's 11 agent modules. Deviations are all additive at the behavioral level.
-
-### Phase 12 v2 deviations
+### Phase 13 deviations
 
 | # | What | Why |
 |---|---|---|
-| 1 | Phase 12 grew from 6 files to 27 | The v1 plan assumed flat retrieval was sufficient. The 2026 literature showed it is not at scale (implicit routing collapses from 73.6% to 27.4% recall with 1,000 distractors). The v2 delivery adds the graph, governance, and security layers to address that. |
-| 2 | `skill_store.py` was on the "deliberately untouched" list and was modified | Rule 1 escalation. FK-safe upsert bug from Phase 3 was exposed by Phase 12 v2's `record_load_outcome`. Pre-existing bug, not introduced by this phase. |
-| 3 | Migration `006_skill_states.sql` added | Rule 1 escalation. The `skills.state` CHECK constraint from Phase 3 could not accept `trial`, `stable`, `retired`. SQLite cannot ALTER a CHECK, so the table is rebuilt. Forward-only, idempotent, preserves rowids and FKs. |
-| 4 | Evolver candidates use a sidecar JSON file, not shadow tables | The v2 design specified shadow tables, but that would require a new migration beyond `005` and `006`. A JSON file has the same isolation property (nothing touches the serving graph until `promote`) with no migration dependency. |
-| 5 | Negative knowledge decay is manual, not automatic | The v2 design's forgetting curve runs on demand. Phase 13's scheduler is what will call it periodically. |
-| 6 | `SkillIndexer.rebuild_graph` catches all exceptions and returns `(0, 0)` on failure | Maintenance passes run on a timer; a failing pass should not crash the process. The trade-off is that a failed rebuild is silent in the return value but logged as a warning. |
+| 1 | Phase 13 grew from the plan's ~35 files to 49 | The plan was written before the orchestrator's supporting infrastructure (telemetry package, two test-scoped agents) was fully scoped. The additions are additive; no planned file was dropped. |
+| 2 | `legacy.py` gained distinguishing verifier tags | The three verifier slots shared identical capability tags in the initial plan. `SlotResolver` could not resolve them to three distinct agents without a distinguishing tag. The change is one tag per slot; the loop is unchanged. |
+| 3 | `loop.py` gained `_seed_registered_agents` | The initial plan seeded `registered_agents` in SQL. Hardcoding the nine roles and their capability tags in the migration duplicated data that lives in `LEGACY_GRAPH`. The seed moved to the loop, where the resolved graph is the source of truth. |
+| 4 | `sqlite_store.py` gained `check_same_thread=False` | The orchestrator's `_run_coroutine_sync` dispatches the loop to a worker thread when a loop is already running. SQLite's default thread affinity rejects that. Modern Python's SQLite is serialized mode; the flag is safe. |
+| 5 | Two test-scoped agents live in `sandtest/deep/` instead of `core/orchestrator/` | The production `SandboxVerifyAgent` and `VerifierStackAgent` are not part of Phase 13's scope. The deep test needs agents to fill the two slots; placing them in the test harness keeps the production surface honest. |
+| 6 | `sandbox_adapter.py` sets no `_ACTIVE_PERMISSIONS` contextvar | The build order named a variable that does not exist. The Phase 9 audit hook reads `_ACTIVE` and `_ACTIVE_NAME` through `plugin_active()`. The attenuation module uses the real mechanism. |
+| 7 | Migration 007 ends with `PRAGMA foreign_keys = OFF` | The first draft ended with `ON`, contradicting migration 006's convention and the project default. The role FK is declarative; the registry enforces names at registration time. |
 
 ---
 
@@ -215,16 +176,21 @@ Recorded in `docs/summaries/Phase_11.md`. The 41 files delivered versus the plan
 
 Rule 1 escalations performed across all phases. Every rewrite is additive at the behavioral level.
 
-**Phases 1–10:** recorded in `docs/summaries/phases-0-to-8.md`, `docs/summaries/phase-9-design.md`, `docs/summaries/phase-10.md`. All resolved.
+**Phases 1–12:** recorded in the phase summaries. All resolved.
 
-**Phase 11:** recorded in `docs/summaries/Phase_11.md`. All resolved.
-
-**Phase 12 v2:** two Rule 1 escalations, both closed this session.
+**Phase 13:** eight Rule 1 escalations, all closed.
 
 | File | Nature | Approved |
 |---|---|---|
-| `core/storage/skill_store.py` | FK-safe upsert and FK-safe remove; latent Phase 3 bug | Yes (during Block 4 verification) |
-| `core/storage/migrations/006_skill_states.sql` | New migration, expanded CHECK constraint | Yes (during Block 4 verification) |
+| `core/agents/analyst.py` | §2.1 and §2.3 fixes; 413 becomes refusal | Yes |
+| `core/agents/writer.py` | §2.2 and §2.3 fixes | Yes |
+| `core/agents/tester.py` | §2.3 fix; rate-limit becomes refusal | Yes |
+| `core/providers/fallback_router.py` | Additive budget, blast override, escalation signals | Yes |
+| `core/orchestrator/deterministic_gate.py` | Latent `isinstance` bug fixed | Yes |
+| `core/orchestrator/phase_gates.py` | `verifier_entry` and `skill_curator_exit` corrected | Yes |
+| `core/orchestrator/phase_graphs/legacy.py` | Distinguishing verifier tags | Yes |
+| `core/orchestrator/loop.py` | `_seed_registered_agents` added | Yes |
+| `core/storage/sqlite_store.py` | `check_same_thread=False` | Yes |
 
 **Open escalations:** zero.
 
@@ -232,22 +198,20 @@ Rule 1 escalations performed across all phases. Every rewrite is additive at the
 
 ## What the next chat must do first
 
-1. Read `skills.md`, `BUILD_ORDER.md`, `BUILD_STATE.md` (this file), `docs/summaries/Phase_12.md`, `docs/summaries/Phase_11.md`, and `docs/public-api.md`.
+1. Read `skills.md`, `BUILD_ORDER.md`, `BUILD_STATE.md` (this file), `docs/summaries/Phase_13.md`, `docs/summaries/Phase_13_walls_and_handoff.md`, and `docs/public-api.md`.
 2. Read `docs/git-workflow.md` for the branch and commit workflow.
-3. Do not attempt to re-verify Phases 1 through 12. They are green. Trust the state.
+3. Do not attempt to re-verify Phases 1 through 13. They are green. Trust the state.
 4. Ask the user to `source .venv/bin/activate` before any Python command.
 5. Confirm `cargo --version` works inside the venv. If it fails, the venv activate script no longer appends `$HOME/.cargo/bin`.
-6. Start **Phase 13 — Orchestrator**. Read `BUILD_ORDER.md` §18, `docs/04-architecture.md` §6, and `docs/summaries/Phase_12.md` for the spec. The retrieval pipeline, governance gate, negative store, telemetry helpers, checkpointing primitives, and the verifier loop are all ready for the orchestrator to consume.
-7. Create the branch first: `git checkout -b phase-13-orchestrator`. All Phase 13 work happens on that branch.
-8. **Phase 13 must build the orchestrator as a phase graph, not a hardcoded sequence.** This is the modularity-audit §7 recommendation. If the orchestrator is hardcoded as an eight-phase pipeline, v2 (greenfield, upgrade) will require a full pipeline refactor. If it interprets a `PhaseGraph` object, v2 adds new graph definitions only.
-9. **Phase 13 consumes Phase 12's public surface.** Specifically:
-   - `library.retrieval().retrieve(query, project_context=card)` for retrieval
-   - `library.governor().admit(name, frontmatter, body, eval_score=...)` for skill admission after the Skill Curator produces a proposal
-   - `library.negative().find(context_signature)` before retries, with explicit adopt/reject logging to `agent_calls.decision_log`
-   - `library.governor().record_load_outcome(name, outcome)` after every skill use
-   - `library.indexer().rebuild_graph()` and `.apply_forgetting_curve(governor=...)` at run start or on a timer
-   - `ProjectCard` must be constructed from `recon.json` and `blast_radius.json`. The retrieval pipeline's Stage 0 filter is inert without it.
-10. **Phase 13 must satisfy Phase 11 residuals that Phase 11 could not close in isolation.** These are the Tier 3 items in `docs/summaries/Phase_11_shortcomings.md`: the sandbox adapter for the deep test (unlocks six opt-in features), the `VerifierLoop` wiring into the deep test's apply → verify → rollback flow, `ContextBudget` construction from `CapabilityProfile` per run, evidence columns written by all agents, and the skill curator mining gate supplied from Phase 12's run history.
+6. Start **Phase 14 — CLI**. Read `BUILD_ORDER.md` §19 and `docs/04-architecture.md` §7.
+7. Create the branch first: `git checkout -b phase-14-cli`. All Phase 14 work happens on that branch.
+8. **Phase 14 consumes Phase 13's public surface.** Specifically:
+   - `LangGraphOrchestrator.run(config)`, `.resume(run_id)`, `.pause(run_id)`, `.get_state(run_id)`
+   - The `RunConfig`, `RunResult`, `RunState` dataclasses from `codeguardian.interfaces.orchestrator`
+   - `LegacyGraph` as the default `PhaseGraph`
+   - The `CheckpointSupervisor` for the `resume` subcommand
+9. **Phase 14 must address the residuals the deep test surfaced.** G-33 (analyst 413 surfaces as a SKIP in the deep test; the CLI must translate it into a user-facing refusal). Per-phase progress output so an 11-minute run does not look frozen. The `recovery.md` from the roadmap is a Phase 14 concern if it is not built into the orchestrator first.
+10. **Phase 14 must not change the orchestrator, the loop, the registry, the evidence bus, or the verifier stack.** Those are the structural invariants; they survive any CLI.
 
 ---
 
@@ -260,18 +224,20 @@ Rule 1 escalations performed across all phases. Every rewrite is additive at the
 - Never claim a test passed. Wait for the user's raw output.
 - Ask before guessing. Ask before adding a code, symbol, dependency, schema field, or error code.
 - Follow `skills.md` for every file.
-- **Before writing any file marked `(UPDATE)`, request `git show HEAD:<path>` for that file and write from the actual current content, not from imports or assumptions.** This rule was added after the `defaults.py` regression in this session, where an UPDATE was written from imports and lost four constants.
+- **Before writing any file marked `(UPDATE)`, request `git show HEAD:<path>` for that file and write from the actual current content, not from imports or assumptions.** This rule was added after the `defaults.py` regression in the Phase 12 session, where an UPDATE was written from imports and lost four constants.
 - **Every patch script ends with a verify-before-write assertion.** This rule was added after a `defaults.py` patch script wrote a file whose `__all__` promised names that the script never actually defined.
+- **Run every bash command in WSL.** The PowerShell window creates empty files and drops tokens into the working tree. Twenty-two such files were cleaned up during Phase 13.
+- **The deep test does not install the user's project.** A production user has a working environment; the deep test clones and installs, and its install fragility is a harness limitation, not a product limitation. Do not confuse the two.
 
 ---
 
 ## Known gaps carried forward
 
-Gaps identified across Phases 1 through 12. Recorded here so they are not forgotten. The table is consolidated from `docs/summaries/phases-0-to-8.md` §16, `docs/summaries/Phase_11_shortcomings.md`, and Phase 12 v2 residuals.
+Gaps identified across Phases 1 through 13. Recorded here so they are not forgotten. The table is consolidated from `docs/summaries/phases-0-to-8.md` §16, `docs/summaries/Phase_11_shortcomings.md`, Phase 12 v2 residuals, and Phase 13 residuals.
 
 | # | Gap | Becomes relevant | Notes |
 |---|---|---|---|
-| G-1 | Multi-process SQLite write contention | Phase 13 | `busy_timeout` handles two writers; three will time out |
+| G-1 | Multi-process SQLite write contention | Phase 14+ | `busy_timeout` handles two writers; three will time out |
 | G-2 | No retention for metadata tables | Phase 16 | Tables grow forever |
 | G-3 | No SQLite backup | Before v1 ships | Audit log is safe; database is not |
 | G-4 | Cache keys do not include schema version | When schema changes | Stale cache hits |
@@ -283,52 +249,55 @@ Gaps identified across Phases 1 through 12. Recorded here so they are not forgot
 | G-10 | Rust `RpcServer` never exercised against real input | Closed by Phase 7 | rpcd exercises it via JSON-RPC |
 | G-11 | `test_config_secrets.py` does not exist | Phase 1 backlog | Deferred by user decision |
 | G-12 | Rust error-to-Python mapping at bridge boundary | Partially closed | JSON-RPC still maps all errors to `SYS_INTERNAL` |
-| G-13 | CLI exit-code mapping not written | Phase 14 | Design specified, code does not exist |
+| G-13 | CLI exit-code mapping not written | **Phase 14** | Design specified, code does not exist |
 | G-14 | Phase 0 B-004 through B-009 deferred | End of build | 30 files, no runtime impact |
 | G-15 | C/C++ function names not extracted | Next kernel phase | `extract_name_id` does not walk declarator chains |
 | G-16 | Cross-file call resolution incomplete | Next kernel phase | Narrowed by Phase 9 but not closed |
 | G-17 | C# not supported | When grammar ships | ABI incompatibility with tree-sitter 0.24 |
 | G-18 | `ast.rs` comment on `Property` mentions C# | Cosmetic | One-word fix, Rule 1 escalation on `ast.rs` |
-| G-19 | No automated test/language drift check | Phase 13+ | Adding a language to `dispatch` without adding a test case goes unnoticed |
+| G-19 | No automated test/language drift check | Phase 14+ | Adding a language to `dispatch` without adding a test case goes unnoticed |
 | G-20 | `audit.verify` returns `entries_checked: 1` after apply + rollback | Investigate | Real finding from the deep test |
 | G-21 | `echo` returns 0 callers on `pallets/click` | Next kernel phase | Partly resolved by the pyo3 `path` key fix. `echo` in click not re-tested |
 | G-22 | Maturin does not work with this workspace | Cosmetic | Documented in environment notes |
-| G-23 | Phase 9 residuals: permission bypass via C extensions | Phase 13+ | Audit hook is Python-level |
-| G-24 | Phase 9 residuals: plugin process crash isolation | Phase 13 | Fault barrier catches exceptions; segfaults need process pool |
-| G-25 | Phase 9 residuals: pipeline proof requires agents | Partially closed by Phase 11 | Still needs Phase 13 orchestrator |
-| G-26 | Phase 11 residuals: reranker feature flag never exercised on real workload | Phase 13 | The reranker degrades to passthrough silently when `fastembed` lacks `TextCrossEncoder` |
-| G-27 | Phase 12 v2 residuals: Stage 0 filter is language-only | Phase 13 | Dependency version and test framework match need orchestration |
-| G-28 | Phase 12 v2 residuals: negative knowledge decay is manual | Phase 13 | Requires a scheduler |
-| G-29 | Phase 12 v2 residuals: evolver uses sidecar JSON, not shadow tables | Phase 13+ | Working alternative but does not use the DB's transactional guarantees |
-| G-30 | Phase 12 v2 residuals: provenance `admission_evidence` is reconstructed from columns | Phase 13+ | Not stored as a JSON blob; richer evidence needs a schema change |
+| G-23 | Phase 9 residuals: permission bypass via C extensions | Future | Audit hook is Python-level |
+| G-24 | Phase 9 residuals: plugin process crash isolation | Future | Fault barrier catches exceptions; segfaults need process pool |
+| G-25 | Phase 9 residuals: pipeline proof requires agents | **Closed by Phase 13** | The orchestrator runs the full pipeline on `httpx` and `scrapy` |
+| G-26 | Phase 11 residuals: reranker feature flag never exercised on real workload | Future | The reranker degrades to passthrough silently when `fastembed` lacks `TextCrossEncoder` |
+| G-27 | Phase 12 v2 residuals: Stage 0 filter is language-only | Phase 14+ | Dependency version and test framework match need orchestration |
+| G-28 | Phase 12 v2 residuals: negative knowledge decay is manual | Phase 14+ | Requires a scheduler |
+| G-29 | Phase 12 v2 residuals: evolver uses sidecar JSON, not shadow tables | Future | Working alternative but does not use the DB's transactional guarantees |
+| G-30 | Phase 12 v2 residuals: provenance `admission_evidence` is reconstructed from columns | Future | Not stored as a JSON blob; richer evidence needs a schema change |
 | G-31 | Phase 12 v2 residuals: fitness formula is effectiveness-only | When cost tracking arrives | `−λ·cost` deferred |
-| G-32 | Phase 11 residuals: 3 item closures not yet applied (fault-injection label, tester prompt clarification, skill curator prompt clarification) | Before Phase 13 can consume the Skill Curator reliably | `docs/summaries/Phase_11_shortcomings.md` §1.1, §1.2, §1.3 |
+| G-32 | Phase 11 residuals: tester prompt clarification, skill curator prompt clarification | **Phase 14** | §1.2 and §1.3 of `Phase_11_shortcomings.md`; the fault-injection label was fixed in Phase 13 |
+| **G-33** | **Analyst context-window overflow surfaces as a `[SKIP]` in the deep test** | **Phase 14** | The CLI must translate it into a user-facing refusal, not a silent skip. The deep test's skip is honest for the harness; a real user needs a message. |
+| **G-34** | **No LSP layer** | **v2** | The kernel parses 8 languages; semantic rename, find-references, and code-action refactoring rely on tree-sitter ranges. The highest-leverage multi-language work. Recorded in `docs/summaries/Phase_13_walls_and_handoff.md` §4.1. |
+| **G-35** | **Scrapy fault-injection assertion rejects smoke-only drift detection** | **Phase 14 or patch** | The `as_check` predicate in `_fault_injection.py` requires `test_value_*` in the failure output. A target whose value test is not written (non-comparable return) has only `test_smoke_*`; the widened predicate must accept it. The unit test does not exercise this path. |
 
-**Gaps that Phase 12 v2 closed:**
-- Partial G-19 (behavioral contract tests for skills)
-- Nothing else closed by Phase 12 v2; the new tables are derived and drop-rebuild safe, so the "state divergence" class of bugs (e.g. schema/constraint drift) is protected by the 005/006 migrations.
+**Gaps that Phase 13 closed:**
 
-**Gaps that remain open after Phase 12 v2:**
-- G-1 through G-9, G-11, G-13, G-14 unchanged
-- G-12 partial (JSON-RPC error mapping)
-- G-15, G-16, G-17, G-18, G-20, G-21 (kernel issues) — Phase 12 v2 does not touch them
-- G-19 partial (Phase 12 v2's tests cover the skills module but not the full surface)
-- G-22 (documentation only)
-- G-23, G-24, G-25 (Phase 9 residuals)
-- G-26, G-27, G-28, G-29, G-30, G-31 (Phase 12 v2 residuals, added above)
-- G-32 (Phase 11 residuals)
+- G-25 (pipeline proof requires agents) — the orchestrator runs the pipeline end-to-end.
+- Partial G-13 (CLI exit codes) — the orchestrator's public surface is stable; the CLI consumes it.
+
+**Gaps that remain open after Phase 13:**
+
+- G-1 through G-12, G-14 unchanged
+- G-13 partial (CLI exists at the orchestrator level; exit-code mapping is Phase 14)
+- G-15 through G-24, G-26 through G-32 unchanged
+- G-33, G-34, G-35 added above
 
 ---
 
 ## Git history
 
-**Branch state:** `main` and `phase-12-skills-v2` both exist. Phase 12 v2 work is uncommitted at the time of this snapshot. The push sequence is documented in the Phase 12 delivery verification.
+**Branch state:** `main` and `phase-13-orchestrator` both exist. Phase 13 work is uncommitted at the time of this snapshot. The push sequence is documented in the Phase 13 delivery verification.
 
 **Recent commits (order may not be exact):**
 
 ```
-<latest on main>  docs: add Phase 12 design settlement (v1) and Phase 11 record
-<latest on main>  feat: phase-11 agents complete with deep test integration
+<latest on main>  docs: add Phase 13 v2 roadmap and Phase 12 v2 residuals
+<latest on main>  feat: phase-13 orchestrator with graph walker and verifier stack
+<earlier>         docs: add Phase 12 design settlement (v1) and Phase 11 record
+<earlier>         feat: phase-11 agents complete with deep test integration
 <earlier>         docs: add build history for phases 1 through 10
 <earlier>         feat: phase-10 prompts with renderer, schema, eval harness
 <earlier>         feat: phase-9 plugins with runtime grammar loading
@@ -343,71 +312,81 @@ Gaps identified across Phases 1 through 12. Recorded here so they are not forgot
 <earlier>         chore(pre-commit): make hooks phase-aware
 ```
 
-### Commit strategy for Phase 12 v2
+### Commit strategy for Phase 13
 
-**Branch:** `phase-12-skills-v2` from `main`.
+**Branch:** `phase-13-orchestrator` from `main`.
 
-**Commit:** single commit containing all 27 Phase 12 v2 files, plus the two migrations, plus the `skill_store.py` Rule 1 fix.
+**Commit:** single commit containing all 49 Phase 13 files, plus the eight Rule-1 escalations and the deep-test rewires.
 
 ```bash
-git add python/codeguardian/core/skills/ \
-  python/codeguardian/core/config/defaults.py \
-  python/codeguardian/core/config/schema.py \
-  python/codeguardian/core/storage/migrations/005_skill_graph.sql \
-  python/codeguardian/core/storage/migrations/006_skill_states.sql \
-  python/codeguardian/core/storage/skill_store.py \
-  schemas/skill.json \
-  tests/unit/core/test_skill_graph.py \
-  tests/unit/core/test_ppr.py \
-  tests/unit/core/test_retrieval_pipeline.py \
-  tests/unit/core/test_hydrator.py \
-  tests/unit/core/test_negative.py \
-  tests/unit/core/test_governor.py \
-  tests/unit/core/test_skill_security.py \
-  tests/unit/core/test_evolver.py \
-  tests/unit/core/test_skills.py
+git add python/codeguardian/core/orchestrator/ \
+  python/codeguardian/core/telemetry/ \
+  python/codeguardian/core/storage/migrations/007_agent_registry.sql \
+  python/codeguardian/core/storage/sqlite_store.py \
+  python/codeguardian/core/providers/fallback_router.py \
+  python/codeguardian/core/agents/analyst.py \
+  python/codeguardian/core/agents/writer.py \
+  python/codeguardian/core/agents/tester.py \
+  sandtest/deep/_pipeline.py \
+  sandtest/deep/_sandbox_verify.py \
+  sandtest/deep/_verifier_agents.py \
+  sandtest/deep_test.py \
+  tests/unit/core/test_phase_graph.py \
+  tests/unit/core/test_orchestrator_core.py \
+  tests/unit/core/test_verification_stack.py \
+  tests/unit/core/test_context_and_routing.py \
+  tests/unit/core/test_evidence_columns.py \
+  tests/unit/core/test_sandbox_adapter.py \
+  tests/unit/core/test_phase_gates.py \
+  tests/unit/core/test_orchestrator_e2e.py \
+  tests/unit/core/test_agent_analyst.py \
+  tests/unit/core/test_agent_writer.py \
+  docs/public-api.md \
+  docs/05-data-model.md \
+  docs/summaries/Phase_13_walls_and_handoff.md \
+  BUILD_STATE.md
 
-git commit -m "feat(phase-12): skills module v2 with graph, governance, and security"
+git commit -m "feat(phase-13): orchestrator with graph walker, verifier stack, and telemetry"
 ```
 
 Pre-commit may modify files on first attempt; re-add and commit again. Second attempt passes.
 
-**Push:** `git push -u origin phase-12-skills-v2`. **PR:** one PR, review, merge. **Tag:** `v1.2.0` after merge.
+**Push:** `git push -u origin phase-13-orchestrator`. **PR:** one PR, review, merge. **Tag:** `v1.3.0` after merge.
 
 ---
 
 ## Where the next phase starts
 
-Phase 13 — Orchestrator. Reference `BUILD_ORDER.md` §18 and `docs/04-architecture.md` §6.
+Phase 14 — CLI. Reference `BUILD_ORDER.md` §19 and `docs/04-architecture.md` §7.
 
-**Blocks (per `BUILD_ORDER.md`, subject to revision during the Phase 13 design settlement):**
+**Blocks (per `BUILD_ORDER.md`, subject to revision during the Phase 14 design settlement):**
 
-1. **B-056** — Orchestrator Core: `orchestrator/__init__.py`, `phase_gates.py`, `consent.py`, `verification_prompt.py`, `checkpointing.py`
-2. **B-057** — Orchestrator Implementation: `langgraph_orchestrator.py`
-3. **B-058** — Telemetry: `telemetry/__init__.py`, `metrics.py`, `tracing.py`, `langsmith.py`
-4. **B-059** — Orchestrator Tests: `test_orchestrator.py`, `test_phase_gates.py`, `test_checkpointing.py`, `test_consent.py`, `test_telemetry.py`
+1. **B-060** — CLI Foundation: `cli/__init__.py`, `cli/main.py`, `cli/context.py`, `cli/errors.py`
+2. **B-061** — CLI Commands: `cli/commands/run.py`, `cli/commands/resume.py`, `cli/commands/pause.py`, `cli/commands/state.py`, `cli/commands/skill.py`
+3. **B-062** — CLI Output: `cli/output/json_out.py`, `cli/output/human_out.py`, `cli/output/progress.py`
+4. **B-063** — CLI Views: `cli/views/run_view.py`, `cli/views/skill_view.py`
+5. **B-064** — CLI Tests: `test_cli_commands.py`, `test_cli_output.py`, `test_cli_views.py`
 
-**What "done" means for Phase 13:**
+**What "done" means for Phase 14:**
 
-1. The full pipeline runs end-to-end against a fixture repository: recon → blast → analyst → tester → writer → sandbox verify → three verifiers → rollback on any failure.
-2. The pipeline is graph-driven, not hardcoded. `PhaseGraph` per mode is defined in `orchestrator/phase_graphs/legacy.py`. A `greenfield` graph can be added later without touching the orchestrator.
-3. `library.retrieval().retrieve()` is called with a `ProjectCard` constructed from `recon.json` and `blast_radius.json`. Stage 0 filter runs.
-4. `library.governor().admit(...)` is called after every Skill Curator proposal. Only admitted skills enter the pool.
-5. `library.negative().find(context_signature)` is called before retries with explicit adopt/reject logging to `agent_calls.decision_log`.
-6. `library.governor().record_load_outcome(...)` is called after every skill use. Fitness and lifecycle transitions fire.
-7. `VerifierLoop` is wired into the apply → verify → rollback flow. Failed verifications trigger bounded retries.
-8. Checkpoint durability is supervised. A crash mid-run resumes from the last checkpoint.
-9. The `ContextBudget` is constructed per run from a `CapabilityProfile` and passed to every `tracked_model_call`.
-10. `PYTHONPATH=python python3 -m pytest tests/ -q` remains green with all Phase 1–12 tests passing and the Phase 13 additions.
+1. `codeguardian run --repo <url> --target <path>:<symbol> --directive <text>` runs the pipeline through the orchestrator and produces a `RunResult`.
+2. `codeguardian resume <run_id>` resumes from the last checkpoint using `CheckpointSupervisor`.
+3. `codeguardian pause <run_id>` sets the run's status to paused.
+4. `codeguardian state <run_id>` returns the current `RunState`.
+5. `codeguardian skill list`, `skill show`, `skill promote`, `skill retire`, `skill rejected`, `skill graph` read from the Phase 12 v2 governor.
+6. Every command supports `--json` for machine-readable output.
+7. Progress is streamed per phase so an 11-minute run does not look frozen.
+8. The G-33 residual is addressed: a context-window overflow is reported as a user-facing refusal, not a silent skip.
+9. `PYTHONPATH=python python3 -m pytest tests/ -q` remains green with all Phase 1–13 tests passing and the Phase 14 additions.
 
-**What Phase 13 will NOT deliver (foreseeable residuals):**
-- CLI (Phase 14)
-- MCP (Phase 15)
-- Full reporter integration (Phase 15)
-- Auto-propose mode (v2 design, post-v1)
-- Phase 11 residuals beyond G-26 and G-32 (the two that Phase 13 can close)
+**What Phase 14 will NOT deliver (foreseeable residuals):**
+- MCP server and client (Phase 15)
+- Reporters (Phase 15)
+- Full assembly script (Phase 16)
+- Multi-language pipeline (v2; see `docs/summaries/Phase_13_walls_and_handoff.md`)
+- LSP semantic layer (v2)
 
-**Suggested Phase 13 design settlement length:** at least as long as Phase 9's and Phase 12's. The orchestrator is the phase that decides whether the whole system's modularity survives v2. The decision "phase graph, not hardcoded sequence" from `docs/modularity-audit.md` §7 must be documented as an explicit settlement item, with the alternative considered and rejected on the record.
+**Suggested Phase 14 design settlement length:** shorter than Phase 13's. The CLI is a thin surface over the orchestrator; the design questions are about output shape, progress presentation, and error translation, not about architecture. A document of Phase 9's length is sufficient.
 
 ---
 

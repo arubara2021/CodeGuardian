@@ -89,10 +89,14 @@ class SQLiteStore:
     extension, creates the migration tracking table if it is missing,
     and closes the connection on exit even if the body raises.
 
-    The store is not thread-safe. A single ``SQLiteStore`` instance owns
-    one connection, and SQLite connections cannot be shared across
-    threads by default. Callers that need concurrent access open one
-    store per thread or serialize access through a lock.
+    The store allows cross-thread use of a single connection but does
+    not serialize access. ``check_same_thread=False`` is set on the
+    connection because the orchestration layer dispatches coroutines to
+    a worker thread and the store is passed into them unchanged. The
+    underlying SQLite is built in serialized mode by default in modern
+    Python, so no two threads corrupt each other; the caller is still
+    responsible for not issuing overlapping writes. A caller that needs
+    true concurrency opens one store per thread.
     """
 
     def __init__(self, db_path: Path) -> None:
@@ -175,6 +179,7 @@ class SQLiteStore:
             self._connection = sqlite3.connect(
                 str(self._db_path),
                 isolation_level=None,
+                check_same_thread=False,
             )
             self._connection.row_factory = sqlite3.Row
         except PermissionError as exc:

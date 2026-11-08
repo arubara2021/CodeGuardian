@@ -274,6 +274,22 @@ class TestPreCheckFunctions:
         )
         assert small < large
 
+    def test_signature_drift_rejects_invalid_original(self) -> None:
+        """Phase 11 §2.2: invalid original source rejects the candidate."""
+        invalid_original = "def parse(raw:\n    return raw\n"
+        clean, reason = _check_signature_drift(invalid_original, _VALID_CANDIDATE)
+        assert clean is False
+        assert reason is not None
+        assert "original source did not parse" in reason
+
+    def test_signature_drift_rejects_invalid_candidate(self) -> None:
+        """Phase 11 §2.2: invalid candidate source rejects the candidate."""
+        invalid_candidate = "def parse(raw: str:\n    return raw\n"
+        clean, reason = _check_signature_drift(_SOURCE, invalid_candidate)
+        assert clean is False
+        assert reason is not None
+        assert "candidate source did not parse" in reason
+
 
 class FakeExecutableSandbox:
     """SandboxExecutor with write_file that returns queued outcomes."""

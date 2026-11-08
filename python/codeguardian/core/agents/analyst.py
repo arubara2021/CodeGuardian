@@ -420,13 +420,28 @@ class AnalystAgent:
         else:
             skeleton = await _call_tool(input, "code-skeleton", {"path": target_path})
 
+        pre_warnings: list[str] = []
         body: str | None = None
         if _needs_body(input.directive):
-            body = await _call_tool(
+            raw_body = await _call_tool(
                 input,
                 "function-body",
                 {"path": target_path, "qualified_name": target_symbol},
             )
+            if _is_not_found(raw_body):
+                _record_tool_failure(
+                    input,
+                    "function-body",
+                    {"path": target_path, "qualified_name": target_symbol},
+                    raw_body,
+                )
+                pre_warnings.append(
+                    f"function-body could not resolve {target_symbol!r} "
+                    f"in {target_path!r}: {raw_body[:100]}"
+                )
+                body = None
+            else:
+                body = raw_body
 
         if input.blast.contract_violations:
             await _call_tool(
@@ -439,12 +454,13 @@ class AnalystAgent:
                 },
             )
 
-        spec = _build_refactor_spec(
+        spec, spec_warnings = _build_refactor_spec(
             directive=input.directive,
             target=f"{target_path}:{target_symbol}",
             body=body,
             blast=input.blast,
         )
+        pre_warnings.extend(spec_warnings)
 
         variables = {
             "target_symbol": target_symbol,
@@ -455,13 +471,28 @@ class AnalystAgent:
         }
         prompt_result = render_prompt("analyst", input.prompt_version, variables)
 
-        response, latency_ms = await tracked_model_call(
-            input.provider,
-            prompt_result.rendered,
-            input.model,
-            ModelOptions(),
-            "analyst",
-        )
+        try:
+            response, latency_ms = await tracked_model_call(
+                input.provider,
+                prompt_result.rendered,
+                input.model,
+                ModelOptions(),
+                "analyst",
+            )
+        except CodeGuardianError as exc:
+            if exc.code in (
+                ErrorCode.MODEL_CONTEXT_EXCEEDED,
+                ErrorCode.MODEL_RATE_LIMITED,
+                ErrorCode.MODEL_UNAVAILABLE,
+                ErrorCode.PROVIDER_UNAVAILABLE,
+            ):
+                return _model_refusal(
+                    input,
+                    spec,
+                    exc,
+                    pre_warnings=tuple(pre_warnings),
+                )
+            raise
 
         try:
             parsed = json.loads(response.text)
@@ -473,6 +504,7 @@ class AnalystAgent:
                 prompt_result,
                 response,
                 latency_ms,
+                pre_warnings=tuple(pre_warnings),
             )
 
         try:
@@ -485,6 +517,7 @@ class AnalystAgent:
                 prompt_result,
                 response,
                 latency_ms,
+                pre_warnings=tuple(pre_warnings),
             )
 
         if not isinstance(context_pack, ContextPackOutput):
@@ -495,6 +528,7 @@ class AnalystAgent:
                 prompt_result,
                 response,
                 latency_ms,
+                pre_warnings=tuple(pre_warnings),
             )
 
         if not context_pack.files or context_pack.reason.startswith("refused:"):
@@ -512,10 +546,10 @@ class AnalystAgent:
                 context_pack=context_pack,
                 context_pack_artifact=None,
                 status="refused",
-                warnings=(),
+                warnings=tuple(pre_warnings),
             )
 
-        warnings: list[str] = []
+        warnings: list[str] = list(pre_warnings)
         files_set = {f.path for f in context_pack.files}
         if target_path not in files_set:
             warnings.append(f"model omitted target file {target_path!r}; added by tool evidence")
@@ -670,14 +704,54 @@ def _needs_body(directive: str) -> bool:
     return any(keyword in lowered for keyword in _DIRECTIVE_BODY_KEYWORDS)
 
 
+_NOT_FOUND_PREFIXES = (
+    "(declaration ",
+    "(file ",
+    "(path ",
+    "(graph ",
+    "(cannot ",
+)
+
+
+def _is_not_found(tool_output: str) -> bool:
+    """Return True when a tool response is a not-found marker.
+
+    Context provider plugins return a parenthesized message beginning
+    with one of several prefixes when they cannot resolve the request.
+    The prefixes match those the ``function_body`` plugin emits for its
+    four error cases (declaration not found, file not found, path
+    escapes root, stale offsets) plus the ``(cannot ...)`` form the
+    bundled providers use for read failures. Detecting them lets the
+    analyst surface a warning and a decision-log entry instead of
+    handing the string to ``ast.parse`` and letting the resulting
+    SyntaxError silently degrade the spec.
+    """
+    return any(tool_output.startswith(prefix) for prefix in _NOT_FOUND_PREFIXES)
+
+
 def _build_refactor_spec(
     *,
     directive: str,
     target: str,
     body: str | None,
     blast: BlastResult,
-) -> RefactorSpec:
-    """Build the RefactorSpec deterministically from tool evidence."""
+) -> tuple[RefactorSpec, tuple[str, ...]]:
+    """Build the RefactorSpec deterministically from tool evidence.
+
+    Returns a two-tuple of ``(spec, warnings)``. The warnings list is
+    populated when the body was required by the directive but could
+    not be used for annotation extraction: parse failure, empty body,
+    or a top-level statement that is not a function definition. Each
+    warning names the specific failure so a caller reading
+    ``AnalystResult.warnings`` knows the spec may be degraded rather
+    than complete.
+
+    The tool-not-found case is handled by the caller (``_run``) before
+    this function is called; when the body was not found, the caller
+    passes ``body=None`` and this function does not attempt annotation
+    extraction at all.
+    """
+    warnings: list[str] = []
     changes: list[RefactorChange] = []
 
     for kind in _detect_change_kinds(directive):
@@ -707,37 +781,51 @@ def _build_refactor_spec(
     if body is not None and _needs_body(directive):
         try:
             tree = ast.parse(body)
-        except SyntaxError:
+        except SyntaxError as exc:
+            warnings.append(
+                f"function body did not parse ({exc.msg} at line "
+                f"{exc.lineno}); annotation extraction skipped"
+            )
             tree = None
-        if tree is not None and tree.body:
-            func = tree.body[0]
-            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for arg in func.args.args:
-                    if arg.arg == "self":
-                        continue
-                    if arg.annotation is None:
-                        defaults = _KIND_DEFAULTS["parameter_annotation"]
+
+        if tree is not None:
+            if not tree.body:
+                warnings.append("function body is empty; annotation extraction skipped")
+            else:
+                func = tree.body[0]
+                if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for arg in func.args.args:
+                        if arg.arg == "self":
+                            continue
+                        if arg.annotation is None:
+                            defaults = _KIND_DEFAULTS["parameter_annotation"]
+                            changes.append(
+                                RefactorChange(
+                                    kind="parameter_annotation",
+                                    name=arg.arg,
+                                    inferred_type=None,
+                                    acceptance=defaults["acceptance"],
+                                    risk=defaults["risk"],
+                                    reversibility=defaults["reversibility"],
+                                )
+                            )
+                    if func.returns is None:
+                        inferred = _infer_return_type(func)
+                        defaults = _KIND_DEFAULTS["return_annotation"]
                         changes.append(
                             RefactorChange(
-                                kind="parameter_annotation",
-                                name=arg.arg,
-                                inferred_type=None,
+                                kind="return_annotation",
+                                inferred_type=inferred,
                                 acceptance=defaults["acceptance"],
                                 risk=defaults["risk"],
                                 reversibility=defaults["reversibility"],
                             )
                         )
-                if func.returns is None:
-                    inferred = _infer_return_type(func)
-                    defaults = _KIND_DEFAULTS["return_annotation"]
-                    changes.append(
-                        RefactorChange(
-                            kind="return_annotation",
-                            inferred_type=inferred,
-                            acceptance=defaults["acceptance"],
-                            risk=defaults["risk"],
-                            reversibility=defaults["reversibility"],
-                        )
+                else:
+                    warnings.append(
+                        f"function body's first statement is "
+                        f"{type(func).__name__}, not a function definition; "
+                        "annotation extraction skipped"
                     )
 
     constraints: list[str] = []
@@ -748,11 +836,14 @@ def _build_refactor_spec(
     if blast.recommendation_adjusted == "block":
         constraints.append("high blast risk; verify all callers before apply")
 
-    return RefactorSpec(
-        directive=directive,
-        target=target,
-        changes=tuple(changes),
-        constraints=tuple(constraints),
+    return (
+        RefactorSpec(
+            directive=directive,
+            target=target,
+            changes=tuple(changes),
+            constraints=tuple(constraints),
+        ),
+        tuple(warnings),
     )
 
 
@@ -913,6 +1004,44 @@ def _budget_refusal(input: AnalystInput, exc: CodeGuardianError) -> AnalystResul
     )
 
 
+def _model_refusal(
+    input: AnalystInput,
+    spec: RefactorSpec,
+    exc: CodeGuardianError,
+    *,
+    pre_warnings: tuple[str, ...] = (),
+) -> AnalystResult:
+    """Return a structured refusal for an unserviceable model request.
+
+    A request the model cannot service is a refusal, not a phase
+    failure. The three cases this covers are context-window overflow
+    (the target's context pack is larger than the model's input
+    window), rate limiting, and provider unavailability. In each case
+    the analyst cannot produce a spec and the pipeline should continue
+    with a refusal recorded at the analyst slot rather than aborting.
+
+    No telemetry row is written. The Phase 11 ``record_call`` helper
+    requires a ``ModelResponse``, which does not exist when the call
+    raised. The refusal is recorded on the ``AnalystResult`` and the
+    loop writes the phase-level audit entry.
+    """
+    context_pack = ContextPackOutput(
+        role="analyst",
+        files=(),
+        reason=(f"refused: {exc.code.value} ({exc.message[:150]})"),
+    )
+    return AnalystResult(
+        spec=spec,
+        context_pack=context_pack,
+        context_pack_artifact=None,
+        status="refused",
+        warnings=(
+            *pre_warnings,
+            f"model request refused: {exc.code.value}: {exc.message[:200]}",
+        ),
+    )
+
+
 def _refuse_invalid_output(
     input: AnalystInput,
     spec: RefactorSpec,
@@ -920,8 +1049,17 @@ def _refuse_invalid_output(
     prompt_result: Any,
     response: Any,
     latency_ms: int,
+    *,
+    pre_warnings: tuple[str, ...] = (),
 ) -> AnalystResult:
-    """Return a structured refusal for a model output that failed schema."""
+    """Return a structured refusal for a model output that failed schema.
+
+    The ``pre_warnings`` argument carries non-fatal findings recorded
+    before the model call, for example a function-body not-found
+    response. Merging them here means the caller's
+    ``AnalystResult.warnings`` contains the full picture even when the
+    model output was rejected.
+    """
     context_pack = ContextPackOutput(
         role="analyst",
         files=(),
@@ -943,7 +1081,7 @@ def _refuse_invalid_output(
         context_pack=context_pack,
         context_pack_artifact=None,
         status="refused",
-        warnings=(f"schema violation: {reason}",),
+        warnings=(*pre_warnings, f"schema violation: {reason}"),
     )
 
 
@@ -980,4 +1118,51 @@ def _record_call(
         prompt_role="analyst",
         prompt_version=input.prompt_version,
         model_options={"temperature": 0.0},
+    )
+
+
+def _record_tool_failure(
+    input: AnalystInput,
+    tool_name: str,
+    tool_input: dict[str, object],
+    tool_output: str,
+) -> None:
+    """Record a failed tool call as a telemetry row.
+
+    Called when ``function-body`` cannot resolve the target. Records a
+    decision_log entry naming the specific failure and a tool_chain
+    entry naming the tool that produced it. Uses the same active-store
+    check as ``_record_call`` so absence of a store (unit tests,
+    isolated evals) is a silent skip rather than an error.
+
+    This is the Phase 11 section 2.3 fix for the analyst: a
+    function-body lookup that fails is now visible in the decision log
+    rather than only in the spec-warnings list.
+    """
+    from codeguardian.core.agents import _store_context
+
+    store = _store_context.get_active_store()
+    if store is None:
+        return
+    record_call(
+        store,
+        role="analyst",
+        outcome="refused",
+        refusal_code="target_missing",
+        target_symbol=input.blast.target_qualified_name,
+        decision_log=[
+            {
+                "step": "function_body_lookup",
+                "candidate": None,
+                "verdict": "not_found",
+                "reason": tool_output[:100],
+            }
+        ],
+        tool_chain=[
+            {
+                "tool": tool_name,
+                "input": tool_input,
+                "output_bytes": len(tool_output),
+            }
+        ],
     )

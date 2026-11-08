@@ -585,3 +585,87 @@ class TestAlternatives:
             )
         )
         assert result.alternatives == ()
+
+
+class TestFunctionBodyFailure:
+    async def test_not_found_produces_warning(self, workspace, registry) -> None:
+        """Phase 11 §2.3: not-found function-body response produces a warning.
+
+        The target symbol is deliberately set to a name that does not
+        exist in the file. When the directive requires the body (type
+        hints), the analyst calls ``function-body``, receives a
+        parenthesized not-found marker, and must surface that as a
+        warning on the result rather than letting it reach
+        ``ast.parse`` and produce a silent SyntaxError.
+        """
+        clone_root, cpg_bytes = workspace
+        provider = FakeProvider(
+            ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+        )
+        agent = AnalystAgent()
+        result = await agent.run(
+            AnalystInput(
+                blast=_make_blast("a.py", "missing_function"),
+                recon=_make_recon(cpg_bytes, clone_root / "abc.cpg"),
+                directive="add type hints to every parameter and the return type",
+                registry=registry,
+                provider=provider,
+                model="fake",
+                budget=BudgetTracker(),
+                clone_root=clone_root,
+            )
+        )
+        assert result.status == "success"
+        assert any(
+            "function-body" in warning and "missing_function" in warning
+            for warning in result.warnings
+        ), f"expected warning naming function-body and missing_function, got: {result.warnings}"
+
+    async def test_body_parse_failure_produces_warning(self, workspace, registry) -> None:
+        """Phase 11 §2.1: unparseable body produces a warning.
+
+        The function-body tool is replaced with a stub that returns a
+        string the CPG would never produce, but which is not one of the
+        not-found prefixes. ``ast.parse`` then fails and the analyst
+        must record the specific degradation rather than silently
+        producing a spec with only ``apply_directive``.
+        """
+        from codeguardian.core.agents import analyst as analyst_module
+
+        clone_root, cpg_bytes = workspace
+
+        async def broken_function_body(input_arg: dict[str, object]) -> str:
+            return "def parse(raw) this is not valid python"
+
+        original_call_tool = analyst_module._call_tool
+
+        async def patched_call_tool(inp, name, tool_input):
+            if name == "function-body":
+                return await broken_function_body(tool_input)
+            return await original_call_tool(inp, name, tool_input)
+
+        analyst_module._call_tool = patched_call_tool  # type: ignore[assignment]
+        try:
+            provider = FakeProvider(
+                ['{"files": [{"path": "a.py", "reason": "target"}], "reason": "ok"}']
+            )
+            agent = AnalystAgent()
+            result = await agent.run(
+                AnalystInput(
+                    blast=_make_blast("a.py", "parse"),
+                    recon=_make_recon(cpg_bytes, clone_root / "abc.cpg"),
+                    directive="add type hints to every parameter and the return type",
+                    registry=registry,
+                    provider=provider,
+                    model="fake",
+                    budget=BudgetTracker(),
+                    clone_root=clone_root,
+                )
+            )
+        finally:
+            analyst_module._call_tool = original_call_tool  # type: ignore[assignment]
+
+        assert result.status == "success"
+        assert any("did not parse" in warning for warning in result.warnings), (
+            f"expected parse-failure warning, got: {result.warnings}"
+        )

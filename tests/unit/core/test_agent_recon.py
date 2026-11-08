@@ -520,3 +520,55 @@ class TestReportStatusesExtensions:
         assert "conventions" in statuses
         assert statuses["repo_map"] in ("complete", "partial", "skipped")
         assert statuses["conventions"] in ("complete", "partial", "skipped")
+
+
+class TestDeclaredConstraints:
+    async def test_pyproject_requires_python(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "pyproject.toml").write_text(
+            '[project]\nname = "test"\nrequires-python = ">=3.11"\n',
+            encoding="utf-8",
+        )
+        (root / "main.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        declared = result.artifact["extensions"]["declared"]
+        assert "python" in declared
+        assert declared["python"]["requires_python"] == ">=3.11"
+
+    async def test_pyproject_dependencies(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "pyproject.toml").write_text(
+            "[project]\n"
+            'name = "test"\n'
+            'requires-python = ">=3.9"\n'
+            "dependencies = [\n"
+            '    "urllib3>=1.21",\n'
+            '    "certifi>=2017.4.17",\n'
+            "]\n",
+            encoding="utf-8",
+        )
+        (root / "main.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        result = await ReconAgent().run(
+            ReconInput(
+                repo_url="u",
+                provider="local",
+                commit_hash="c",
+                clone_root=root,
+                cpg_output_dir=tmp_path / "cpg",
+            )
+        )
+        declared = result.artifact["extensions"]["declared"]
+        assert "python" in declared
+        deps = declared["python"].get("dependencies", [])
+        assert any("urllib3" in d for d in deps), deps
+        assert any("certifi" in d for d in deps), deps

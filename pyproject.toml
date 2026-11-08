@@ -123,6 +123,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+"sandtest/*" = ["E402"]
+"sandtest/**/*.py" = ["E402"]
 # Plugin manifests are intentional read-only class-level dicts consumed
 # by the discovery protocol via getattr(cls, "__manifest__"). Annotating
 # them as ClassVar would be technically correct but adds no safety, since

@@ -122,6 +122,11 @@ class TesterResult:
         failure_reason: The reason the last attempt is invalid, or
             None on success.
         attempts: Number of model calls made. 0 on pre-model refusal.
+        test_quality: Quality signals for the generated test file.
+        warnings: Non-fatal findings recorded during the run. Surfaced
+            when the agent could not do its job cleanly but did not
+            fail outright, for example when the ``function-body`` tool
+            returned a not-found response. Empty by default.
     """
 
     test_file: str
@@ -132,6 +137,7 @@ class TesterResult:
     failure_reason: str | None = None
     attempts: int = 0
     test_quality: TestQuality | None = None
+    warnings: tuple[str, ...] = ()
 
 
 class TesterAgent:
@@ -177,6 +183,12 @@ class TesterAgent:
             {"path": input.target_path, "qualified_name": input.target_symbol},
         )
         if _is_not_found(body):
+            _record_tool_failure(
+                input,
+                "function-body",
+                {"path": input.target_path, "qualified_name": input.target_symbol},
+                body,
+            )
             return TesterResult(
                 test_file="",
                 is_refusal=True,
@@ -184,6 +196,9 @@ class TesterAgent:
                 refusal_code="target_missing",
                 refusal_reason=f"function-body returned: {body[:100]}",
                 attempts=0,
+                warnings=(
+                    f"function-body did not find {input.target_symbol!r} in {input.target_path!r}",
+                ),
             )
 
         skeleton = await _call_tool(input, "code-skeleton", {"path": input.target_path})
@@ -265,8 +280,13 @@ class TesterAgent:
                 return _build_success_result(input, second.content, attempts)
             return TesterResult(
                 test_file=second.content,
-                is_refusal=False,
+                is_refusal=True,
                 is_valid=False,
+                refusal_code="tool_unavailable",
+                refusal_reason=(
+                    f"test executed but failed in the sandbox: "
+                    f"{sandbox_failure or 'unknown sandbox failure'}"
+                ),
                 failure_reason=sandbox_failure or "sandbox run failed",
                 attempts=attempts,
                 test_quality=_build_test_quality(input, second.content, run_extras=False),
@@ -274,8 +294,13 @@ class TesterAgent:
 
         return TesterResult(
             test_file=second.content,
-            is_refusal=False,
+            is_refusal=True,
             is_valid=False,
+            refusal_code="directive_ambiguous",
+            refusal_reason=(
+                f"test generation failed validation after {attempts} "
+                f"attempts: {second_reason or 'no reason given'}"
+            ),
             failure_reason=second_reason,
             attempts=attempts,
             test_quality=_build_test_quality(input, second.content, run_extras=False),
@@ -298,14 +323,38 @@ async def _call_model(
     version: str,
     variables: dict[str, str],
 ) -> SourceOutput:
+    """Call the tester model and validate its output.
+
+    A model-unavailability failure is converted to a refusal rather
+    than raised. The tester's output is optional — the writer falls
+    back to the tool characterization test when the tester does not
+    produce one — so a rate-limited or unavailable model should not
+    abort the entire pipeline. Auth failures are not converted because
+    they signal a configuration problem the caller must resolve; they
+    propagate unchanged.
+    """
     prompt_result = render_prompt("tester", version, variables)
-    response, latency_ms = await tracked_model_call(
-        input.provider,
-        prompt_result.rendered,
-        input.model,
-        ModelOptions(),
-        "tester",
-    )
+    try:
+        response, latency_ms = await tracked_model_call(
+            input.provider,
+            prompt_result.rendered,
+            input.model,
+            ModelOptions(),
+            "tester",
+        )
+    except CodeGuardianError as exc:
+        if exc.code in (
+            ErrorCode.MODEL_RATE_LIMITED,
+            ErrorCode.MODEL_UNAVAILABLE,
+            ErrorCode.PROVIDER_UNAVAILABLE,
+        ):
+            return SourceOutput(
+                role="tester",
+                content="",
+                is_refusal=True,
+                refusal_reason=(f"model unavailable: {exc.code.value}: {exc.message[:150]}"),
+            )
+        raise
 
     _record(
         input,
@@ -418,6 +467,50 @@ def _record(
         prompt_role="tester",
         prompt_version=version,
         model_options={"temperature": 0.0},
+    )
+
+
+def _record_tool_failure(
+    input: TesterInput,
+    tool_name: str,
+    tool_input: dict[str, object],
+    tool_output: str,
+) -> None:
+    """Record a failed tool call as a telemetry row.
+
+    Called when ``function-body`` cannot resolve the target. Records a
+    decision_log entry naming the specific failure and a tool_chain
+    entry naming the tool. Uses the same active-store check as
+    ``_record`` so absence of a store is a silent skip.
+
+    This is the Phase 11 section 2.3 fix for the tester.
+    """
+    from codeguardian.core.agents import _store_context
+
+    store = _store_context.get_active_store()
+    if store is None:
+        return
+    record_call(
+        store,
+        role="tester",
+        outcome="refused",
+        refusal_code="target_missing",
+        target_symbol=input.target_symbol or None,
+        decision_log=[
+            {
+                "step": "function_body_lookup",
+                "candidate": None,
+                "verdict": "not_found",
+                "reason": tool_output[:100],
+            }
+        ],
+        tool_chain=[
+            {
+                "tool": tool_name,
+                "input": tool_input,
+                "output_bytes": len(tool_output),
+            }
+        ],
     )
 
 

@@ -31,6 +31,8 @@ from __future__ import annotations
 import ast
 import json
 import re
+import tomllib
+import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -263,6 +265,7 @@ class ReconAgent:
         test_setup = _detect_test_setup(input.clone_root, files)
         build_system, build_command = _detect_build_system(input.clone_root)
         conventions = _read_conventions(input.clone_root, input.conventions_token_budget)
+        declared = _build_declared(input.clone_root)
 
         dependency_status = (
             "complete" if all(lang == "python" for _, lang, _ in files) else "partial"
@@ -273,6 +276,7 @@ class ReconAgent:
             if conventions["agent_files"] or conventions["configs_present"]
             else "skipped"
         )
+        declared_status = "complete" if declared else "skipped"
 
         artifact: dict[str, Any] = {
             "schema_version": "1.1",
@@ -309,6 +313,7 @@ class ReconAgent:
                     "drift_report": "skipped",
                     "repo_map": repo_map_status,
                     "conventions": conventions_status,
+                    "declared": declared_status,
                 },
                 "repo_map": repo_map,
                 "test_frameworks": test_setup["test_frameworks"],
@@ -317,6 +322,7 @@ class ReconAgent:
                 "build_system": build_system,
                 "build_command": build_command,
                 "conventions": conventions,
+                "declared": declared,
                 "file_importance": {rel: round(score, 6) for rel, score in file_importance.items()},
                 "file_token_cost": file_token_cost,
             },
@@ -866,6 +872,255 @@ def _read_conventions(
         if (clone_root / name).exists():
             conventions["configs_present"].append(name)
     return conventions
+
+
+def _build_declared(clone_root: Path) -> dict[str, dict[str, Any]]:
+    """Return structured declarations from project metadata files.
+
+    Each entry in the returned mapping is keyed by the language the
+    metadata governs. The value is the structured subset of that
+    file's content the downstream agents need: version requirements,
+    declared dependencies, lint config presence, type-check config
+    presence, and test config. Files that are absent or fail to parse
+    are omitted from the mapping entirely; a missing file is not an
+    error and does not produce an empty language entry.
+    """
+    declared: dict[str, dict[str, Any]] = {}
+    python = _read_pyproject(clone_root)
+    if python is not None:
+        declared["python"] = python
+    rust = _read_cargo(clone_root)
+    if rust is not None:
+        declared["rust"] = rust
+    javascript = _read_package_json(clone_root)
+    if javascript is not None:
+        declared["javascript"] = javascript
+    go = _read_go_mod(clone_root)
+    if go is not None:
+        declared["go"] = go
+    java = _read_pom(clone_root)
+    if java is not None:
+        declared["java"] = java
+    return declared
+
+
+def _read_pyproject(clone_root: Path) -> dict[str, Any] | None:
+    """Parse ``pyproject.toml`` and return declared constraints.
+
+    Extracts ``requires_python`` and ``dependencies`` from
+    ``[project]``; lint config presence from ``[tool.ruff]`` or
+    ``[tool.black]``; type-check config presence from ``[tool.mypy]``
+    or ``[tool.pyright]``; and ``testpaths`` from
+    ``[tool.pytest.ini_options]`` when present.
+    """
+    path = clone_root / "pyproject.toml"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+
+    result: dict[str, Any] = {}
+    project = data.get("project") or {}
+    if isinstance(project, dict):
+        requires_python = project.get("requires-python")
+        if isinstance(requires_python, str):
+            result["requires_python"] = requires_python
+        dependencies = project.get("dependencies")
+        if isinstance(dependencies, list):
+            result["dependencies"] = [str(d) for d in dependencies if isinstance(d, str)]
+
+    tool = data.get("tool") or {}
+    if isinstance(tool, dict):
+        lint_parts: list[str] = []
+        if "ruff" in tool:
+            lint_parts.append("ruff")
+        if "black" in tool:
+            lint_parts.append("black")
+        if lint_parts:
+            result["lint_config"] = sorted(lint_parts)
+
+        type_parts: list[str] = []
+        if "mypy" in tool:
+            type_parts.append("mypy")
+        if "pyright" in tool:
+            type_parts.append("pyright")
+        if type_parts:
+            result["type_check_config"] = sorted(type_parts)
+
+        pytest_section = tool.get("pytest")
+        if isinstance(pytest_section, dict):
+            ini_options = pytest_section.get("ini_options")
+            if isinstance(ini_options, dict):
+                testpaths = ini_options.get("testpaths")
+                if isinstance(testpaths, list):
+                    result["test_config"] = {
+                        "testpaths": [str(p) for p in testpaths if isinstance(p, str)]
+                    }
+
+    return result or None
+
+
+def _read_cargo(clone_root: Path) -> dict[str, Any] | None:
+    """Parse ``Cargo.toml`` and return declared constraints.
+
+    Extracts ``rust_version`` from ``[package].rust-version`` and both
+    ``dependencies`` and ``dev_dependencies`` from their respective
+    sections.
+    """
+    path = clone_root / "Cargo.toml"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+
+    result: dict[str, Any] = {}
+    package = data.get("package") or {}
+    if isinstance(package, dict):
+        rust_version = package.get("rust-version")
+        if isinstance(rust_version, str):
+            result["rust_version"] = rust_version
+
+    dependencies = data.get("dependencies")
+    if isinstance(dependencies, dict):
+        result["dependencies"] = sorted(str(k) for k in dependencies)
+
+    dev_dependencies = data.get("dev-dependencies")
+    if isinstance(dev_dependencies, dict):
+        result["dev_dependencies"] = sorted(str(k) for k in dev_dependencies)
+
+    return result or None
+
+
+def _read_package_json(clone_root: Path) -> dict[str, Any] | None:
+    """Parse ``package.json`` and return declared constraints.
+
+    Extracts ``engines.node`` when declared, both dependency sections,
+    and a boolean fact for whether a lint config and type-check config
+    are present (either inline as ``eslintConfig``, or as a
+    ``tsconfig.json`` file at the repo root).
+    """
+    path = clone_root / "package.json"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+        data = json.loads(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    result: dict[str, Any] = {}
+    engines = data.get("engines")
+    if isinstance(engines, dict):
+        node_version = engines.get("node")
+        if isinstance(node_version, str):
+            result["node_version"] = node_version
+
+    dependencies = data.get("dependencies")
+    if isinstance(dependencies, dict):
+        result["dependencies"] = sorted(str(k) for k in dependencies)
+
+    dev_dependencies = data.get("devDependencies")
+    if isinstance(dev_dependencies, dict):
+        result["dev_dependencies"] = sorted(str(k) for k in dev_dependencies)
+
+    lint_present: list[str] = []
+    if "eslintConfig" in data:
+        lint_present.append("eslintConfig")
+    if (clone_root / ".eslintrc").is_file():
+        lint_present.append(".eslintrc")
+    if (clone_root / ".eslintrc.json").is_file():
+        lint_present.append(".eslintrc.json")
+    if lint_present:
+        result["lint_config"] = sorted(lint_present)
+
+    if (clone_root / "tsconfig.json").is_file():
+        result["type_check_config"] = ["tsconfig.json"]
+
+    return result or None
+
+
+def _read_go_mod(clone_root: Path) -> dict[str, Any] | None:
+    """Parse ``go.mod`` and return declared constraints.
+
+    Extracts the ``go`` directive version line and both the block and
+    single-line forms of the ``require`` section.
+    """
+    path = clone_root / "go.mod"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    result: dict[str, Any] = {}
+    go_match = re.search(r"^go\s+(\S+)\s*$", text, re.MULTILINE)
+    if go_match:
+        result["go_version"] = go_match.group(1)
+
+    requires: list[str] = []
+    block = re.search(r"^require\s*\((.*?)^\)", text, re.MULTILINE | re.DOTALL)
+    if block:
+        for line in block.group(1).splitlines():
+            line = line.strip()
+            if not line or line.startswith("//"):
+                continue
+            parts = line.split()
+            if parts:
+                requires.append(parts[0])
+    else:
+        for match in re.finditer(r"^require\s+(\S+)\s+\S+", text, re.MULTILINE):
+            requires.append(match.group(1))
+    if requires:
+        result["dependencies"] = sorted(requires)
+
+    return result or None
+
+
+def _read_pom(clone_root: Path) -> dict[str, Any] | None:
+    """Parse ``pom.xml`` and return declared constraints.
+
+    Extracts the Java compiler source version from the standard Maven
+    properties location, and the artifactId of every declared
+    dependency. The Maven POM namespace is required; a POM without it
+    will not match any element and the function returns None.
+    """
+    path = clone_root / "pom.xml"
+    if not path.is_file():
+        return None
+    try:
+        tree = ET.parse(path)
+    except (OSError, ET.ParseError):
+        return None
+
+    root = tree.getroot()
+    namespace = "http://maven.apache.org/POM/4.0.0"
+    ns = {"m": namespace}
+
+    result: dict[str, Any] = {}
+    java_version = root.find(".//m:properties/m:maven.compiler.source", ns)
+    if java_version is None:
+        java_version = root.find(".//m:properties/m:java.version", ns)
+    if java_version is not None and java_version.text:
+        result["java_version"] = java_version.text.strip()
+
+    dependencies: list[str] = []
+    for dep in root.findall(".//m:dependencies/m:dependency", ns):
+        artifact = dep.find("m:artifactId", ns)
+        if artifact is not None and artifact.text:
+            dependencies.append(artifact.text.strip())
+    if dependencies:
+        result["dependencies"] = sorted(dependencies)
+
+    return result or None
 
 
 def _safe_read(path: Path) -> str:

@@ -8,6 +8,10 @@ from collections.abc import AsyncIterator
 import httpx
 
 from codeguardian.core.errors import CodeGuardianError, ErrorCode
+from codeguardian.core.plugins.permissions import (
+    extract_hosts_from_url,
+    model_inference_scope,
+)
 from codeguardian.interfaces.model import (
     ModelChunk,
     ModelInfo,
@@ -44,6 +48,7 @@ class OpenAIProvider:
             )
         self._api_key = api_key
         self._base_url = (base_url or _OPENAI_BASE_URL).rstrip("/")
+        self._allowed_hosts = extract_hosts_from_url(self._base_url)
         self._transport = transport
         self._timeout = timeout
 
@@ -55,25 +60,29 @@ class OpenAIProvider:
     ) -> ModelResponse:
         """Run a single non-streaming completion."""
         payload = self._request_payload(prompt, model, options, stream=False)
-        async with self._make_client() as client:
-            try:
-                response = await client.post(
-                    "/chat/completions",
-                    json=payload,
-                    headers=self._request_headers(),
-                )
-            except httpx.TimeoutException as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_TIMEOUT,
-                    f"{self._provider_name} request timed out: {exc}",
-                ) from exc
-            except httpx.ConnectError as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_UNREACHABLE,
-                    f"{self._provider_name} is unreachable: {exc}",
-                ) from exc
-            _raise_for_status(response.status_code, response.text, self._provider_name)
-            data = response.json()
+        with model_inference_scope(
+            self._allowed_hosts,
+            provider_name=self._provider_name,
+        ):
+            async with self._make_client() as client:
+                try:
+                    response = await client.post(
+                        "/chat/completions",
+                        json=payload,
+                        headers=self._request_headers(),
+                    )
+                except httpx.TimeoutException as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_TIMEOUT,
+                        f"{self._provider_name} request timed out: {exc}",
+                    ) from exc
+                except httpx.ConnectError as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_UNREACHABLE,
+                        f"{self._provider_name} is unreachable: {exc}",
+                    ) from exc
+                _raise_for_status(response.status_code, response.text, self._provider_name)
+                data = response.json()
         return self._parse_response(data, model)
 
     def stream(
@@ -106,54 +115,60 @@ class OpenAIProvider:
         any_text = False
         reasoning_chars = 0
         final_finish_reason = "stop"
-        async with self._make_client() as client:
-            try:
-                async with client.stream(
-                    "POST",
-                    "/chat/completions",
-                    json=payload,
-                    headers=self._request_headers(),
-                ) as response:
-                    if not response.is_success:
-                        body = (await response.aread()).decode("utf-8", "replace")
-                        _raise_for_status(response.status_code, body, self._provider_name)
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        raw = line[len("data: ") :].strip()
-                        if not raw:
-                            continue
-                        if raw == "[DONE]":
-                            break
-                        try:
-                            event = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        choices = event.get("choices") or []
-                        if not choices:
-                            continue
-                        choice = choices[0]
-                        finish_reason = choice.get("finish_reason")
-                        if finish_reason:
-                            final_finish_reason = str(finish_reason)
-                        delta = choice.get("delta") or {}
-                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-                        if isinstance(reasoning, str) and reasoning:
-                            reasoning_chars += len(reasoning)
-                        content = delta.get("content") or ""
-                        if content:
-                            any_text = True
-                            yield ModelChunk(text=content, done=False)
-            except httpx.TimeoutException as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_TIMEOUT,
-                    f"{self._provider_name} stream timed out: {exc}",
-                ) from exc
-            except httpx.ConnectError as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_UNREACHABLE,
-                    f"{self._provider_name} is unreachable: {exc}",
-                ) from exc
+        with model_inference_scope(
+            self._allowed_hosts,
+            provider_name=self._provider_name,
+        ):
+            async with self._make_client() as client:
+                try:
+                    async with client.stream(
+                        "POST",
+                        "/chat/completions",
+                        json=payload,
+                        headers=self._request_headers(),
+                    ) as response:
+                        if not response.is_success:
+                            body = (await response.aread()).decode("utf-8", "replace")
+                            _raise_for_status(response.status_code, body, self._provider_name)
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            raw = line[len("data: ") :].strip()
+                            if not raw:
+                                continue
+                            if raw == "[DONE]":
+                                break
+                            try:
+                                event = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            choices = event.get("choices") or []
+                            if not choices:
+                                continue
+                            choice = choices[0]
+                            finish_reason = choice.get("finish_reason")
+                            if finish_reason:
+                                final_finish_reason = str(finish_reason)
+                            delta = choice.get("delta") or {}
+                            reasoning = (
+                                delta.get("reasoning_content") or delta.get("reasoning") or ""
+                            )
+                            if isinstance(reasoning, str) and reasoning:
+                                reasoning_chars += len(reasoning)
+                            content = delta.get("content") or ""
+                            if content:
+                                any_text = True
+                                yield ModelChunk(text=content, done=False)
+                except httpx.TimeoutException as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_TIMEOUT,
+                        f"{self._provider_name} stream timed out: {exc}",
+                    ) from exc
+                except httpx.ConnectError as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_UNREACHABLE,
+                        f"{self._provider_name} is unreachable: {exc}",
+                    ) from exc
 
         if not any_text and final_finish_reason == "length":
             raise _budget_exhausted(
@@ -164,21 +179,25 @@ class OpenAIProvider:
 
     async def list_models(self) -> list[ModelInfo]:
         """Ask the provider which models it currently serves."""
-        async with self._make_client() as client:
-            try:
-                response = await client.get("/models", headers=self._request_headers())
-            except httpx.TimeoutException as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_TIMEOUT,
-                    f"{self._provider_name} model list timed out: {exc}",
-                ) from exc
-            except httpx.ConnectError as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_UNREACHABLE,
-                    f"{self._provider_name} is unreachable: {exc}",
-                ) from exc
-            _raise_for_status(response.status_code, response.text, self._provider_name)
-            data = response.json()
+        with model_inference_scope(
+            self._allowed_hosts,
+            provider_name=self._provider_name,
+        ):
+            async with self._make_client() as client:
+                try:
+                    response = await client.get("/models", headers=self._request_headers())
+                except httpx.TimeoutException as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_TIMEOUT,
+                        f"{self._provider_name} model list timed out: {exc}",
+                    ) from exc
+                except httpx.ConnectError as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_UNREACHABLE,
+                        f"{self._provider_name} is unreachable: {exc}",
+                    ) from exc
+                _raise_for_status(response.status_code, response.text, self._provider_name)
+                data = response.json()
         result: list[ModelInfo] = []
         for item in data.get("data", []):
             model_id = item.get("id")

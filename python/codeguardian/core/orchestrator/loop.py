@@ -46,9 +46,10 @@ the orchestrator can persist them.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,12 +58,14 @@ from typing import Any, Literal, Protocol
 from codeguardian.core.errors import CodeGuardianError, ErrorCode
 from codeguardian.core.storage.sqlite_store import SQLiteStore
 
+from .cancellation import CancellationRequested
 from .checkpoint_supervisor import CheckpointSupervisor
 from .checkpointing import write_checkpoint
 from .evidence import EvidenceBus, HotEvent
 from .phase_gates import PhaseContext, get_gate
 from .phase_graph import PhaseGraph
 from .registry import AgentRegistry, SlotResolution, SlotResolver
+from .runtime_wiring import PhaseOutcome, PhaseRuntime, RuntimeWiring
 
 __all__ = [
     "AuditWriter",
@@ -218,7 +221,15 @@ def _now_iso() -> str:
 
 
 def _audit_phase_for(slot_name: str) -> str:
-    """Return the schema-valid audit phase name for a slot."""
+    """Return the schema-valid audit phase name for a slot.
+
+    The audit schema ``phase`` field is an enum with eleven fixed
+    values. A slot not named in ``_AUDIT_PHASE_MAP`` falls back to
+    ``"output"``, the schema's generic phase. The agent name, by
+    contrast, is recorded verbatim (see ``_build_audit_entry``); it
+    is validated at registration time and is not schema-constrained
+    to a fixed enum.
+    """
     return _AUDIT_PHASE_MAP.get(slot_name, "output")
 
 
@@ -243,20 +254,32 @@ def _choose_next(
     return None
 
 
-def _pending_after(graph: PhaseGraph, current: str) -> tuple[str, ...]:
-    """Return every slot after ``current`` in declaration order.
+def _pending_after(
+    graph: PhaseGraph,
+    current: str,
+    completed: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Return every slot reachable from ``current`` but not yet done.
 
-    This is a hint for the checkpoint, not a strict plan. The loop
-    still walks transitions from ``current``; the checkpoint's
-    ``pending_phases`` records what the graph declared was left, so a
-    reader sees a stable view of the graph's shape.
+    Uses graph reachability, not declaration-order suffix, so a
+    branched graph reports only the slots that can actually still run
+    from the current position. The result preserves the slot
+    declaration order for a stable presentation.
     """
-    names = graph.slot_names()
-    try:
-        idx = names.index(current)
-    except ValueError:
-        return names
-    return names[idx + 1 :]
+    reachable: set[str] = set()
+    stack: list[str] = [dst for dst in graph.transitions.get(current, ()) if dst is not None]
+    while stack:
+        node = stack.pop()
+        if node in reachable:
+            continue
+        reachable.add(node)
+        for dst in graph.transitions.get(node, ()):
+            if dst is not None and dst not in reachable:
+                stack.append(dst)
+    completed_set = set(completed)
+    return tuple(
+        name for name in graph.slot_names() if name in reachable and name not in completed_set
+    )
 
 
 def _is_paused(store: SQLiteStore, run_id: str) -> bool:
@@ -283,17 +306,31 @@ def _build_audit_entry(
     agent_name: str,
     execution: SlotExecution,
     checkpoint_id: str | None,
+    outcome: PhaseOutcome | None = None,
 ) -> dict[str, Any]:
-    """Compose the schema-shaped audit entry for one phase."""
+    """Compose the schema-shaped audit entry for one phase.
+
+    The agent name is recorded verbatim. It is validated at
+    ``AgentSpec`` registration time by the registry pattern, so this
+    function does not re-validate it. A new agent registered after
+    Phase 13 appears in the audit trail with its actual name, not a
+    fallback.
+    """
     result: dict[str, Any] = {
         "status": "success" if execution.ok else "failure",
     }
     if execution.error is not None:
         result["error"] = execution.error.message[:500]
+    if outcome is not None and outcome.rolled_back:
+        result["rolled_back"] = list(outcome.rolled_back)
+    if outcome is not None and outcome.rollback_refused:
+        result["rollback_refused"] = [
+            {"path": ref.rel_path, "reason": ref.reason} for ref in outcome.rollback_refused
+        ]
     return {
         "run_id": run_id,
         "phase": _audit_phase_for(slot_name),
-        "agent": agent_name if agent_name in _AUDIT_AGENT_NAMES else "orchestrator",
+        "agent": agent_name,
         "result": result,
         "checkpoint_id": checkpoint_id,
     }
@@ -306,6 +343,7 @@ _AUDIT_AGENT_NAMES = frozenset(
         "analyst",
         "tester",
         "writer",
+        "sandbox_verify",
         "correctness_verifier",
         "security_verifier",
         "contract_verifier",
@@ -314,6 +352,9 @@ _AUDIT_AGENT_NAMES = frozenset(
         "cli",
     }
 )
+
+
+_WIRING_AUTO: Any = object()
 
 
 def _seed_registered_agents(
@@ -373,12 +414,15 @@ async def run_loop(
     repo_url: str,
     commit_hash: str,
     clone_root: Path,
+    repo_root: Path | None = None,
+    config_home: Path | None = None,
     context_budget: Any | None = None,
     side_effect_slots: frozenset[str] = frozenset({"sandbox_verify"}),
     observer: LoopObserver | None = None,
     resume_after: str | None = None,
     initial_results: Mapping[str, Any] | None = None,
     initial_completed: tuple[str, ...] = (),
+    wiring: Any = _WIRING_AUTO,
 ) -> LoopResult:
     """Walk ``graph`` once.
 
@@ -397,6 +441,10 @@ async def run_loop(
         repo_url: The repository URL.
         commit_hash: The repository commit.
         clone_root: The clone root path.
+        repo_root: Optional repository or installation root granted as a
+            trusted read-only path outside ``clone_root``.
+        config_home: Optional configuration home directory granted as a
+            trusted read-only path outside ``clone_root``.
         context_budget: Optional per-run context budget. When the
             budget reports REFUSE after a phase, the walk stops with
             ``stop_reason="context_overflow"``.
@@ -409,6 +457,14 @@ async def run_loop(
             must contain every prior slot's output.
         initial_results: Prior slot outputs, for resume.
         initial_completed: Prior completed phase names, for resume.
+        wiring: A ``RuntimeWiring`` that connects the loop to the
+            verifier stack, deterministic gate, context engine,
+            capability attenuation, consent gate, telemetry, workspace
+            snapshot, and audit anchor. When omitted, a default wiring
+            is constructed from ``store``, ``run_id``, ``repo_root``,
+            and ``config_home``. Pass ``wiring=None`` explicitly to
+            disable wiring entirely, which preserves the pre-fix
+            behaviour for tests that want it.
 
     Returns:
         A ``LoopResult``. Never raises on a phase failure; the failure
@@ -416,6 +472,15 @@ async def run_loop(
         (missing required slot, ambiguous resolution).
     """
     from codeguardian.core.providers.fallback_router import side_effect_guard
+
+    if wiring is _WIRING_AUTO:
+        wiring = RuntimeWiring(
+            store=store,
+            run_id=run_id,
+            repo_root=repo_root,
+            config_home=config_home,
+            audit_writer=audit_writer,
+        )
 
     resolution = resolver.resolve(graph)
     resolved = resolution.resolved
@@ -430,6 +495,7 @@ async def run_loop(
     checkpoint_ids: list[str] = []
     audit_hashes: list[str] = []
     all_events: list[HotEvent] = []
+    entries_for_anchor: list[dict[str, Any]] = []
 
     if resume_after is not None:
         current = _choose_next(graph, resume_after, resolved)
@@ -438,11 +504,18 @@ async def run_loop(
 
     stop_reason: StopReason = "completed"
     final_error: CodeGuardianError | None = None
+    cancelled_exception: asyncio.CancelledError | None = None
 
     while current is not None:
         if _is_paused(store, run_id):
             stop_reason = "paused"
             break
+
+        if wiring is not None:
+            token = getattr(wiring, "_cancellation_token", None)
+            if token is not None and token.is_set():
+                stop_reason = "paused"
+                break
 
         if context_budget is not None:
             try:
@@ -473,6 +546,7 @@ async def run_loop(
         output: Any = None
         phase_error: CodeGuardianError | None = None
         ok = True
+        cancelled = False
 
         entry_context = LoopContext(
             run_id=run_id,
@@ -485,6 +559,13 @@ async def run_loop(
             evidence_bus=bus,
             context_budget=context_budget,
         )
+
+        runtime = PhaseRuntime(slot=slot)
+        if wiring is not None:
+            runtime = wiring.before_phase(slot, entry_context)
+            if runtime.context_refused:
+                stop_reason = "context_overflow"
+                break
 
         try:
             gate_pair.entry(
@@ -500,11 +581,22 @@ async def run_loop(
 
             agent_input = input_factory.build(current, entry_context)
 
-            if current in side_effect_slots:
-                with side_effect_guard():
-                    output = await agent_spec.agent.run(agent_input)
+            if wiring is not None:
+                if current in side_effect_slots:
+                    with side_effect_guard():
+                        output = await wiring.around_agent(
+                            slot, agent_spec, agent_input, runtime, entry_context
+                        )
+                else:
+                    output = await wiring.around_agent(
+                        slot, agent_spec, agent_input, runtime, entry_context
+                    )
             else:
-                output = await agent_spec.agent.run(agent_input)
+                if current in side_effect_slots:
+                    with side_effect_guard():
+                        output = await agent_spec.agent.run(agent_input)
+                else:
+                    output = await agent_spec.agent.run(agent_input)
 
             results[current] = output
 
@@ -517,6 +609,23 @@ async def run_loop(
                     results=dict(results),
                     evidence=bus.peek(),
                 )
+            )
+        except CancellationRequested as exc:
+            ok = False
+            cancelled = True
+            phase_error = CodeGuardianError(
+                ErrorCode.SYS_INTERNAL,
+                f"phase {current!r} cancelled: {exc.reason}",
+                details={"slot": current, "reason": exc.reason},
+            )
+        except asyncio.CancelledError as exc:
+            ok = False
+            cancelled = True
+            cancelled_exception = exc
+            phase_error = CodeGuardianError(
+                ErrorCode.SYS_INTERNAL,
+                f"phase {current!r} cancelled",
+                details={"slot": current},
             )
         except CodeGuardianError as exc:
             ok = False
@@ -543,7 +652,7 @@ async def run_loop(
                     state={},
                     artifacts={},
                     completed_phases=(*completed, current),
-                    pending_phases=_pending_after(graph, current),
+                    pending_phases=_pending_after(graph, current, (*completed, current)),
                     retries=0,
                 )
                 checkpoint_ids.append(checkpoint_id)
@@ -563,37 +672,73 @@ async def run_loop(
             checkpoint_id=checkpoint_id,
         )
 
-        audit_hash: str | None = None
-        try:
-            audit_hash = audit_writer(
-                _build_audit_entry(
-                    run_id=run_id,
-                    slot_name=current,
-                    agent_name=agent_spec.name,
-                    execution=execution,
-                    checkpoint_id=checkpoint_id,
-                )
-            )
-            audit_hashes.append(audit_hash)
-        except Exception:
-            pass
-
-        execution = replace(execution, audit_hash=audit_hash)
-        executions.append(execution)
-
         if observer is not None:
             with contextlib.suppress(Exception):
                 observer(current, execution, entry_context)
 
-        if not ok:
+        post_observer = bus.drain()
+        if post_observer:
+            all_events.extend(post_observer)
+            execution = replace(execution, events=drained + post_observer)
+
+        outcome = PhaseOutcome()
+        if wiring is not None:
+            try:
+                outcome = await wiring.after_phase(slot, execution, runtime, entry_context)
+            except Exception as exc:
+                executions.append(execution)
+                final_error = CodeGuardianError(
+                    ErrorCode.SYS_INTERNAL,
+                    f"wiring.after_phase failed: {exc}",
+                    details={"slot": current},
+                )
+                stop_reason = "failed"
+                break
+
+        if ok:
+            completed.append(current)
+
+        audit_hash: str | None = None
+        try:
+            audit_entry = _build_audit_entry(
+                run_id=run_id,
+                slot_name=current,
+                agent_name=agent_spec.name,
+                execution=execution,
+                checkpoint_id=checkpoint_id,
+                outcome=outcome,
+            )
+            audit_hash = audit_writer(audit_entry)
+            audit_hashes.append(audit_hash)
+            entries_for_anchor.append({**audit_entry, "entry_hash": audit_hash})
+        except CodeGuardianError as exc:
+            execution = replace(execution, audit_hash=None)
+            executions.append(execution)
+            final_error = exc
             stop_reason = "failed"
+            break
+        except Exception as exc:
+            execution = replace(execution, audit_hash=None)
+            executions.append(execution)
+            final_error = CodeGuardianError(
+                ErrorCode.SYS_INTERNAL,
+                f"audit write failed: {exc}",
+                details={"slot": current},
+            )
+            stop_reason = "failed"
+            break
+
+        execution = replace(execution, audit_hash=audit_hash)
+        executions.append(execution)
+
+        if not ok:
+            stop_reason = "paused" if cancelled else "failed"
             final_error = phase_error
             break
 
-        completed.append(current)
         current = _choose_next(graph, current, resolved)
 
-    return LoopResult(
+    loop_result = LoopResult(
         run_id=run_id,
         graph_name=graph.name,
         completed_phases=tuple(completed),
@@ -605,3 +750,11 @@ async def run_loop(
         error=final_error,
         stop_reason=stop_reason,
     )
+
+    if wiring is not None:
+        await wiring.after_run(loop_result, entries_for_anchor)
+
+    if cancelled_exception is not None:
+        raise cancelled_exception
+
+    return loop_result

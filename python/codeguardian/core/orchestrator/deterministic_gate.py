@@ -44,6 +44,7 @@ from codeguardian.core.agents._verifier_common import (
     ExecutionOutcome,
     SandboxExecutor,
 )
+from codeguardian.core.errors import CodeGuardianError, ErrorCode
 
 __all__ = [
     "ApplyFn",
@@ -255,6 +256,96 @@ def _run_characterization_test(
     )
 
 
+_MODE_SYMLINK = 0o120000
+_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
+def _normalize_diff_path(raw: str) -> str | None:
+    """Return the normalized path, or None for /dev/null."""
+    stripped = raw.strip()
+    if not stripped or stripped == "/dev/null":
+        return None
+    if stripped.startswith('"') and stripped.endswith('"') and len(stripped) >= 2:
+        stripped = stripped[1:-1]
+    if stripped.startswith(("a/", "b/")):
+        stripped = stripped[2:]
+    normalized = stripped.replace("\\", "/")
+    if normalized.startswith("/"):
+        raise CodeGuardianError(
+            ErrorCode.SYS_INVARIANT_VIOLATED,
+            f"diff target path is absolute: {raw!r}",
+            details={"path": raw},
+        )
+    if _DRIVE_RE.match(normalized):
+        raise CodeGuardianError(
+            ErrorCode.SYS_INVARIANT_VIOLATED,
+            f"diff target path is drive-qualified: {raw!r}",
+            details={"path": raw},
+        )
+    parts: list[str] = []
+    for part in normalized.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            raise CodeGuardianError(
+                ErrorCode.SYS_INVARIANT_VIOLATED,
+                f"diff target path escapes the root: {raw!r}",
+                details={"path": raw},
+            )
+        parts.append(part)
+    if not parts:
+        raise CodeGuardianError(
+            ErrorCode.SYS_INVARIANT_VIOLATED,
+            f"diff target path is empty after normalization: {raw!r}",
+            details={"path": raw},
+        )
+    return "/".join(parts)
+
+
+def parse_diff_paths(diff: str) -> tuple[str, ...]:
+    """Return every target path in a unified diff.
+
+    Parses the ``---`` and ``+++`` lines, rejects absolute paths,
+    drive-qualified paths, path traversal, and symlink creation or
+    modification (mode 120000). Raises
+    ``SYS_INVARIANT_VIOLATED`` on a rejected path so the gate fails
+    before ``git apply`` ever sees the diff.
+    """
+    paths: set[str] = set()
+    for raw_line in diff.splitlines():
+        line = raw_line.rstrip("\r\n")
+        if line.startswith(("new file mode ", "deleted file mode ")):
+            try:
+                mode = int(line.rsplit(" ", 1)[1], 8)
+            except (ValueError, IndexError):
+                continue
+            if mode == _MODE_SYMLINK:
+                raise CodeGuardianError(
+                    ErrorCode.SYS_INVARIANT_VIOLATED,
+                    f"diff creates or deletes a symlink: {line!r}",
+                    details={"line": line},
+                )
+            continue
+        if line.startswith(("new mode ", "old mode ")):
+            try:
+                mode = int(line.rsplit(" ", 1)[1], 8)
+            except (ValueError, IndexError):
+                continue
+            if mode == _MODE_SYMLINK:
+                raise CodeGuardianError(
+                    ErrorCode.SYS_INVARIANT_VIOLATED,
+                    f"diff modifies a file with symlink mode: {line!r}",
+                    details={"line": line},
+                )
+            continue
+        if line.startswith(("--- ", "+++ ")):
+            payload = line[4:].split("\t", 1)[0]
+            path = _normalize_diff_path(payload)
+            if path is not None:
+                paths.add(path)
+    return tuple(sorted(paths))
+
+
 def deterministic_gate(
     *,
     executor: SandboxExecutor | None,
@@ -327,6 +418,30 @@ def deterministic_gate(
             stderr_tail="empty diff",
             diff_hash=diff_hash,
         )
+
+    try:
+        parsed_paths = parse_diff_paths(diff)
+    except CodeGuardianError as exc:
+        checks.append(
+            CheckOutcome(
+                name="diff path parse",
+                status="fail",
+                detail=exc.message,
+            )
+        )
+        return DeterministicGateResult(
+            passed=False,
+            checks=tuple(checks),
+            stderr_tail=exc.message,
+            diff_hash=diff_hash,
+        )
+    checks.append(
+        CheckOutcome(
+            name="diff path parse",
+            status="pass",
+            detail=f"{len(parsed_paths)} target path(s)",
+        )
+    )
 
     apply_check = _run_git_apply_check(
         executor,

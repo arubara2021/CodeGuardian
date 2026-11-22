@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -349,10 +350,43 @@ class _DeepTestInputFactory:
             return "unknown"
 
     def _skeleton(self, context: LoopContext) -> str:
+        """Return a signature-only skeleton of the target file.
+
+        Parses the target file with ``ast`` and emits one line per
+        top-level function or class. Returns an empty string when the
+        target file is missing or unparseable, so the phase still runs
+        at the cost of a less informative prompt.
+        """
         recon = context.results.get("recon")
         if recon is None:
             return ""
-        return ""
+        target_file = self._clone_root / self._target.candidate.path
+        if not target_file.is_file():
+            return ""
+        try:
+            import ast
+
+            source = target_file.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+        except (OSError, SyntaxError):
+            return ""
+        lines: list[str] = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                args = ", ".join(a.arg for a in node.args.args)
+                ret = ""
+                if node.returns is not None:
+                    try:
+                        ret = f" -> {ast.unparse(node.returns)}"
+                    except Exception:
+                        ret = ""
+                prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+                lines.append(f"{prefix} {node.name}({args}){ret}: ...")
+            elif isinstance(node, ast.ClassDef):
+                bases = ", ".join(ast.unparse(b) for b in node.bases) if node.bases else ""
+                suffix = f"({bases})" if bases else ""
+                lines.append(f"class {node.name}{suffix}: ...")
+        return "\n".join(lines)
 
     def _characterization_test(self) -> str:
         path = self._clone_root / self._characterization_test_path
@@ -382,6 +416,24 @@ class _DeepTestInputFactory:
             budget=self._budget,
             clone_root=self._clone_root,
         )
+
+    def close(self) -> None:
+        """Release the CPG handle and reset the runtime context vars.
+
+        Called by ``run_pipeline`` once the orchestrator returns.
+        Idempotent: a second call is a no-op.
+        """
+        self._cpg_handle = None
+        try:
+            from codeguardian.core.plugins.context_runtime import (
+                _CURRENT_CLONE_ROOT,
+                _CURRENT_CPG,
+            )
+
+            _CURRENT_CPG.set(None)
+            _CURRENT_CLONE_ROOT.set(None)
+        except Exception:
+            pass
 
 
 def _register_agents(
@@ -543,6 +595,10 @@ async def _run_pipeline_via_orchestrator(
     observer = _DeepTestObserver()
     audit_writer = _RecordingAuditWriter()
 
+    codeguardian_root = Path(__file__).resolve().parents[2]
+    env_home = os.environ.get("CODEGUARDIAN_HOME")
+    config_home = Path(env_home) if env_home else Path.home() / ".codeguardian"
+
     orchestrator = LangGraphOrchestrator(
         store=store,
         registry=agent_registry,
@@ -550,6 +606,9 @@ async def _run_pipeline_via_orchestrator(
         audit_writer=audit_writer,
         input_factory=input_factory,
         artifact_root=clone_root.parent / "artifacts",
+        clone_root=clone_root,
+        repo_root=codeguardian_root,
+        config_home=config_home,
         observer=observer,
     )
 
@@ -608,6 +667,8 @@ def _write_tool_characterization(clone: Path, target: RankedTarget) -> Path:
     if value_comparable:
         header += (
             "\n\n"
+            f"_EXPECTED_VALUE_JSON = {expected_value_json!r}\n"
+            "\n\n"
             f"def test_value_{safe_name}():\n"
             "    result = _call_target()\n"
             "    import json\n"
@@ -652,9 +713,10 @@ async def run_pipeline(
     target_file = clone_root / target_path
     original_source = target_file.read_text(encoding="utf-8")
 
+    factory: _DeepTestInputFactory | None = None
     with _store_context.active_store(store):
         try:
-            run_result, observer, _factory, _audit_writer = await _run_pipeline_via_orchestrator(
+            run_result, observer, factory, _audit_writer = await _run_pipeline_via_orchestrator(
                 session=session,
                 router=router,
                 provider=provider,
@@ -679,6 +741,9 @@ async def run_pipeline(
                 fault_injection=None,
                 telemetry_rows=_count_agent_calls(store),
             )
+        finally:
+            if factory is not None:
+                factory.close()
 
         stages = list(observer.to_stages())
 

@@ -56,6 +56,25 @@ __all__ = [
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
+
+def _is_async_callable(fn: object) -> bool:
+    """Return True when ``fn`` resolves to an async function.
+
+    Handles bound methods, plain functions, ``functools.partial``-
+    wrapped async functions (via ``.func``), and callable instances
+    whose ``__call__`` is async. ``inspect.iscoroutinefunction``
+    alone misses the last two on some Python versions.
+    """
+    if not callable(fn):
+        return False
+    if inspect.iscoroutinefunction(fn):
+        return True
+    inner = getattr(fn, "func", None)
+    if inner is not None and inspect.iscoroutinefunction(inner):
+        return True
+    return bool(callable(fn) and inspect.iscoroutinefunction(fn.__call__))  # type: ignore[attr-defined]
+
+
 _VALID_BACKENDS: frozenset[str] = frozenset({"in-process", "cli", "acp", "openai-api"})
 
 
@@ -172,6 +191,19 @@ class AgentSpec:
                     "agent_name": agent_name,
                 },
             )
+        run = getattr(self.agent, "run", None)
+        if run is None or not callable(run):
+            raise CodeGuardianError(
+                ErrorCode.SYS_INVARIANT_VIOLATED,
+                f"agent {self.name!r} has no callable run method",
+                details={"name": self.name},
+            )
+        if not _is_async_callable(run):
+            raise CodeGuardianError(
+                ErrorCode.SYS_INVARIANT_VIOLATED,
+                f"agent {self.name!r} declares a synchronous run method; run must be async",
+                details={"name": self.name},
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,8 +257,23 @@ class AgentRegistry:
         self._specs[spec.name] = spec
         self._order.append(spec.name)
 
-    def unregister(self, name: str) -> None:
-        """Remove an agent spec. No-op if not registered."""
+    async def unregister(self, name: str) -> None:
+        """Remove an agent spec and drain its session state.
+
+        Calls ``agent.drain()`` when present, else ``agent.close()``.
+        Both may be sync or async. A no-op when the name is not
+        registered or when the agent exposes neither method.
+        """
+        spec = self._specs.get(name)
+        if spec is None:
+            return
+        drain = getattr(spec.agent, "drain", None)
+        close = getattr(spec.agent, "close", None)
+        cleanup = drain if callable(drain) else close
+        if callable(cleanup):
+            result = cleanup()
+            if inspect.isawaitable(result):
+                await result
         self._specs.pop(name, None)
         if name in self._order:
             self._order.remove(name)

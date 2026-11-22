@@ -111,6 +111,33 @@ _AUDIT_AGENT_NAMES: frozenset[str] = frozenset(
 
 _AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
+_audit_hook_installed = False
+
+
+def _ensure_audit_hook() -> None:
+    """Install the Phase 9 audit hook if it is not already active.
+
+    The attenuation is only enforced when the audit hook is
+    installed. This function makes the module self-sufficient: it
+    does not trust the caller to have called ``install_audit_hook``.
+    The install is idempotent.
+    """
+    global _audit_hook_installed
+    if _audit_hook_installed:
+        return
+    try:
+        from codeguardian.core.plugins import install_audit_hook
+    except ImportError as exc:
+        raise CodeGuardianError(
+            ErrorCode.SYS_INVARIANT_VIOLATED,
+            "capability attenuation requires the Phase 9 audit hook, "
+            "but codeguardian.core.plugins is unavailable",
+            details={"reason": "import failed"},
+        ) from exc
+    install_audit_hook()
+    _audit_hook_installed = True
+
+
 _FILESYSTEM_RANK: dict[FilesystemLevel, int] = {
     "none": 0,
     "sandbox_only": 1,
@@ -307,6 +334,7 @@ class AttenuationRecord:
     narrowed: tuple[str, ...]
     audit_hash: str | None
     phase: str
+    trusted_read_paths: tuple[str, ...] = ()
 
     def describe(self) -> str:
         """Return a one-line summary suitable for a log line."""
@@ -343,6 +371,7 @@ class AttenuationRecord:
                     "env_read": list(self.effective.env_read),
                 },
                 "narrowed": list(self.narrowed),
+                "trusted_read_paths": list(self.trusted_read_paths),
                 "audit_hash": self.audit_hash,
             },
         }
@@ -356,6 +385,7 @@ def attenuated_dispatch(
     parent_permissions: PluginPermissions | None = None,
     skill_permissions: PluginPermissions | None = None,
     sandbox_root: Path | None = None,
+    trusted_read_paths: tuple[Path, ...] = (),
     agent_mode: AgentMode | None = None,
     phase: str = "preflight",
     audit_writer: AuditWriter | None = None,
@@ -384,6 +414,12 @@ def attenuated_dispatch(
         sandbox_root: The clone root. When supplied, it is bound as the
             sandbox scope so the audit hook can enforce the
             ``sandbox_only`` filesystem level.
+        trusted_read_paths: Paths outside the sandbox that the agent may
+            read but not write. The prompt library, the package source,
+            and the skill library are the usual entries. The grant is
+            evaluated by the audit hook on every read; a path under a
+            trusted root is permitted, a write under a trusted root is
+            not, and a path in the deny set is refused regardless.
         agent_mode: The agent mode to bind for the duration of the
             dispatch. When ``None``, the enclosing mode is inherited.
         phase: The audit phase name. Must be one of the eleven values
@@ -416,6 +452,8 @@ def attenuated_dispatch(
             details={"phase": phase},
         )
 
+    _ensure_audit_hook()
+
     effective = intersect_permissions(
         parent_permissions,
         agent_permissions,
@@ -427,6 +465,8 @@ def attenuated_dispatch(
         parent_permissions,
         skill_permissions,
     )
+
+    resolved_read_paths = tuple(str(Path(path)) for path in trusted_read_paths)
 
     audit_hash: str | None = None
     if audit_writer is not None:
@@ -447,6 +487,7 @@ def attenuated_dispatch(
                             "env_read": list(effective.env_read),
                         },
                         "narrowed": list(narrowed),
+                        "trusted_read_paths": list(resolved_read_paths),
                     },
                 },
             }
@@ -461,12 +502,18 @@ def attenuated_dispatch(
         narrowed=narrowed,
         audit_hash=audit_hash,
         phase=phase,
+        trusted_read_paths=resolved_read_paths,
     )
 
     with ExitStack() as stack:
         stack.enter_context(plugin_active(agent_name, effective))
         if sandbox_root is not None:
-            stack.enter_context(sandbox_scope(sandbox_root))
+            stack.enter_context(
+                sandbox_scope(
+                    sandbox_root,
+                    read_only_extras=trusted_read_paths,
+                )
+            )
         if agent_mode is not None:
             stack.enter_context(agent_mode_active(agent_mode))
         yield record

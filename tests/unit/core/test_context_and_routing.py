@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from codeguardian.core.agents.context_budget import (
     BudgetSignal,
     ContextBudget,
 )
+from codeguardian.core.errors import CodeGuardianError
 from codeguardian.core.orchestrator.context_engine import ContextEngine
 from codeguardian.core.providers.budget import BudgetEnvelope, BudgetExceededError
 from codeguardian.core.providers.fallback_router import (
+    FallbackModelProvider,
     _metadata_tier_to_routing_tier,
     _resolve_target_tier,
 )
@@ -241,3 +245,52 @@ class TestBudgetEnvelope:
         error = BudgetExceededError(role="writer", envelope=envelope)
         assert error.role == "writer"
         assert error.envelope is envelope
+
+
+class TestBlastBandBeatsBudget:
+    def test_writer_block_downgrade_stays_frontier(self) -> None:
+        assert _resolve_target_tier("writer", "block", (), "downgrade") == "frontier"
+
+    def test_contract_verifier_block_downgrade_stays_frontier(self) -> None:
+        assert _resolve_target_tier("contract_verifier", "block", (), "downgrade") == "frontier"
+
+    def test_non_override_role_downgrades_normally(self) -> None:
+        assert _resolve_target_tier("writer", None, (), "downgrade") == "standard"
+
+
+class TestFamilyExclusionFailsLoud:
+    def _role(self, other: str):
+        role = type("R", (), {})()
+        role.constraints = type("C", (), {"different_family_from": other})()
+        role.name = "correctness_verifier"
+        return role
+
+    def _router(self, get_model_error: bool):
+        from codeguardian.core.errors import ErrorCode
+
+        registry = type("Reg", (), {})()
+        if get_model_error:
+
+            def _raise(_qid):
+                raise CodeGuardianError(ErrorCode.MODEL_UNKNOWN, "gone")
+
+            registry.get_model = _raise
+        else:
+            registry.get_model = lambda _qid: type("M", (), {"family": "openai"})()
+        router = FallbackModelProvider(registry)
+        router._last_used_by_role["writer"] = "openai/gpt-5"
+        return router
+
+    def test_unknown_family_raises(self) -> None:
+        router = self._router(get_model_error=True)
+        with pytest.raises(CodeGuardianError):
+            router._excluded_families_for(self._role("writer"))
+
+    def test_known_family_excludes(self) -> None:
+        router = self._router(get_model_error=False)
+        excluded = router._excluded_families_for(self._role("writer"))
+        assert excluded == frozenset({"openai"})
+
+    def test_no_different_family_returns_empty(self) -> None:
+        router = self._router(get_model_error=False)
+        assert router._excluded_families_for(self._role("")) == frozenset()

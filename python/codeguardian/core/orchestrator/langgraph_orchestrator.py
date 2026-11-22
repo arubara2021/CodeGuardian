@@ -144,6 +144,9 @@ class LangGraphOrchestrator:
         audit_writer: AuditWriter,
         input_factory: SlotInputFactory,
         artifact_root: Path,
+        clone_root: Path | None = None,
+        repo_root: Path | None = None,
+        config_home: Path | None = None,
         context_budget_factory: Callable[[RunConfig], Any] | None = None,
         observer: LoopObserver | None = None,
         resume_factory: ResumeFactory | None = None,
@@ -155,6 +158,9 @@ class LangGraphOrchestrator:
         self._audit_writer = audit_writer
         self._input_factory = input_factory
         self._artifact_root = Path(artifact_root)
+        self._clone_root = Path(clone_root) if clone_root is not None else None
+        self._repo_root = Path(repo_root) if repo_root is not None else None
+        self._config_home = Path(config_home) if config_home is not None else None
         self._context_budget_factory = context_budget_factory
         self._observer = observer
         self._resume_factory = resume_factory
@@ -319,6 +325,8 @@ class LangGraphOrchestrator:
             repo_url=config.url,
             commit_hash=self._commit_hash_for(run_id),
             clone_root=self._clone_root_for(run_id),
+            repo_root=self._repo_root,
+            config_home=self._config_home,
             context_budget=context_budget,
             side_effect_slots=self._side_effect_slots,
             observer=self._observer,
@@ -339,11 +347,20 @@ class LangGraphOrchestrator:
     def _clone_root_for(self, run_id: str) -> Path:
         """Return the clone root for the run.
 
-        For v1 the clone root lives beside the artifact directory at
-        ``<artifact_root>/<repo_id>/clone``. The run does not store the
-        clone root path on the row, so it is derived from the artifact
-        directory's grandparent.
+        When the orchestrator was constructed with an explicit
+        ``clone_root``, that path is returned. The caller that cloned
+        the repository knows where the clone lives; the orchestrator
+        does not need to guess.
+
+        When no ``clone_root`` was supplied, the path is derived from
+        the artifact directory: ``artifact_dir.parent.parent / "clone"``.
+        That derivation assumes the caller placed the clone as a
+        sibling of the ``<repo_id>`` directory, which is true for the
+        CLI (Phase 14) and not true for the deep test. The deep test
+        passes an explicit ``clone_root`` for this reason.
         """
+        if self._clone_root is not None:
+            return self._clone_root
         rows = self._store.query(
             "SELECT artifact_dir FROM runs WHERE run_id = ? LIMIT 1",
             (run_id,),
@@ -351,8 +368,6 @@ class LangGraphOrchestrator:
         if not rows:
             return Path.cwd()
         artifact_dir = Path(str(rows[0]["artifact_dir"]))
-        # artifact_dir = <root>/<repo_id>/runs/<run_id>; clone root is
-        # <root>/<repo_id>/clone.
         return artifact_dir.parent.parent / "clone"
 
     def _insert_run(

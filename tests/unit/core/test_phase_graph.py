@@ -258,10 +258,11 @@ class TestAgentRegistry:
             AgentSpec(name="different_name", agent=agent, capability_tags=frozenset())
         assert "does not match" in info.value.message
 
-    def test_unregister(self) -> None:
+    @pytest.mark.asyncio
+    async def test_unregister(self) -> None:
         registry = AgentRegistry()
         registry.register(make_spec("writer"))
-        registry.unregister("writer")
+        await registry.unregister("writer")
         with pytest.raises(CodeGuardianError):
             registry.get("writer")
 
@@ -439,3 +440,125 @@ class TestSlotResolution:
         )
         resolution = SlotResolver(registry).resolve(graph)
         assert "s" in resolution.resolved
+
+
+class TestAsyncRunEnforcement:
+    def test_sync_run_rejected(self) -> None:
+        class SyncAgent:
+            name = "sync_agent"
+
+            def run(self, _input):
+                return "out"
+
+        with pytest.raises(CodeGuardianError) as info:
+            AgentSpec(
+                name="sync_agent",
+                agent=SyncAgent(),
+                capability_tags=frozenset(),
+            )
+        assert "async" in info.value.message
+
+    def test_async_run_accepted(self) -> None:
+        class AsyncAgent:
+            name = "async_agent"
+
+            async def run(self, _input):
+                return "out"
+
+        spec = AgentSpec(
+            name="async_agent",
+            agent=AsyncAgent(),
+            capability_tags=frozenset(),
+        )
+        assert spec.name == "async_agent"
+
+    def test_missing_run_rejected(self) -> None:
+        class NoRunAgent:
+            name = "no_run_agent"
+
+        with pytest.raises(CodeGuardianError) as info:
+            AgentSpec(
+                name="no_run_agent",
+                agent=NoRunAgent(),
+                capability_tags=frozenset(),
+            )
+        assert "run" in info.value.message
+
+
+class TestUnregisterDrains:
+    @pytest.mark.asyncio
+    async def test_unregister_calls_drain(self) -> None:
+        class DrainAgent:
+            name = "drain_agent"
+
+            def __init__(self):
+                self.drained = False
+
+            async def run(self, _input):
+                return "out"
+
+            async def drain(self):
+                self.drained = True
+
+        agent = DrainAgent()
+        registry = AgentRegistry()
+        registry.register(
+            AgentSpec(
+                name="drain_agent",
+                agent=agent,
+                capability_tags=frozenset(),
+            )
+        )
+        await registry.unregister("drain_agent")
+        assert agent.drained is True
+        assert registry.names() == ()
+
+    @pytest.mark.asyncio
+    async def test_unregister_falls_back_to_close(self) -> None:
+        class CloseAgent:
+            name = "close_agent"
+
+            def __init__(self):
+                self.closed = False
+
+            async def run(self, _input):
+                return "out"
+
+            def close(self):
+                self.closed = True
+
+        agent = CloseAgent()
+        registry = AgentRegistry()
+        registry.register(
+            AgentSpec(
+                name="close_agent",
+                agent=agent,
+                capability_tags=frozenset(),
+            )
+        )
+        await registry.unregister("close_agent")
+        assert agent.closed is True
+
+    @pytest.mark.asyncio
+    async def test_unregister_no_cleanup_succeeds(self) -> None:
+        class PlainAgent:
+            name = "plain_agent"
+
+            async def run(self, _input):
+                return "out"
+
+        registry = AgentRegistry()
+        registry.register(
+            AgentSpec(
+                name="plain_agent",
+                agent=PlainAgent(),
+                capability_tags=frozenset(),
+            )
+        )
+        await registry.unregister("plain_agent")
+        assert registry.names() == ()
+
+    @pytest.mark.asyncio
+    async def test_unregister_missing_is_noop(self) -> None:
+        registry = AgentRegistry()
+        await registry.unregister("missing")

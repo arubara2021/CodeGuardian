@@ -104,6 +104,9 @@ class PhaseSlot:
     gate: str | None = None
     blast_band: Literal["proceed", "review", "block"] | None = None
     phase_name: str | None = None
+    workspace_paths: tuple[str, ...] = ()
+    agent_timeout_s: float | None = None
+    agent_permissions: Any | None = None
 
     def resolved_phase_name(self) -> str:
         """Return the name written to phase_executions.phase_name."""

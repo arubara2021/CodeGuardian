@@ -96,6 +96,48 @@ OnAttemptFn = Callable[[int, GenerationResult[Any], VerificationResult], None]
 
 
 @dataclass(frozen=True, slots=True)
+class VerifierPanelConfig:
+    """Policy applied to a round of verifier verdicts.
+
+    The defaults preserve pre-fix behaviour. Production wiring
+    supplies ``min_verifiers=3, require_distinct_types=True,
+    confidence_floor=0.6`` to enforce the panel policy the settlement
+    describes.
+    """
+
+    min_verifiers: int = 1
+    require_distinct_types: bool = False
+    confidence_floor: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class VerifierPanelResult:
+    """Outcome of the panel check for one verification round.
+
+    Attributes:
+        passed: True when every panel requirement is satisfied.
+        verifier_count: Number of verdicts supplied.
+        distinct_types: Number of distinct verifier_type values seen.
+        min_confidence: Lowest declared confidence, or 0.0 when none
+            declared.
+        panel_agreement: Fraction of verdicts whose value is "pass".
+            Recorded for observability; it does not affect pass/fail.
+        rejected_reason: Human-readable reason the panel was rejected,
+            or None on success.
+    """
+
+    passed: bool
+    verifier_count: int
+    distinct_types: int
+    min_confidence: float
+    panel_agreement: float
+    rejected_reason: str | None = None
+
+
+_DEFAULT_PANEL_CONFIG = VerifierPanelConfig()
+
+
+@dataclass(frozen=True, slots=True)
 class VerifierStackResult:
     """The complete outcome of one verification stack run.
 
@@ -124,6 +166,7 @@ class VerifierStackResult:
     halted_reason: str | None = None
     escalation_required: bool = False
     final_generation: GenerationResult[Any] | None = None
+    panel: VerifierPanelResult | None = None
 
 
 def _k_for_band(band: BlastBand) -> int:
@@ -146,13 +189,103 @@ def _verifier_label(verifier_result: Any) -> str:
     return type(verifier_result).__name__
 
 
-def _verdict_passes(verifier_result: Any) -> bool:
-    """Return True when this verifier's verdict is ``pass``."""
+def _verdict_is_pass(verifier_result: Any) -> bool:
+    """Return True when this single verdict's value is ``pass``."""
     verdict = getattr(verifier_result, "verdict", None)
     if verdict is None:
         return False
-    value = getattr(verdict, "verdict", None)
-    return value == "pass"
+    return getattr(verdict, "verdict", None) == "pass"
+
+
+def _verdict_confidence(verifier_result: Any) -> float | None:
+    """Return the verdict's declared confidence, or None."""
+    verdict = getattr(verifier_result, "verdict", None)
+    if verdict is None:
+        return None
+    value = getattr(verdict, "confidence", None)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _panel_passes(
+    verdicts: tuple[Any, ...],
+    config: VerifierPanelConfig,
+) -> VerifierPanelResult:
+    """Apply the panel policy to one verification round.
+
+    Returns a structured result carrying the reason a panel was
+    rejected, so the caller can log it without re-inspecting the
+    verdicts.
+    """
+    count = len(verdicts)
+    agreeing = sum(1 for v in verdicts if _verdict_is_pass(v))
+    agreement = (agreeing / count) if count else 0.0
+
+    if count < config.min_verifiers:
+        return VerifierPanelResult(
+            passed=False,
+            verifier_count=count,
+            distinct_types=0,
+            min_confidence=0.0,
+            panel_agreement=agreement,
+            rejected_reason=(f"panel has {count} verifier(s); minimum is {config.min_verifiers}"),
+        )
+
+    types = {getattr(getattr(v, "verdict", None), "verifier_type", None) for v in verdicts}
+    types.discard(None)
+    distinct_types = len(types)
+
+    if config.require_distinct_types and distinct_types < config.min_verifiers:
+        return VerifierPanelResult(
+            passed=False,
+            verifier_count=count,
+            distinct_types=distinct_types,
+            min_confidence=0.0,
+            panel_agreement=agreement,
+            rejected_reason=(
+                f"panel has {distinct_types} distinct verifier type(s); "
+                f"minimum is {config.min_verifiers}"
+            ),
+        )
+
+    confidences = [_verdict_confidence(v) for v in verdicts]
+    provided = [c for c in confidences if c is not None]
+    min_confidence = min(provided) if provided else 0.0
+
+    if provided and min_confidence < config.confidence_floor:
+        return VerifierPanelResult(
+            passed=False,
+            verifier_count=count,
+            distinct_types=distinct_types,
+            min_confidence=min_confidence,
+            panel_agreement=agreement,
+            rejected_reason=(
+                f"minimum confidence {min_confidence:.2f} is below "
+                f"floor {config.confidence_floor:.2f}"
+            ),
+        )
+
+    if agreeing != count:
+        return VerifierPanelResult(
+            passed=False,
+            verifier_count=count,
+            distinct_types=distinct_types,
+            min_confidence=min_confidence,
+            panel_agreement=agreement,
+            rejected_reason="one or more verifiers did not return pass",
+        )
+
+    return VerifierPanelResult(
+        passed=True,
+        verifier_count=count,
+        distinct_types=distinct_types,
+        min_confidence=min_confidence,
+        panel_agreement=agreement,
+    )
 
 
 def _verdict_reason(verifier_result: Any) -> str:
@@ -176,7 +309,7 @@ def _summarize_verdicts(verdicts: tuple[Any, ...]) -> str:
     """
     parts: list[str] = []
     for v in verdicts:
-        if _verdict_passes(v):
+        if _verdict_is_pass(v):
             continue
         parts.append(f"{_verifier_label(v)}: {_verdict_reason(v)}")
     return "; ".join(parts)
@@ -192,6 +325,7 @@ async def run_verifier_stack(
     rollback: RollbackFn,
     on_attempt: OnAttemptFn | None = None,
     k_override: int | None = None,
+    panel_config: VerifierPanelConfig = _DEFAULT_PANEL_CONFIG,
 ) -> VerifierStackResult:
     """Run the three-layer verification stack.
 
@@ -225,6 +359,7 @@ async def run_verifier_stack(
         "pending_rollback": None,
         "last_gate": None,
         "last_verdicts": None,
+        "last_panel": None,
     }
 
     async def _generate_with_rollback(
@@ -295,23 +430,32 @@ async def run_verifier_stack(
             )
 
         state["last_verdicts"] = verdicts
-        all_pass = all(_verdict_passes(v) for v in verdicts)
-        if all_pass:
+        panel = _panel_passes(verdicts, panel_config)
+        state["last_panel"] = panel
+        if panel.passed:
             return VerificationResult(
                 all_pass=True,
                 failure_summary=None,
                 detail={
                     "gate": gate_result,
                     "verdicts": verdicts,
+                    "panel": panel,
                     "rollback_ref": rollback_ref,
                 },
             )
+        parts: list[str] = []
+        if panel.rejected_reason:
+            parts.append(panel.rejected_reason)
+        verifier_summary = _summarize_verdicts(verdicts)
+        if verifier_summary:
+            parts.append(verifier_summary)
         return VerificationResult(
             all_pass=False,
-            failure_summary=_summarize_verdicts(verdicts),
+            failure_summary="; ".join(parts) if parts else "panel rejected",
             detail={
                 "gate": gate_result,
                 "verdicts": verdicts,
+                "panel": panel,
                 "rollback_ref": rollback_ref,
             },
         )
@@ -344,4 +488,5 @@ async def run_verifier_stack(
         halted_reason=outcome.halted_reason,
         escalation_required=escalation_required,
         final_generation=outcome.final_generation,
+        panel=state["last_panel"],
     )

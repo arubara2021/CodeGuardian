@@ -8,6 +8,10 @@ from collections.abc import AsyncIterator
 import httpx
 
 from codeguardian.core.errors import CodeGuardianError, ErrorCode
+from codeguardian.core.plugins.permissions import (
+    extract_hosts_from_url,
+    model_inference_scope,
+)
 from codeguardian.interfaces.model import (
     ModelChunk,
     ModelInfo,
@@ -42,6 +46,7 @@ class AnthropicProvider:
             )
         self._api_key = api_key
         self._base_url = (base_url or _ANTHROPIC_BASE_URL).rstrip("/")
+        self._allowed_hosts = extract_hosts_from_url(self._base_url)
         self._transport = transport
         self._timeout = timeout
 
@@ -54,21 +59,25 @@ class AnthropicProvider:
         """Run a single non-streaming completion."""
         payload = self._request_payload(prompt, model, options, stream=False)
         headers = self._request_headers()
-        async with self._make_client() as client:
-            try:
-                response = await client.post("/v1/messages", json=payload, headers=headers)
-            except httpx.TimeoutException as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_TIMEOUT,
-                    f"Anthropic request timed out: {exc}",
-                ) from exc
-            except httpx.ConnectError as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_UNREACHABLE,
-                    f"Anthropic is unreachable: {exc}",
-                ) from exc
-            _raise_for_status(response.status_code, response.text, "Anthropic")
-            data = response.json()
+        with model_inference_scope(
+            self._allowed_hosts,
+            provider_name="anthropic",
+        ):
+            async with self._make_client() as client:
+                try:
+                    response = await client.post("/v1/messages", json=payload, headers=headers)
+                except httpx.TimeoutException as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_TIMEOUT,
+                        f"Anthropic request timed out: {exc}",
+                    ) from exc
+                except httpx.ConnectError as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_UNREACHABLE,
+                        f"Anthropic is unreachable: {exc}",
+                    ) from exc
+                _raise_for_status(response.status_code, response.text, "Anthropic")
+                data = response.json()
         return self._parse_response(data, model)
 
     def stream(
@@ -100,53 +109,57 @@ class AnthropicProvider:
         any_text = False
         reasoning_chars = 0
         stop_reason = "end_turn"
-        async with self._make_client() as client:
-            try:
-                async with client.stream(
-                    "POST", "/v1/messages", json=payload, headers=headers
-                ) as response:
-                    if not response.is_success:
-                        body = (await response.aread()).decode("utf-8", "replace")
-                        _raise_for_status(response.status_code, body, "Anthropic")
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        raw = line[len("data: ") :].strip()
-                        if not raw:
-                            continue
-                        try:
-                            event = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        event_type = event.get("type")
-                        if event_type == "content_block_delta":
-                            delta = event.get("delta") or {}
-                            delta_type = delta.get("type")
-                            if delta_type == "text_delta":
-                                text = delta.get("text", "")
-                                if text:
-                                    any_text = True
-                                    yield ModelChunk(text=text, done=False)
-                            elif delta_type == "thinking_delta":
-                                thinking = delta.get("thinking", "")
-                                if isinstance(thinking, str) and thinking:
-                                    reasoning_chars += len(thinking)
-                        elif event_type == "message_delta":
-                            delta = event.get("delta") or {}
-                            if delta.get("stop_reason"):
-                                stop_reason = str(delta["stop_reason"])
-                        elif event_type == "message_stop":
-                            break
-            except httpx.TimeoutException as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_TIMEOUT,
-                    f"Anthropic stream timed out: {exc}",
-                ) from exc
-            except httpx.ConnectError as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_UNREACHABLE,
-                    f"Anthropic is unreachable: {exc}",
-                ) from exc
+        with model_inference_scope(
+            self._allowed_hosts,
+            provider_name="anthropic",
+        ):
+            async with self._make_client() as client:
+                try:
+                    async with client.stream(
+                        "POST", "/v1/messages", json=payload, headers=headers
+                    ) as response:
+                        if not response.is_success:
+                            body = (await response.aread()).decode("utf-8", "replace")
+                            _raise_for_status(response.status_code, body, "Anthropic")
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            raw = line[len("data: ") :].strip()
+                            if not raw:
+                                continue
+                            try:
+                                event = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            event_type = event.get("type")
+                            if event_type == "content_block_delta":
+                                delta = event.get("delta") or {}
+                                delta_type = delta.get("type")
+                                if delta_type == "text_delta":
+                                    text = delta.get("text", "")
+                                    if text:
+                                        any_text = True
+                                        yield ModelChunk(text=text, done=False)
+                                elif delta_type == "thinking_delta":
+                                    thinking = delta.get("thinking", "")
+                                    if isinstance(thinking, str) and thinking:
+                                        reasoning_chars += len(thinking)
+                            elif event_type == "message_delta":
+                                delta = event.get("delta") or {}
+                                if delta.get("stop_reason"):
+                                    stop_reason = str(delta["stop_reason"])
+                            elif event_type == "message_stop":
+                                break
+                except httpx.TimeoutException as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_TIMEOUT,
+                        f"Anthropic stream timed out: {exc}",
+                    ) from exc
+                except httpx.ConnectError as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_UNREACHABLE,
+                        f"Anthropic is unreachable: {exc}",
+                    ) from exc
 
         if not any_text and stop_reason == "max_tokens":
             raise _budget_exhausted("Anthropic", model, stop_reason, reasoning_chars)
@@ -155,21 +168,25 @@ class AnthropicProvider:
 
     async def list_models(self) -> list[ModelInfo]:
         """Ask Anthropic which models are available."""
-        async with self._make_client() as client:
-            try:
-                response = await client.get("/v1/models", headers=self._request_headers())
-            except httpx.TimeoutException as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_TIMEOUT,
-                    f"Anthropic model list timed out: {exc}",
-                ) from exc
-            except httpx.ConnectError as exc:
-                raise CodeGuardianError(
-                    ErrorCode.NET_UNREACHABLE,
-                    f"Anthropic is unreachable: {exc}",
-                ) from exc
-            _raise_for_status(response.status_code, response.text, "Anthropic")
-            data = response.json()
+        with model_inference_scope(
+            self._allowed_hosts,
+            provider_name="anthropic",
+        ):
+            async with self._make_client() as client:
+                try:
+                    response = await client.get("/v1/models", headers=self._request_headers())
+                except httpx.TimeoutException as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_TIMEOUT,
+                        f"Anthropic model list timed out: {exc}",
+                    ) from exc
+                except httpx.ConnectError as exc:
+                    raise CodeGuardianError(
+                        ErrorCode.NET_UNREACHABLE,
+                        f"Anthropic is unreachable: {exc}",
+                    ) from exc
+                _raise_for_status(response.status_code, response.text, "Anthropic")
+                data = response.json()
         result: list[ModelInfo] = []
         for item in data.get("data", []):
             model_id = item.get("id")

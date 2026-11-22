@@ -244,7 +244,11 @@ class TestLoopWalksLegacyGraph:
                 clone_root=Path("/tmp"),
                 side_effect_slots=frozenset(),
             )
-            assert len(audit_writer.entries) == 10
+            phase_entries = [e for e in audit_writer.entries if "attenuation" not in e["result"]]
+            attenuation_entries = [e for e in audit_writer.entries if "attenuation" in e["result"]]
+            assert len(phase_entries) == 10
+            assert len(attenuation_entries) == 7
+            assert len(audit_writer.entries) == 17
             for entry in audit_writer.entries:
                 assert entry["run_id"] == "r1"
                 assert entry["result"]["status"] == "success"
@@ -549,5 +553,128 @@ class TestLangGraphOrchestrator:
             assert state.run_id == result.run_id
             assert len(state.completed_phases) == 10
             assert state.paused is False
+        finally:
+            store.close()
+
+
+class TestCheckpointValidation:
+    def test_phase_not_in_completed_rejected(self, tmp_path: Path) -> None:
+        from codeguardian.core.orchestrator.checkpointing import write_checkpoint
+
+        store = open_store(tmp_path)
+        try:
+            insert_run_row(store, "r1")
+            with pytest.raises(CodeGuardianError):
+                write_checkpoint(
+                    store,
+                    run_id="r1",
+                    phase="blast",
+                    completed_phases=("recon",),
+                    pending_phases=("analyst",),
+                )
+        finally:
+            store.close()
+
+    def test_overlap_rejected(self, tmp_path: Path) -> None:
+        from codeguardian.core.orchestrator.checkpointing import write_checkpoint
+
+        store = open_store(tmp_path)
+        try:
+            insert_run_row(store, "r1")
+            with pytest.raises(CodeGuardianError):
+                write_checkpoint(
+                    store,
+                    run_id="r1",
+                    phase="recon",
+                    completed_phases=("recon",),
+                    pending_phases=("recon",),
+                )
+        finally:
+            store.close()
+
+    def test_negative_retries_rejected(self, tmp_path: Path) -> None:
+        from codeguardian.core.orchestrator.checkpointing import write_checkpoint
+
+        store = open_store(tmp_path)
+        try:
+            insert_run_row(store, "r1")
+            with pytest.raises(CodeGuardianError):
+                write_checkpoint(
+                    store,
+                    run_id="r1",
+                    phase="recon",
+                    completed_phases=("recon",),
+                    retries=-1,
+                )
+        finally:
+            store.close()
+
+    def test_duplicate_completed_rejected(self, tmp_path: Path) -> None:
+        from codeguardian.core.orchestrator.checkpointing import write_checkpoint
+
+        store = open_store(tmp_path)
+        try:
+            insert_run_row(store, "r1")
+            with pytest.raises(CodeGuardianError):
+                write_checkpoint(
+                    store,
+                    run_id="r1",
+                    phase="recon",
+                    completed_phases=("recon", "recon"),
+                )
+        finally:
+            store.close()
+
+    def test_valid_payload_round_trips(self, tmp_path: Path) -> None:
+        from codeguardian.core.orchestrator.checkpointing import (
+            read_checkpoint,
+            write_checkpoint,
+        )
+
+        store = open_store(tmp_path)
+        try:
+            insert_run_row(store, "r1")
+            write_checkpoint(
+                store,
+                run_id="r1",
+                phase="blast",
+                completed_phases=("recon", "blast"),
+                pending_phases=("analyst",),
+                retries=2,
+            )
+            cp = read_checkpoint(store, "r1")
+            assert cp is not None
+            assert cp.phase == "blast"
+            assert cp.completed_phases == ("recon", "blast")
+            assert cp.pending_phases == ("analyst",)
+            assert cp.retries == 2
+        finally:
+            store.close()
+
+    def test_corrupt_row_raises_on_read(self, tmp_path: Path) -> None:
+        import json
+
+        from codeguardian.core.orchestrator.checkpointing import read_checkpoint
+
+        store = open_store(tmp_path)
+        try:
+            insert_run_row(store, "r1")
+            bad_state = json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "completed_phases": ["recon"],
+                    "pending_phases": ["recon"],
+                    "retries": 0,
+                    "state": {},
+                    "artifacts": {},
+                }
+            )
+            store.execute(
+                "INSERT INTO checkpoints (checkpoint_id, run_id, phase, "
+                "state_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                ("cp-bad", "r1", "recon", bad_state, "2026-11-09T00:00:00Z"),
+            )
+            with pytest.raises(CodeGuardianError):
+                read_checkpoint(store, "r1")
         finally:
             store.close()

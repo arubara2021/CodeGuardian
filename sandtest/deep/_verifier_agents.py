@@ -191,7 +191,6 @@ class _SharedVerifierRunner:
             apply=apply,
             verify=verify,
             rollback=rollback,
-            k_override=1,
         )
 
 

@@ -129,17 +129,17 @@ def _resolve_target_tier(
     """
     tier = tier_for(role_name)
 
+    if pressure == "downgrade":
+        tier = downgrade_tier(tier)
+
+    if escalation_signals and should_escalate(role_name, escalation_signals):
+        tier = escalate_tier(tier)
+
     if blast_band_override in ("block", "proceed") and role_name in _BLAST_OVERRIDE_ROLES:
         if blast_band_override == "block":
             tier = "frontier"
         elif blast_band_override == "proceed":
             tier = "standard"
-
-    if escalation_signals and should_escalate(role_name, escalation_signals):
-        tier = escalate_tier(tier)
-
-    if pressure == "downgrade":
-        tier = downgrade_tier(tier)
 
     return tier
 
@@ -606,17 +606,34 @@ class FallbackModelProvider:
         )
 
     def _excluded_families_for(self, role: RoleConfig) -> frozenset[str]:
-        """Return families to exclude for verifier independence."""
+        """Return families to exclude for verifier independence.
+
+        When the role requires a different family from a previously
+        used role, and that role's model cannot be resolved back to
+        its family, this raises rather than returning an empty
+        exclusion. A verifier that is not actually from a different
+        family is not independent; the caller must not proceed.
+        """
         other = role.constraints.different_family_from
         if not other:
             return frozenset()
         used = self._last_used_by_role.get(other)
-        if used:
-            try:
-                return frozenset({self._registry.get_model(used).family})
-            except CodeGuardianError:
-                pass
-        return frozenset()
+        if not used:
+            return frozenset()
+        try:
+            return frozenset({self._registry.get_model(used).family})
+        except CodeGuardianError as exc:
+            raise CodeGuardianError(
+                ErrorCode.SYS_INVARIANT_VIOLATED,
+                f"cross-family independence cannot be enforced: the "
+                f"previously used model {used!r} for role {other!r} is "
+                f"no longer in the registry",
+                details={
+                    "role": role.name,
+                    "different_family_from": other,
+                    "previous_model": used,
+                },
+            ) from exc
 
     def _provider_for(self, provider_name: str) -> ModelProvider:
         """Return the cached provider instance for ``provider_name``."""

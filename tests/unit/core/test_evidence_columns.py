@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from codeguardian.core.agents._store_context import active_store
 from codeguardian.core.agents.telemetry import (
     DecisionLogEntry,
@@ -21,6 +23,16 @@ from codeguardian.core.agents.telemetry import (
     record_call,
     try_record_call,
 )
+from codeguardian.core.orchestrator.checkpoint_supervisor import CheckpointSupervisor
+from codeguardian.core.orchestrator.evidence import ToolCallFailed
+from codeguardian.core.orchestrator.loop import run_loop
+from codeguardian.core.orchestrator.phase_graph import PhaseGraph, PhaseSlot
+from codeguardian.core.orchestrator.registry import (
+    AgentRegistry,
+    AgentSpec,
+    SlotResolver,
+)
+from codeguardian.core.orchestrator.runtime_wiring import RuntimeWiring
 from codeguardian.core.storage.migration_runner import MigrationRunner
 from codeguardian.core.storage.sqlite_store import SQLiteStore
 
@@ -363,5 +375,142 @@ class TestTryRecordCall:
             assert result is not None
             row = fetch_row(store, result)
             assert row["model_reasoning"] == "written via context"
+        finally:
+            store.close()
+
+
+class TestLoopPopulatesColdTier:
+    @pytest.mark.asyncio
+    async def test_run_loop_writes_agent_calls(self, tmp_path: Path) -> None:
+        store = open_store(tmp_path)
+        try:
+
+            class _Agent:
+                name = "recon"
+
+                async def run(self, _input):
+                    return "ok"
+
+            registry = AgentRegistry()
+            registry.register(
+                AgentSpec(
+                    name="recon",
+                    agent=_Agent(),
+                    capability_tags=frozenset({"x"}),
+                )
+            )
+            slot = PhaseSlot(name="recon", capability_tags=frozenset({"x"}))
+            graph = PhaseGraph(
+                name="t",
+                entry="recon",
+                slots=(slot,),
+                transitions={"recon": (None,)},
+            )
+
+            class _IF:
+                def build(self, _slot, _ctx):
+                    return None
+
+            class _AW:
+                def __call__(self, _entry):
+                    return "hash"
+
+            wiring = RuntimeWiring(store=store, run_id="run1", audit_writer=_AW())
+            result = await run_loop(
+                graph=graph,
+                registry=registry,
+                resolver=SlotResolver(registry),
+                store=store,
+                supervisor=CheckpointSupervisor(store),
+                audit_writer=_AW(),
+                input_factory=_IF(),
+                run_id="run1",
+                repo_url="file:///x",
+                commit_hash="abc",
+                clone_root=tmp_path,
+                side_effect_slots=frozenset(),
+                wiring=wiring,
+            )
+            assert result.stop_reason == "completed"
+            rows = store.query(
+                "SELECT role, outcome, decision_log FROM agent_calls WHERE run_id = 'run1'"
+            )
+            assert len(rows) == 1
+            assert rows[0]["role"] == "recon"
+            assert rows[0]["outcome"] == "success"
+            assert rows[0]["decision_log"] is not None
+            decoded = json.loads(rows[0]["decision_log"])
+            assert any(entry.get("step") == "capability_attenuation" for entry in decoded)
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_evidence_events_land_in_decision_log(self, tmp_path: Path) -> None:
+        store = open_store(tmp_path)
+        try:
+
+            class _Agent:
+                name = "recon"
+
+                async def run(self, _input):
+                    return "ok"
+
+            registry = AgentRegistry()
+            registry.register(
+                AgentSpec(
+                    name="recon",
+                    agent=_Agent(),
+                    capability_tags=frozenset({"x"}),
+                )
+            )
+            slot = PhaseSlot(name="recon", capability_tags=frozenset({"x"}))
+            graph = PhaseGraph(
+                name="t",
+                entry="recon",
+                slots=(slot,),
+                transitions={"recon": (None,)},
+            )
+
+            class _IF:
+                def build(self, _slot, _ctx):
+                    return None
+
+            class _AW:
+                def __call__(self, _entry):
+                    return "hash"
+
+            def observer(_slot_name, _execution, ctx):
+                ctx.evidence_bus.push(
+                    ToolCallFailed(
+                        tool="obs_probe",
+                        error_code=None,
+                        reason="test",
+                    )
+                )
+
+            wiring = RuntimeWiring(store=store, run_id="run1", audit_writer=_AW())
+            await run_loop(
+                graph=graph,
+                registry=registry,
+                resolver=SlotResolver(registry),
+                store=store,
+                supervisor=CheckpointSupervisor(store),
+                audit_writer=_AW(),
+                input_factory=_IF(),
+                run_id="run1",
+                repo_url="file:///x",
+                commit_hash="abc",
+                clone_root=tmp_path,
+                side_effect_slots=frozenset(),
+                wiring=wiring,
+                observer=observer,
+            )
+            rows = store.query("SELECT decision_log FROM agent_calls WHERE run_id = 'run1'")
+            assert len(rows) == 1
+            decoded = json.loads(rows[0]["decision_log"])
+            tools = [
+                entry.get("tool") for entry in decoded if entry.get("step") == "tool_call_failed"
+            ]
+            assert "obs_probe" in tools
         finally:
             store.close()

@@ -5,15 +5,20 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from codeguardian.core.agents._loop import GenerationResult
 from codeguardian.core.agents._verifier_common import ExecutionOutcome
 from codeguardian.core.orchestrator.deterministic_gate import (
     CheckOutcome,
     DeterministicGateResult,
     deterministic_gate,
+    parse_diff_paths,
 )
 from codeguardian.core.orchestrator.verifier_stack import (
     DEFAULT_K_BY_BAND,
+    VerifierPanelConfig,
+    _panel_passes,
     run_verifier_stack,
 )
 
@@ -449,3 +454,102 @@ class TestVerifierStack:
         )
         assert result.k == 3
         assert result.attempts == 3
+
+
+class TestVerifierPanel:
+    def _v(self, value: str, confidence: float | None, vtype: str):
+        result = type("R", (), {})()
+        result.verdict = type(
+            "V",
+            (),
+            {"verdict": value, "confidence": confidence, "verifier_type": vtype},
+        )()
+        result.verdict_reason = None
+        return result
+
+    def test_rejects_two_verifiers_when_minimum_is_three(self) -> None:
+        config = VerifierPanelConfig(min_verifiers=3, require_distinct_types=True)
+        result = _panel_passes(
+            (
+                self._v("pass", 0.9, "correctness"),
+                self._v("pass", 0.9, "security"),
+            ),
+            config,
+        )
+        assert result.passed is False
+        assert "minimum" in (result.rejected_reason or "")
+
+    def test_rejects_duplicate_verifier_types(self) -> None:
+        config = VerifierPanelConfig(min_verifiers=3, require_distinct_types=True)
+        result = _panel_passes(
+            (
+                self._v("pass", 0.9, "correctness"),
+                self._v("pass", 0.9, "correctness"),
+                self._v("pass", 0.9, "correctness"),
+            ),
+            config,
+        )
+        assert result.passed is False
+        assert "distinct" in (result.rejected_reason or "")
+
+    def test_rejects_below_confidence_floor(self) -> None:
+        config = VerifierPanelConfig(
+            min_verifiers=3,
+            require_distinct_types=True,
+            confidence_floor=0.6,
+        )
+        result = _panel_passes(
+            (
+                self._v("pass", 0.9, "correctness"),
+                self._v("pass", 0.9, "security"),
+                self._v("pass", 0.4, "contract"),
+            ),
+            config,
+        )
+        assert result.passed is False
+        assert "confidence" in (result.rejected_reason or "")
+
+    def test_accepts_three_distinct_high_confidence(self) -> None:
+        config = VerifierPanelConfig(
+            min_verifiers=3,
+            require_distinct_types=True,
+            confidence_floor=0.6,
+        )
+        result = _panel_passes(
+            (
+                self._v("pass", 0.9, "correctness"),
+                self._v("pass", 0.9, "security"),
+                self._v("pass", 0.9, "contract"),
+            ),
+            config,
+        )
+        assert result.passed is True
+        assert result.verifier_count == 3
+        assert result.distinct_types == 3
+
+    def test_rejects_empty_panel(self) -> None:
+        config = VerifierPanelConfig(min_verifiers=3, require_distinct_types=True)
+        result = _panel_passes((), config)
+        assert result.passed is False
+
+
+class TestDiffPathRejection:
+    def test_absolute_path_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            parse_diff_paths("--- /etc/passwd\n+++ /etc/passwd\n")
+
+    def test_traversal_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            parse_diff_paths("--- a/../../etc/passwd\n+++ b/../../etc/passwd\n")
+
+    def test_symlink_creation_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            parse_diff_paths("new file mode 120000\n--- /dev/null\n+++ b/link\n")
+
+    def test_nested_traversal_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            parse_diff_paths("--- a/src/../../../etc/passwd\n+++ b/src/../../../etc/passwd\n")
+
+    def test_normal_path_accepted(self) -> None:
+        paths = parse_diff_paths("--- a/src/foo.py\n+++ b/src/foo.py\n")
+        assert paths == ("src/foo.py",)

@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from codeguardian.core.errors import CodeGuardianError
+from codeguardian.core.errors import CodeGuardianError, ErrorCode
 
 from ..storage.sqlite_store import SQLiteStore
 
@@ -122,6 +122,54 @@ class Checkpoint:
     artifacts: Mapping[str, str] = field(default_factory=dict)
 
 
+def _validate_payload(
+    *,
+    phase: str,
+    completed_phases: tuple[str, ...],
+    pending_phases: tuple[str, ...],
+    retries: int,
+) -> None:
+    """Reject a checkpoint payload that violates the schema invariants.
+
+    A violation raises ``SYS_INVARIANT_VIOLATED``; nothing is
+    persisted. The invariants are: the phase appears in
+    ``completed_phases``; completed and pending do not overlap;
+    retries is non-negative; completed has no duplicate phase names.
+    """
+    if phase not in completed_phases:
+        raise CodeGuardianError(
+            ErrorCode.SYS_INVARIANT_VIOLATED,
+            f"checkpoint phase {phase!r} is not in completed_phases {list(completed_phases)!r}",
+            details={
+                "phase": phase,
+                "completed_phases": list(completed_phases),
+            },
+        )
+    overlap = set(completed_phases) & set(pending_phases)
+    if overlap:
+        raise CodeGuardianError(
+            ErrorCode.SYS_INVARIANT_VIOLATED,
+            f"checkpoint has phases in both completed and pending: {sorted(overlap)}",
+            details={
+                "completed_phases": list(completed_phases),
+                "pending_phases": list(pending_phases),
+                "overlap": sorted(overlap),
+            },
+        )
+    if retries < 0:
+        raise CodeGuardianError(
+            ErrorCode.SYS_INVARIANT_VIOLATED,
+            f"checkpoint retries must be non-negative; got {retries}",
+            details={"retries": retries},
+        )
+    if len(completed_phases) != len(set(completed_phases)):
+        raise CodeGuardianError(
+            ErrorCode.SYS_INVARIANT_VIOLATED,
+            "checkpoint completed_phases contains duplicate phase names",
+            details={"completed_phases": list(completed_phases)},
+        )
+
+
 def write_checkpoint(
     store: SQLiteStore,
     *,
@@ -165,6 +213,13 @@ def write_checkpoint(
     """
     checkpoint_id = str(uuid.uuid4())
     created_at = _now_iso()
+
+    _validate_payload(
+        phase=phase,
+        completed_phases=completed_phases,
+        pending_phases=pending_phases,
+        retries=int(retries),
+    )
 
     state_json = json.dumps(
         {
@@ -361,6 +416,13 @@ def _row_to_checkpoint(row: Any) -> Checkpoint:
     retries = int(state_dict.get("retries", 0) or 0)
     state_payload = state_dict.get("state") or {}
     artifacts_payload = state_dict.get("artifacts") or {}
+
+    _validate_payload(
+        phase=str(row["phase"]),
+        completed_phases=completed,
+        pending_phases=pending,
+        retries=retries,
+    )
 
     return Checkpoint(
         schema_version=schema_version,

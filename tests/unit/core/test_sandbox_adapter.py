@@ -599,3 +599,119 @@ class TestAttenuatedDispatch:
         ):
             assert inner.effective.filesystem == "read_only"
             assert inner.effective.network is True
+
+    def test_trusted_read_paths_allow_reads_and_block_writes(self, tmp_path: Path) -> None:
+        sandbox = tmp_path / "sandbox"
+        trusted = tmp_path / "trusted"
+        outside = tmp_path / "outside"
+        sandbox.mkdir()
+        trusted.mkdir()
+        outside.mkdir()
+
+        trusted_file = trusted / "prompt.md"
+        trusted_file.write_text("trusted-content", encoding="utf-8")
+        outside_file = outside / "other.txt"
+        outside_file.write_text("outside-content", encoding="utf-8")
+        secret_file = trusted / ".env"
+        secret_file.write_text("API_KEY=secret", encoding="utf-8")
+
+        agent = PluginPermissions(filesystem="sandbox_only", network=False)
+        with attenuated_dispatch(
+            agent_name="writer",
+            agent_permissions=agent,
+            sandbox_root=sandbox,
+            trusted_read_paths=(trusted,),
+        ):
+            assert trusted_file.read_text(encoding="utf-8") == "trusted-content"
+            sandbox_target = sandbox / "output.txt"
+            sandbox_target.write_text("allowed", encoding="utf-8")
+            assert sandbox_target.read_text(encoding="utf-8") == "allowed"
+
+            with pytest.raises(PermissionError):
+                (trusted / "escape.txt").write_text("blocked", encoding="utf-8")
+
+            with pytest.raises(PermissionError):
+                trusted_file.unlink()
+
+            with pytest.raises(PermissionError):
+                outside_file.read_text(encoding="utf-8")
+
+            with pytest.raises(PermissionError):
+                secret_file.read_text(encoding="utf-8")
+
+    def test_trusted_read_paths_recorded_in_decision_log_and_audit(self, tmp_path: Path) -> None:
+        writer = RecordingAuditWriter()
+        agent = PluginPermissions(filesystem="sandbox_only", network=False)
+        with attenuated_dispatch(
+            agent_name="writer",
+            agent_permissions=agent,
+            sandbox_root=tmp_path,
+            trusted_read_paths=(tmp_path,),
+            audit_writer=writer,
+            run_id="run-1",
+        ) as record:
+            assert record.trusted_read_paths == (str(tmp_path),)
+            decision = record.to_decision_log_entry()
+            assert decision["attenuation"]["trusted_read_paths"] == [str(tmp_path)]
+
+        assert len(writer.entries) == 1
+        attenuation = writer.entries[0]["result"]["attenuation"]
+        assert attenuation["trusted_read_paths"] == [str(tmp_path)]
+
+
+class TestModelInferenceScope:
+    """Host-allowlisted egress enforcement during model inference."""
+
+    def test_blocks_unlisted_host_and_restores_outer_deny(self, tmp_path: Path) -> None:
+        import socket
+
+        from codeguardian.core.plugins.permissions import (
+            PluginPermissions,
+            install_audit_hook,
+            model_inference_scope,
+            plugin_active,
+        )
+
+        install_audit_hook()
+        outer = PluginPermissions(filesystem="sandbox_only", network=False, process_spawn=False)
+
+        with plugin_active("analyst", outer):
+            with pytest.raises(PermissionError):
+                socket.getaddrinfo("api.groq.com", 443)
+
+            with model_inference_scope(["api.groq.com"], provider_name="groq"):
+                with pytest.raises(PermissionError):
+                    socket.getaddrinfo("evil.example.com", 443)
+
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    with pytest.raises(PermissionError):
+                        sock.connect(("169.254.169.254", 80))
+                finally:
+                    sock.close()
+
+                with pytest.raises(PermissionError):
+                    (tmp_path / "exfil.txt").write_text("secret", encoding="utf-8")
+
+            with pytest.raises(PermissionError):
+                socket.getaddrinfo("api.groq.com", 443)
+
+    def test_allows_configured_loopback_host(self) -> None:
+        import socket
+
+        from codeguardian.core.plugins.permissions import (
+            PluginPermissions,
+            install_audit_hook,
+            model_inference_scope,
+            plugin_active,
+        )
+
+        install_audit_hook()
+        outer = PluginPermissions(filesystem="sandbox_only", network=False, process_spawn=False)
+
+        with (
+            plugin_active("analyst", outer),
+            model_inference_scope(["127.0.0.1"], provider_name="local"),
+        ):
+            resolved = socket.getaddrinfo("127.0.0.1", 11434)
+            assert resolved

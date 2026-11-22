@@ -13,8 +13,10 @@ new foreign key.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +27,7 @@ import pytest
 
 from codeguardian.core.agents._loop import GenerationResult
 from codeguardian.core.errors import CodeGuardianError, ErrorCode
+from codeguardian.core.orchestrator.cancellation import CancellationToken
 from codeguardian.core.orchestrator.checkpoint_supervisor import (
     CheckpointSupervisor,
 )
@@ -33,6 +36,7 @@ from codeguardian.core.orchestrator.deterministic_gate import (
     CheckOutcome,
     DeterministicGateResult,
 )
+from codeguardian.core.orchestrator.evidence import ToolCallFailed
 from codeguardian.core.orchestrator.langgraph_orchestrator import (
     LangGraphOrchestrator,
 )
@@ -41,12 +45,14 @@ from codeguardian.core.orchestrator.loop import (
     SlotExecution,
     run_loop,
 )
+from codeguardian.core.orchestrator.phase_graph import PhaseGraph, PhaseSlot
 from codeguardian.core.orchestrator.phase_graphs import LEGACY_GRAPH
 from codeguardian.core.orchestrator.registry import (
     AgentRegistry,
     AgentSpec,
     SlotResolver,
 )
+from codeguardian.core.orchestrator.runtime_wiring import RuntimeWiring
 from codeguardian.core.orchestrator.verifier_stack import run_verifier_stack
 from codeguardian.core.storage.migration_runner import MigrationRunner
 from codeguardian.core.storage.sqlite_store import SQLiteStore
@@ -464,7 +470,11 @@ class TestAuditChain:
                 run_id="run1",
                 audit_writer=audit_writer,
             )
-            assert len(audit_writer.entries) == 10
+            phase_entries = [e for e in audit_writer.entries if "attenuation" not in e["result"]]
+            attenuation_entries = [e for e in audit_writer.entries if "attenuation" in e["result"]]
+            assert len(phase_entries) == 10
+            assert len(attenuation_entries) == 7
+            assert len(audit_writer.entries) == 17
             assert audit_writer.verify_chain() is True
         finally:
             store.close()
@@ -581,5 +591,427 @@ class TestOrchestratorEndToEnd:
             state = orchestrator.get_state(result.run_id)
             assert len(state.completed_phases) == 10
             assert state.paused is False
+        finally:
+            store.close()
+
+
+class TestRuntimeWiringIntegration:
+    def _make_single_phase(
+        self,
+        agent: Any,
+        *,
+        slot_name: str = "writer",
+        workspace_paths: tuple[str, ...] = (),
+        agent_timeout_s: float | None = None,
+    ) -> PhaseGraph:
+        slot = PhaseSlot(
+            name=slot_name,
+            capability_tags=frozenset({"x"}),
+            workspace_paths=workspace_paths,
+            agent_timeout_s=agent_timeout_s,
+        )
+        return PhaseGraph(
+            name="t",
+            entry=slot_name,
+            slots=(slot,),
+            transitions={slot_name: (None,)},
+        )
+
+    async def _run_single(
+        self,
+        store: SQLiteStore,
+        graph: PhaseGraph,
+        agent: Any,
+        *,
+        audit_writer: Any,
+        wiring: RuntimeWiring,
+        observer: Any = None,
+        clone_root: Path,
+    ) -> Any:
+        registry = AgentRegistry()
+        registry.register(
+            AgentSpec(
+                name=graph.slots[0].name,
+                agent=agent,
+                capability_tags=frozenset({"x"}),
+            )
+        )
+
+        class _IF:
+            def build(self, _slot, _ctx):
+                return None
+
+        return await run_loop(
+            graph=graph,
+            registry=registry,
+            resolver=SlotResolver(registry),
+            store=store,
+            supervisor=CheckpointSupervisor(store),
+            audit_writer=audit_writer,
+            input_factory=_IF(),
+            run_id="run1",
+            repo_url="file:///x",
+            commit_hash="abc",
+            clone_root=clone_root,
+            side_effect_slots=frozenset(),
+            wiring=wiring,
+            observer=observer,
+        )
+
+    @pytest.mark.asyncio
+    async def test_observer_events_land_on_same_phase(self, tmp_path: Path) -> None:
+        store = open_store(tmp_path)
+        try:
+
+            class _Agent:
+                name = "writer"
+
+                async def run(self, _i):
+                    return "ok"
+
+            pushed: list[Any] = []
+
+            def observer(slot_name: str, _execution: Any, ctx: Any) -> None:
+                ev = ToolCallFailed(tool=f"obs_{slot_name}", error_code=None, reason="probe")
+                ctx.evidence_bus.push(ev)
+                pushed.append(ev)
+
+            graph = self._make_single_phase(_Agent())
+            audit = ChainAuditWriter()
+            wiring = RuntimeWiring(store=store, run_id="run1", audit_writer=audit)
+            result = await self._run_single(
+                store,
+                graph,
+                _Agent(),
+                audit_writer=audit,
+                wiring=wiring,
+                observer=observer,
+                clone_root=tmp_path,
+            )
+            assert len(pushed) == 1
+            events = result.slot_executions[0].events
+            assert len(events) == 1
+            assert getattr(events[0], "tool", "") == "obs_writer"
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_timeout_rolls_back_workspace(self, tmp_path: Path) -> None:
+        store = open_store(tmp_path)
+        try:
+            target = tmp_path / "target.txt"
+            target.write_text("original")
+
+            class _SlowAgent:
+                name = "writer"
+
+                async def run(self, _i):
+                    target.write_text("agent-wrote-this")
+                    await asyncio.sleep(10)
+                    return "never"
+
+            graph = self._make_single_phase(
+                _SlowAgent(),
+                workspace_paths=("target.txt",),
+                agent_timeout_s=0.2,
+            )
+            audit = ChainAuditWriter()
+            wiring = RuntimeWiring(store=store, run_id="run1", audit_writer=audit)
+            start = time.monotonic()
+            result = await self._run_single(
+                store,
+                graph,
+                _SlowAgent(),
+                audit_writer=audit,
+                wiring=wiring,
+                clone_root=tmp_path,
+            )
+            elapsed = time.monotonic() - start
+
+            assert result.stop_reason == "failed"
+            assert elapsed < 3.0
+            assert target.read_text() == "original"
+            failure_entries = [
+                e for e in audit.entries if e.get("result", {}).get("status") == "failure"
+            ]
+            assert len(failure_entries) == 1
+            assert "target.txt" in failure_entries[0]["result"]["rolled_back"]
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_failed_agent_rolls_back_workspace(self, tmp_path: Path) -> None:
+        store = open_store(tmp_path)
+        try:
+            target = tmp_path / "target.txt"
+            target.write_text("original")
+
+            class _WritingFailingAgent:
+                name = "writer"
+
+                async def run(self, _i):
+                    target.write_text("agent-wrote")
+                    raise CodeGuardianError(ErrorCode.SYS_INTERNAL, "simulated failure")
+
+            graph = self._make_single_phase(
+                _WritingFailingAgent(),
+                workspace_paths=("target.txt",),
+            )
+            audit = ChainAuditWriter()
+            wiring = RuntimeWiring(store=store, run_id="run1", audit_writer=audit)
+            result = await self._run_single(
+                store,
+                graph,
+                _WritingFailingAgent(),
+                audit_writer=audit,
+                wiring=wiring,
+                clone_root=tmp_path,
+            )
+            assert result.stop_reason == "failed"
+            assert target.read_text() == "original"
+            failure_entries = [
+                e for e in audit.entries if e.get("result", {}).get("status") == "failure"
+            ]
+            assert len(failure_entries) == 1
+            assert "rolled_back" in failure_entries[0]["result"]
+            assert "target.txt" in failure_entries[0]["result"]["rolled_back"]
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_new_agent_recorded_in_audit(self, tmp_path: Path) -> None:
+        store = open_store(tmp_path)
+        try:
+
+            class _CustomAgent:
+                name = "custom_agent"
+
+                async def run(self, _i):
+                    return "ok"
+
+            slot = PhaseSlot(
+                name="writer",
+                capability_tags=frozenset({"x"}),
+            )
+            graph = PhaseGraph(
+                name="t",
+                entry="writer",
+                slots=(slot,),
+                transitions={"writer": (None,)},
+            )
+            audit = ChainAuditWriter()
+            wiring = RuntimeWiring(store=store, run_id="run1", audit_writer=audit)
+
+            registry = AgentRegistry()
+            registry.register(
+                AgentSpec(
+                    name="custom_agent",
+                    agent=_CustomAgent(),
+                    capability_tags=frozenset({"x"}),
+                )
+            )
+
+            class _IF:
+                def build(self, _s, _c):
+                    return None
+
+            result = await run_loop(
+                graph=graph,
+                registry=registry,
+                resolver=SlotResolver(registry),
+                store=store,
+                supervisor=CheckpointSupervisor(store),
+                audit_writer=audit,
+                input_factory=_IF(),
+                run_id="run1",
+                repo_url="file:///x",
+                commit_hash="abc",
+                clone_root=tmp_path,
+                side_effect_slots=frozenset(),
+                wiring=wiring,
+            )
+            assert result.stop_reason == "completed"
+            phase_entries = [
+                e
+                for e in audit.entries
+                if e.get("result", {}).get("status") == "success"
+                and "attenuation" not in e.get("result", {})
+            ]
+            assert len(phase_entries) == 1
+            assert phase_entries[0]["agent"] == "custom_agent"
+            assert phase_entries[0]["agent"] != "orchestrator"
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_pause_mid_phase_cancels_agent(self, tmp_path: Path) -> None:
+        store = open_store(tmp_path)
+        try:
+
+            class _SlowAgent:
+                name = "writer"
+
+                async def run(self, _i):
+                    await asyncio.sleep(10)
+                    return "never"
+
+            graph = self._make_single_phase(_SlowAgent())
+            audit = ChainAuditWriter()
+            token = CancellationToken()
+            wiring = RuntimeWiring(
+                store=store,
+                run_id="run1",
+                audit_writer=audit,
+                cancellation_token=token,
+            )
+
+            async def cancel_soon() -> None:
+                await asyncio.sleep(0.1)
+                token.set("test pause")
+
+            cancel_task = asyncio.create_task(cancel_soon())
+            start = time.monotonic()
+            result = await self._run_single(
+                store,
+                graph,
+                _SlowAgent(),
+                audit_writer=audit,
+                wiring=wiring,
+                clone_root=tmp_path,
+            )
+            await cancel_task
+            elapsed = time.monotonic() - start
+
+            assert result.stop_reason == "paused"
+            assert elapsed < 3.0
+            rows = store.query("SELECT COUNT(*) AS c FROM checkpoints WHERE run_id = 'run1'")
+            assert rows[0]["c"] == 0
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_branched_graph_pending_correct(self) -> None:
+        from codeguardian.core.orchestrator.loop import _pending_after
+
+        graph = PhaseGraph(
+            name="branch",
+            entry="a",
+            slots=(
+                PhaseSlot(name="a"),
+                PhaseSlot(name="b"),
+                PhaseSlot(name="c"),
+                PhaseSlot(name="d"),
+            ),
+            transitions={"a": ("b", "c"), "b": ("d",), "c": ("d",), "d": (None,)},
+        )
+        after_b = _pending_after(graph, "b", ("a", "b"))
+        assert "c" not in after_b
+        assert "d" in after_b
+
+    @pytest.mark.asyncio
+    async def test_wiring_called_for_every_phase(self, tmp_path: Path) -> None:
+        store = open_store(tmp_path)
+        try:
+
+            class _SpyWiring(RuntimeWiring):
+                def __init__(self, **kwargs: Any) -> None:
+                    super().__init__(**kwargs)
+                    self.before_count = 0
+                    self.around_count = 0
+                    self.after_count = 0
+
+                def before_phase(self, slot, context):
+                    self.before_count += 1
+                    return super().before_phase(slot, context)
+
+                async def around_agent(self, *args, **kwargs):
+                    self.around_count += 1
+                    return await super().around_agent(*args, **kwargs)
+
+                async def after_phase(self, *args, **kwargs):
+                    self.after_count += 1
+                    return await super().after_phase(*args, **kwargs)
+
+            class _Agent:
+                name = "writer"
+
+                async def run(self, _i):
+                    return "ok"
+
+            graph = self._make_single_phase(_Agent())
+            audit = ChainAuditWriter()
+            wiring = _SpyWiring(store=store, run_id="run1", audit_writer=audit)
+            await self._run_single(
+                store,
+                graph,
+                _Agent(),
+                audit_writer=audit,
+                wiring=wiring,
+                clone_root=tmp_path,
+            )
+            assert wiring.before_count == 1
+            assert wiring.around_count == 1
+            assert wiring.after_count == 1
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_trusted_read_paths_enforced_and_audited(self, tmp_path: Path) -> None:
+        store = open_store(tmp_path)
+        try:
+            clone_dir = tmp_path / "clone"
+            repo_dir = tmp_path / "repo"
+            config_dir = tmp_path / "config"
+            outside_dir = tmp_path / "outside"
+            for directory in (clone_dir, repo_dir, config_dir, outside_dir):
+                directory.mkdir()
+
+            repo_prompt = repo_dir / "prompt.txt"
+            repo_prompt.write_text("prompt-data", encoding="utf-8")
+            config_file = config_dir / "settings.toml"
+            config_file.write_text("k = 1", encoding="utf-8")
+            outside_file = outside_dir / "blocked.txt"
+            outside_file.write_text("blocked", encoding="utf-8")
+
+            class _ProbeAgent:
+                name = "writer"
+
+                async def run(self, _i: Any) -> str:
+                    assert repo_prompt.read_text(encoding="utf-8") == "prompt-data"
+                    assert config_file.read_text(encoding="utf-8") == "k = 1"
+                    (clone_dir / "patch.py").write_text("x = 1\n", encoding="utf-8")
+                    with pytest.raises(PermissionError):
+                        (repo_dir / "escape.py").write_text("bad\n", encoding="utf-8")
+                    with pytest.raises(PermissionError):
+                        outside_file.read_text(encoding="utf-8")
+                    return "ok"
+
+            graph = self._make_single_phase(_ProbeAgent())
+            audit = ChainAuditWriter()
+            wiring = RuntimeWiring(
+                store=store,
+                run_id="run1",
+                audit_writer=audit,
+                repo_root=repo_dir,
+                config_home=config_dir,
+            )
+            result = await self._run_single(
+                store,
+                graph,
+                _ProbeAgent(),
+                audit_writer=audit,
+                wiring=wiring,
+                clone_root=clone_dir,
+            )
+            assert result.stop_reason == "completed"
+            granted_entries = [
+                entry["result"]["attenuation"]["trusted_read_paths"]
+                for entry in audit.entries
+                if "attenuation" in entry.get("result", {})
+                and "trusted_read_paths" in entry["result"]["attenuation"]
+            ]
+            assert granted_entries
+            assert str(repo_dir.resolve()) in granted_entries[0]
+            assert str(config_dir.resolve()) in granted_entries[0]
         finally:
             store.close()
